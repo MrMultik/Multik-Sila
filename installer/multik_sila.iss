@@ -20,7 +20,7 @@ AppId={{8F3A9C21-4B7E-4D62-9E15-2A6C8D5F1B03}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher=Multik Sila
-DefaultDirName={autopf}\Multik Sila
+DefaultDirName={localappdata}\Programs\Multik Sila
 DefaultGroupName=Multik Sila
 DisableProgramGroupPage=yes
 OutputDir=output
@@ -28,10 +28,13 @@ OutputBaseFilename=MultikSila-{#AppVersion}-setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-; Ставим в Program Files, поэтому нужны права администратора. Само приложение
-; при этом работает и без них — они требуются только TUN-режиму, и он
-; запрашивает их отдельно, перезапуская приложение.
-PrivilegesRequired=admin
+; Ставим в профиль пользователя, а НЕ в Program Files. Причина проверена на
+; живой установке: приложение хранит рабочие файлы (конфиги ядра, лог, наборы
+; правил, мосты) рядом с собой, а в Program Files без прав администратора
+; писать нельзя — config.json не создавался, и ядро не стартовало вообще.
+; Заодно установка перестала требовать UAC, а автообновление ядер получило
+; право заменить .exe ядра на месте.
+PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
 UninstallDisplayIcon={app}\{#AppExeName}
@@ -47,8 +50,19 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-; Вся release-сборка целиком: exe, dll движка и плагинов, папка data и оба ядра.
-Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Само приложение: перезаписываем ВСЕГДА и без оглядки на версии файлов —
+; при обновлении поверх старой установки должны замениться и exe, и dll,
+; и содержимое data (там лежат ассеты сборки, включая наборы правил).
+Source: "{#BuildDir}\*"; DestDir: "{app}"; Excludes: "sing-box.exe,xray.exe"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs
+
+; Ядра — ТОЛЬКО если их ещё нет. Приложение обновляет их само, и к моменту
+; следующей установки на машине вполне может лежать версия новее той, что
+; вшита в дистрибутив. С ignoreversion установщик молча откатил бы ядро
+; назад, а автообновление потом не подняло бы его обратно: оно обновляет
+; только вперёд по версии.
+Source: "{#BuildDir}\sing-box.exe"; DestDir: "{app}"; Flags: onlyifdoesntexist
+Source: "{#BuildDir}\xray.exe"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
@@ -75,6 +89,9 @@ Type: files; Name: "{app}\xray.exe.bak"
 Type: filesandordirs; Name: "{app}\rulesets"
 Type: filesandordirs; Name: "{app}\update_staging"
 Type: dirifempty; Name: "{app}"
+; Если папка установки оказалась недоступна на запись (например, приложение
+; всё-таки поставили в Program Files), рабочие файлы уходят сюда — чистим и там.
+Type: filesandordirs; Name: "{userappdata}\Multik Sila"
 
 [Code]
 // Перед установкой и перед удалением приложение должно быть закрыто: иначе

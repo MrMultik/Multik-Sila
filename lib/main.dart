@@ -17,9 +17,68 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
+// Замок «одна копия приложения». Порт на петле, а не мьютекс: копии могут
+// работать с РАЗНЫМИ правами (обычная и перезапущенная от администратора для
+// TUN), а именованный мьютекс между уровнями целостности так просто не виден.
+// TCP на 127.0.0.1 виден всем и заодно даёт канал: вторая копия стучится в
+// него, первая по этому стуку показывает своё окно и выходит вторая.
+//
+// Зачем вообще: две копии дерутся за порт 1337, Clash API, файлы конфигов,
+// системный прокси и TUN-адаптер. Пользователь поймал именно это — два окна,
+// в одном «Protected», в другом «Not protected».
+const int kSingleInstancePort = 17999;
+ServerSocket? _instanceLock;
+
+Future<bool> _claimSingleInstance() async {
+  // Несколько попыток: при перезапуске от администратора старая копия ещё
+  // закрывается, и порт освобождается не мгновенно. Без ретраев новая копия
+  // решила бы, что «уже запущено», и вышла — приложение исчезло бы совсем.
+  for (var attempt = 0; attempt < 12; attempt++) {
+    try {
+      _instanceLock =
+          await ServerSocket.bind(InternetAddress.loopbackIPv4, kSingleInstancePort);
+      _instanceLock!.listen((socket) async {
+        socket.destroy();
+        try {
+          await windowManager.show();
+          await windowManager.focus();
+        } catch (_) {}
+      });
+      return true;
+    } catch (_) {
+      // Занято — стучимся: если там живая копия, она покажет окно.
+      try {
+        final s = await Socket.connect(InternetAddress.loopbackIPv4, kSingleInstancePort,
+            timeout: const Duration(milliseconds: 400));
+        s.destroy();
+        return false; // достучались, значит копия действительно работает
+      } catch (_) {
+        // Порт занят, но никто не отвечает — вероятно, прошлая копия ещё
+        // не отпустила сокет. Ждём и пробуем снова.
+        await Future.delayed(const Duration(milliseconds: 300));
+      }
+    }
+  }
+  // Не смогли ни занять, ни достучаться — запускаемся, это лучше, чем
+  // не запуститься вовсе.
+  return true;
+}
+
+/// Отпустить замок перед намеренным перезапуском самих себя.
+Future<void> releaseSingleInstanceLock() async {
+  try {
+    await _instanceLock?.close();
+  } catch (_) {}
+  _instanceLock = null;
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
+  if (!await _claimSingleInstance()) {
+    // Окно уже показала работающая копия — тихо уходим.
+    exit(0);
+  }
   // Перехватываем закрытие окна сами — иначе крестик убьёт процесс вместе с
   // ядром, а нам нужно свернуть в трей и продолжить держать соединение.
   await windowManager.setPreventClose(true);
@@ -1488,6 +1547,10 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // приложение целиком с правами администратора.
   Future<void> _restartElevated() async {
     final exePath = Platform.resolvedExecutable;
+    // Отпускаем замок ДО запуска новой копии: иначе она упрётся в занятый
+    // порт, решит, что приложение уже работает, и выйдет — а мы следом
+    // закроемся сами, и на экране не останется ничего.
+    await releaseSingleInstanceLock();
     final result = await Process.run(
       'powershell',
       ['-NoProfile', '-Command', "Start-Process -FilePath '$exePath' -Verb RunAs"],
@@ -1894,7 +1957,7 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // распаковываем РЯДОМ в update_staging, а подменяет папку внешний .bat уже
   // после выхода приложения — он же и запускает новую версию. Тот же принцип,
   // что с ядрами (<файл>.new), только применение вынесено наружу.
-  String get _stagingDir => '$_appDir${Platform.pathSeparator}update_staging';
+  String get _stagingDir => '$_workDir${Platform.pathSeparator}update_staging';
 
   /// Забирает манифест и возвращает (версия, ссылка на zip), если там что-то
   /// новее установленного. Формат манифеста намеренно простой:
@@ -1967,8 +2030,8 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   /// сборки, накатывает новую и запускает её. Затем выходит из приложения.
   Future<void> _applyAppUpdateAndRestart() async {
     final exe = Platform.resolvedExecutable;
-    final batPath = '$_appDir${Platform.pathSeparator}apply_update.bat';
-    final backup = '$_appDir${Platform.pathSeparator}backup_$kAppVersion';
+    final batPath = '$_workDir${Platform.pathSeparator}apply_update.bat';
+    final backup = '$_workDir${Platform.pathSeparator}backup_$kAppVersion';
     // pid — из dart:io, идентификатор текущего процесса: .bat должен ждать
     // именно нас, а не любой процесс с тем же именем.
     final ownPid = pid;
@@ -2371,7 +2434,7 @@ del "%~f0"
   // хранит содержимое рядом с .exe, а в url кладёт путь со схемой file:.
   // Так весь остальной код — загрузка, обновление, переключение — работает
   // с ним ровно как с обычной подпиской, без отдельной ветки.
-  String _localProfilePath(String id) => '$_appDir${Platform.pathSeparator}profile_$id.txt';
+  String _localProfilePath(String id) => '$_workDir${Platform.pathSeparator}profile_$id.txt';
 
   // Профиль по обычной ссылке подписки. Вынесено из диалога, потому что
   // тем же путём заводится профиль из QR-кода.
@@ -2740,11 +2803,47 @@ del "%~f0"
   // Рабочий каталог процесса не гарантированно совпадает с папкой .exe
   // (например, при запуске не из папки проекта) — поэтому и sing-box.exe,
   // и config.json резолвим относительно реального пути исполняемого файла.
+  /// Папка, где лежат САМИ ядра. Только чтение — их кладёт установщик.
   String get _appDir => File(Platform.resolvedExecutable).parent.path;
+
+  /// Папка для РАБОЧИХ файлов: конфиги ядра, лог, наборы правил, мосты.
+  ///
+  /// Раньше всё это писалось рядом с .exe, и после установки в Program Files
+  /// приложение молча переставало работать: без прав администратора туда
+  /// писать нельзя, config.json не создавался, ядро не стартовало вовсе.
+  /// Симптом со стороны: «включаю — Not protected, ничего не происходит»,
+  /// причём в TUN-режиме всё работало (там процесс уже elevated).
+  ///
+  /// Поэтому: если рядом с .exe писать можно (портативный запуск, сборка из
+  /// исходников) — работаем там, как раньше. Если нельзя — уходим в
+  /// %APPDATA%\Multik Sila, куда права есть всегда.
+  static String? _workDirCache;
+  String get _workDir {
+    final cached = _workDirCache;
+    if (cached != null) return cached;
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    try {
+      final probe = File('$exeDir${Platform.pathSeparator}.write_test');
+      probe.writeAsStringSync('x', flush: true);
+      probe.deleteSync();
+      _workDirCache = exeDir;
+      return exeDir;
+    } catch (_) {
+      final appData = Platform.environment['APPDATA'] ??
+          Platform.environment['LOCALAPPDATA'] ??
+          exeDir;
+      final dir = '$appData${Platform.pathSeparator}Multik Sila';
+      try {
+        Directory(dir).createSync(recursive: true);
+      } catch (_) {}
+      _workDirCache = dir;
+      return dir;
+    }
+  }
 
   String get _singBoxPath => '$_appDir${Platform.pathSeparator}sing-box.exe';
 
-  String get _configPath => '$_appDir${Platform.pathSeparator}config.json';
+  String get _configPath => '$_workDir${Platform.pathSeparator}config.json';
 
   String get _xrayPath => '$_appDir${Platform.pathSeparator}xray.exe';
 
@@ -2752,7 +2851,7 @@ del "%~f0"
   // через Диспетчер задач (например, TUN-режим что-то подвесил и UI не
   // достучаться) — поэтому дублируем всё в файл рядом с .exe, с флашем
   // на каждой строке, чтобы данные точно попали на диск даже при жёстком килле.
-  String get _logFilePath => '$_appDir${Platform.pathSeparator}app_log.txt';
+  String get _logFilePath => '$_workDir${Platform.pathSeparator}app_log.txt';
 
   void _appendLog(String text) {
     final line = '[${DateTime.now().toIso8601String()}] $text';
@@ -2772,11 +2871,11 @@ del "%~f0"
     } catch (_) {}
   }
 
-  String get _xrayConfigPath => '$_appDir${Platform.pathSeparator}xray_config.json';
+  String get _xrayConfigPath => '$_workDir${Platform.pathSeparator}xray_config.json';
 
   // У каждого постоянного моста TUN-режима свой файл конфига — процессы
   // теперь работают одновременно, общий файл конфига им не подходит.
-  String _xrayBridgeConfigPath(String tag) => '$_appDir${Platform.pathSeparator}xray_bridge_$tag.json';
+  String _xrayBridgeConfigPath(String tag) => '$_workDir${Platform.pathSeparator}xray_bridge_$tag.json';
 
   // Порт локального моста: в TUN-режиме xhttp-серверы (движок Xray, который
   // TUN не умеет вообще) идут через отдельный headless-Xray на этом порту,
@@ -2793,7 +2892,7 @@ del "%~f0"
     return _xrayBridgeBasePort + (index >= 0 ? index : 0);
   }
 
-  String get _ruleSetDir => '$_appDir${Platform.pathSeparator}rulesets';
+  String get _ruleSetDir => '$_workDir${Platform.pathSeparator}rulesets';
 
   String _ruleSetPath(RuleSetSpec rs) => '$_ruleSetDir${Platform.pathSeparator}${rs.file}';
 
@@ -4048,7 +4147,7 @@ del "%~f0"
     if (xray.isNotEmpty) await _testXrayLatencies(xray);
     if (singbox.isEmpty) return;
 
-    final probeConfigPath = '$_appDir${Platform.pathSeparator}singbox_probe.json';
+    final probeConfigPath = '$_workDir${Platform.pathSeparator}singbox_probe.json';
     final tags = singbox.map((s) => s.outbound['tag'] as String).toList();
     final config = {
       "log": {"level": "warn"},
@@ -4110,7 +4209,7 @@ del "%~f0"
   Future<void> _testSingboxLatencies(List<ParsedServer> servers) async {
     const probePort = 17390;
     const probeApiPort = 17391;
-    final probeConfigPath = '$_appDir${Platform.pathSeparator}singbox_probe.json';
+    final probeConfigPath = '$_workDir${Platform.pathSeparator}singbox_probe.json';
     final tags = servers.map((s) => s.outbound['tag'] as String).toList();
 
     final selector = {
@@ -4171,7 +4270,7 @@ del "%~f0"
 
   Future<void> _testXrayLatencies(List<ParsedServer> servers) async {
     const probePort = 17392;
-    final probeConfigPath = '$_appDir${Platform.pathSeparator}xray_probe.json';
+    final probeConfigPath = '$_workDir${Platform.pathSeparator}xray_probe.json';
     final testUrl = _settings.latencyUrl;
     final reqTimeout = Duration(milliseconds: _settings.latencyTimeoutMs + 1000);
 
