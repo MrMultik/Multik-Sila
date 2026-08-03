@@ -79,3 +79,8 @@ app_log.txt*
 rulesets/
 update_staging/
 backup_*/
+
+# Сборщик установщика и готовые установщики: инструмент тянется отдельно,
+# а собранный setup.exe весит 40 МБ и его место в GitHub Releases, не в git.
+/tools/
+/installer/output/

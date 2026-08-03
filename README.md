@@ -1,66 +1,87 @@
 # Multik Sila
 
-VPN-клиент для Windows на Flutter — графическая оболочка поверх ядер
-[sing-box](https://github.com/SagerNet/sing-box) и [Xray-core](https://github.com/XTLS/Xray-core).
-Поддерживает VLESS, VMess, Trojan и Hysteria2, системный VPN через TUN-адаптер
-и раздельное туннелирование.
+A VPN client for Windows built with Flutter — a graphical front end for the
+[sing-box](https://github.com/SagerNet/sing-box) and [Xray-core](https://github.com/XTLS/Xray-core)
+engines. Supports VLESS, VMess, Trojan and Hysteria2, system-wide VPN through a
+TUN adapter, and split tunnelling.
 
-## Возможности
+## Features
 
-- **Подписки**: по ссылке, из файла, вставкой текста или QR-кодом. Автообновление
-  по интервалу, который присылает сама панель.
-- **TUN-режим** — системный VPN: весь трафик машины идёт через туннель, настраивать
-  прокси в программах не нужно. Требует прав администратора.
-- **Обычный режим** — локальный прокси плюс автоматическая настройка системного
-  прокси Windows (прежнее значение сохраняется и возвращается при остановке).
-- **Раздельное туннелирование**: российские сайты напрямую, остальное через VPN.
-  Работает на готовых наборах правил GeoSite/GeoIP, они вшиты в приложение —
-  интернет для первого запуска не нужен.
-- **Свои правила** маршрутизации: по доменам, адресам, популярным сервисам
-  и по отдельным программам (правило привязано к пути `.exe`).
-- **Блокировка рекламы и трекеров** отдельным набором правил.
-- **Тест задержки** и автовыбор самого быстрого сервера при подключении.
-- **Статистика**: скорость, график за минуту, активные соединения, топ хостов.
-- **Диагностика**: пошаговая проверка от локального порта до внешнего IP,
-  таблица сетевых интерфейсов и маршрутов, просмотр конфигов ядра.
-- **Автообновление ядер** с проверкой: скачанное ядро обязано запуститься,
-  назвать версию новее установленной и принять текущий конфиг — иначе
-  обновление отменяется.
-- Тонкие настройки: DNS (в том числе FakeIP, hosts, ECS), MUX, фрагментация TLS,
-  NTP, режим IPv6, параметры TUN-адаптера, автозапуск с системой.
-- Русский и английский интерфейс, светлая и тёмная темы.
+- **Subscriptions**: by link, from a file, by pasting text, or from a QR code.
+  Auto-refresh on the interval reported by the panel itself.
+- **TUN mode** — system-wide VPN: all traffic from the machine goes through the
+  tunnel, no need to configure a proxy in each program. Requires administrator rights.
+- **Regular mode** — a local proxy plus automatic Windows system-proxy setup
+  (the previous value is saved and restored when you disconnect).
+- **Split tunnelling**: local sites go direct, everything else through the VPN.
+  Driven by GeoSite/GeoIP rule sets that ship inside the app — no internet
+  connection is needed for the first run.
+- **Custom routing rules**: by domain, by address, for popular services, and for
+  individual programs (the rule is bound to the `.exe` path, not the process name).
+- **Ad and tracker blocking** through a separate rule set.
+- **Latency test** and automatic selection of the fastest server on connect.
+- **Statistics**: live speed, a one-minute chart, active connections, top hosts.
+- **Diagnostics**: step-by-step checks from the local port to the external IP,
+  a table of network interfaces and routes, and a viewer for the generated core configs.
+- **Automatic core updates** with verification: a downloaded core must start,
+  report a version newer than the installed one, and accept the current config —
+  otherwise the update is cancelled.
+- Fine-grained settings: DNS (including FakeIP, hosts, ECS), MUX, TLS fragmentation,
+  NTP, IPv6 mode, TUN adapter parameters, start with Windows.
+- Russian and English interface, light and dark themes.
 
-## Сборка
+## Why two engines
 
-Нужен Flutter SDK (стабильный канал) и Visual Studio с рабочей нагрузкой
-«Разработка классических приложений на C++».
+sing-box provides native TUN support and serves as the main engine. It does not
+support the `xhttp` transport at all, so servers using it are handled by Xray:
+in regular mode Xray hosts the local proxy itself, and in TUN mode each such
+server gets its own SOCKS5 bridge while sing-box still does all the routing.
+
+## Building from source
+
+You need the Flutter SDK (stable channel) and Visual Studio with the
+"Desktop development with C++" workload.
 
 ```
 flutter pub get
 flutter build windows --release
 ```
 
-## Ядра
+### Engines
 
-Исполняемые файлы ядер в репозитории **не хранятся** — это чужие сборки, и вместе
-они весят около 90 МБ. Положите рядом с `.exe` приложения:
+Engine executables are **not stored in this repository** — they are third-party
+builds and together weigh about 90 MB. Place them next to the application `.exe`:
 
-- `sing-box.exe` — [релизы SagerNet/sing-box](https://github.com/SagerNet/sing-box/releases),
-  сборка `windows-amd64`;
-- `xray.exe` — [релизы XTLS/Xray-core](https://github.com/XTLS/Xray-core/releases),
-  архив `Xray-windows-64.zip`.
+- `sing-box.exe` — [SagerNet/sing-box releases](https://github.com/SagerNet/sing-box/releases),
+  the `windows-amd64` build;
+- `xray.exe` — [XTLS/Xray-core releases](https://github.com/XTLS/Xray-core/releases),
+  the `Xray-windows-64.zip` archive.
 
-Дальше приложение обновляет их само (настройка «Обновлять ядра самому»).
+After that the app keeps them up to date on its own (the "Update cores
+automatically" setting).
 
-## Зачем два ядра
+### Building the installer
 
-sing-box умеет нативный TUN и служит основным ядром. Транспорт `xhttp` он не
-поддерживает вовсе, поэтому серверы с таким транспортом поднимаются через Xray:
-в обычном режиме он держит локальный прокси сам, в TUN-режиме для каждого такого
-сервера работает отдельный SOCKS5-мост, а маршрутизацией по-прежнему занимается
-sing-box.
+Requires [Inno Setup 6](https://jrsoftware.org/isdl.php):
 
-## Лицензии
+```
+flutter build windows --release
+ISCC.exe installer\multik_sila.iss
+```
 
-Приложение распространяется как есть. Ядра — самостоятельные проекты со своими
-лицензиями: sing-box и Xray-core.
+The result lands in `installer\output\`.
+
+## Licence
+
+The application is provided as is. The engines are independent projects with
+their own licences: sing-box and Xray-core.
+
+---
+
+## Download
+
+**[Download the installer for Windows →](https://github.com/MrMultik/Multik-Sila/releases/latest)**
+
+A regular installer: it puts the app into Program Files, creates shortcuts and
+registers an uninstaller. Both engines are already inside — nothing else to
+download. Windows 10 or newer, 64-bit.
