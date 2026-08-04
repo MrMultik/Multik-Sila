@@ -32,6 +32,20 @@ import 'package:window_manager/window_manager.dart';
 const int kSingleInstancePort = 17999;
 ServerSocket? _instanceLock;
 
+/// Команда, по которой приложение закрывается ШТАТНО — с остановкой ядра,
+/// возвратом системного прокси и снятием TUN-адаптера.
+const String kQuitCommand = 'quit';
+
+/// Штатный выход, выставляется главным экраном. Нужен установщику: тот не может
+/// просто убить процесс. Во-первых, приложение в TUN-режиме работает от
+/// администратора, а установщик — от обычного пользователя (`PrivilegesRequired=lowest`),
+/// и Windows такой taskkill запрещает. Во-вторых, убийство оставило бы в системе
+/// подменённый прокси и осиротевшие процессы ядра, держащие порт и адаптер.
+///
+/// Канал — тот же сокет одной копии: он на петле, а не в реестре и не в
+/// мьютексе, поэтому доступен между разными уровнями целостности.
+Future<void> Function()? appQuitHandler;
+
 Future<bool> _claimSingleInstance() async {
   // Несколько попыток: при перезапуске от администратора старая копия ещё
   // закрывается, и порт освобождается не мгновенно. Без ретраев новая копия
@@ -41,7 +55,30 @@ Future<bool> _claimSingleInstance() async {
       _instanceLock =
           await ServerSocket.bind(InternetAddress.loopbackIPv4, kSingleInstancePort);
       _instanceLock!.listen((socket) async {
+        // Читаем, ЧТО пришло: пустой стук (вторая копия) означает «покажи
+        // окно», строка `quit` — «закройся по-нормальному». Без чтения
+        // отличить их нельзя, а установщику нужен именно второй случай.
+        // Таймаут короткий: вторая копия обычно просто рвёт соединение,
+        // и ждать её нечего.
+        var command = '';
+        try {
+          final data = await socket
+              .fold<List<int>>(<int>[], (acc, chunk) => acc..addAll(chunk))
+              .timeout(const Duration(milliseconds: 700), onTimeout: () => <int>[]);
+          command = String.fromCharCodes(data).trim();
+        } catch (_) {}
         socket.destroy();
+        if (command == kQuitCommand) {
+          final quit = appQuitHandler;
+          if (quit != null) {
+            await quit();
+          } else {
+            // Экран ещё не поднялся — уборке нечего делать, но уйти обязаны:
+            // иначе установщик упрётся в занятый .exe.
+            exit(0);
+          }
+          return;
+        }
         try {
           await windowManager.show();
           await windowManager.focus();
@@ -1453,6 +1490,10 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     } catch (_) {}
     windowManager.addListener(this);
     trayManager.addListener(this);
+    // Отдаём установщику способ закрыть нас по-человечески: с остановкой ядра,
+    // возвратом системного прокси и снятием TUN. Убить процесс он не может —
+    // в TUN-режиме мы работаем от администратора, а он от пользователя.
+    appQuitHandler = _quitApp;
     _loadTunPreference();
     _loadProfiles();
     _initTray();
@@ -5365,7 +5406,7 @@ del "%~f0"
 // Версия приложения. Держится тут, а не читается пакетом package_info_plus:
 // ради одной строки тянуть зависимость незачем. МЕНЯТЬ ВМЕСТЕ с полем
 // `version:` в pubspec.yaml — они не связаны автоматически.
-const String kAppVersion = '1.0.2';
+const String kAppVersion = '1.0.0';
 
 // Блок «О программе»: версии приложения и обоих ядер, ручная проверка
 // обновлений и пути, которые спрашивают первыми, когда что-то не работает.

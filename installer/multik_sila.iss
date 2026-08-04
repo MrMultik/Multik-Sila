@@ -9,7 +9,7 @@
 ; автоматически, и разъехавшиеся номера сломают самообновление приложения.
 
 #define AppName "Multik Sila"
-#define AppVersion "1.0.2"
+#define AppVersion "1.0.0"
 #define AppExeName "proxy_app_test.exe"
 #define BuildDir "..\build\windows\x64\runner\Release"
 
@@ -111,11 +111,32 @@ Type: dirifempty; Name: "{app}"
 ; всё-таки поставили в Program Files), рабочие файлы уходят сюда — чистим и там.
 Type: filesandordirs; Name: "{userappdata}\Multik Sila"
 
+[CustomMessages]
+; Сообщения кода — через CustomMessages, а не строками в [Code]: установщик
+; двуязычный, и зашитый русский текст английский пользователь просто не поймёт.
+russian.AppRunningAsk=Multik Sila сейчас запущена.%n%nЗакрыть её и продолжить установку?%n%nПриложение завершится штатно: соединение будет разорвано, системные настройки сети возвращены на место.
+russian.AppRunningManual=Не удалось закрыть Multik Sila автоматически.%n%nЗакройте её вручную через меню в трее (правая кнопка по значку — «Выход») и запустите установку заново.
+russian.AppRunningUninstall=Multik Sila сейчас запущена. Закройте её через меню в трее (правая кнопка по значку — «Выход») и повторите удаление.
+russian.RemovingOld=Удаление предыдущей версии...
+english.AppRunningAsk=Multik Sila is currently running.%n%nClose it and continue with the installation?%n%nThe app will shut down properly: the connection will be dropped and the system network settings restored.
+english.AppRunningManual=Multik Sila could not be closed automatically.%n%nPlease close it manually from the tray menu (right-click the icon and choose Exit), then run the installer again.
+english.AppRunningUninstall=Multik Sila is currently running. Close it from the tray menu (right-click the icon and choose Exit), then run the uninstaller again.
+english.RemovingOld=Removing the previous version...
+
 [Code]
-// Перед установкой и перед удалением приложение должно быть закрыто: иначе
-// файлы заняты, а в TUN-режиме на машине останется поднятый адаптер и
-// подменённый системный прокси. Просим закрыть, а не убиваем: у работающего
-// приложения есть корректный выход, который возвращает настройки системы.
+// Приложение обязано быть закрыто до установки: файлы заняты, а в TUN-режиме
+// на машине остаётся поднятый адаптер и подменённый системный прокси.
+//
+// Убить процесс установщик НЕ МОЖЕТ и не должен. Не может — потому что в
+// TUN-режиме приложение работает от администратора, а установщик от обычного
+// пользователя (PrivilegesRequired=lowest), и Windows такой taskkill
+// запрещает. Не должен — потому что убийство оставит систему с подменённым
+// прокси и осиротевшими процессами ядра, которые держат порт и TUN-адаптер.
+//
+// Поэтому просим само приложение закрыться: стучимся в его сокет одной копии
+// (127.0.0.1:17999) командой `quit`. Сокет на петле, поэтому доступен и через
+// границу уровней целостности, а приложение по этой команде делает штатный
+// выход — останавливает ядро и возвращает настройки сети.
 function IsAppRunning(): Boolean;
 var
   ResultCode: Integer;
@@ -126,12 +147,73 @@ begin
     Result := (ResultCode = 0);
 end;
 
+// Возвращает True, если приложение закрылось. Ждём до 20 секунд: штатный
+// выход останавливает ядро, снимает мосты и возвращает прокси — это не
+// мгновенно, а рвать его на половине хуже, чем подождать.
+function AskAppToQuit(): Boolean;
+var
+  ResultCode, I: Integer;
+begin
+  Exec('powershell.exe',
+       '-NoProfile -WindowStyle Hidden -Command "try { $c = New-Object Net.Sockets.TcpClient(''127.0.0.1'', 17999);' +
+       ' $b = [Text.Encoding]::ASCII.GetBytes(''quit''); $c.GetStream().Write($b, 0, $b.Length);' +
+       ' $c.GetStream().Flush(); $c.Close() } catch {}"',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  for I := 0 to 39 do
+  begin
+    if not IsAppRunning() then
+    begin
+      Result := True;
+      Exit;
+    end;
+    Sleep(500);
+  end;
+  Result := False;
+end;
+
+// Полное удаление прошлой версии перед установкой новой, а не перезапись
+// поверх. Перезапись оставляет файлы, которых в новой сборке уже нет, и они
+// продолжают лежать в папке годами. Профили и настройки лежат в
+// %APPDATA%\com.example\proxy_app_test — деинсталлятор туда не заходит, так
+// что подписка переживает удаление.
+procedure RemovePreviousVersion();
+var
+  UninstallString: String;
+  ResultCode: Integer;
+begin
+  // Ключ = AppId + "_is1". AppId прописан в [Setup] как {{8F3A...} — двойная
+  // скобка там это экранирование, реальное значение с одной. Внутри Паскаля
+  // подстановки констант нет, поэтому пишем как есть.
+  if not RegQueryStringValue(HKCU,
+      'Software\Microsoft\Windows\CurrentVersion\Uninstall\{8F3A9C21-4B7E-4D62-9E15-2A6C8D5F1B03}_is1',
+      'UninstallString', UninstallString) then
+    Exit;
+  UninstallString := RemoveQuotes(UninstallString);
+  if not FileExists(UninstallString) then
+    Exit;
+  WizardForm.StatusLabel.Caption := ExpandConstant('{cm:RemovingOld}');
+  Exec(UninstallString, '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(1000);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
   if IsAppRunning() then
-    Result := 'Multik Sila сейчас запущена. Закройте её через меню в трее' + #13#10 +
-              '(правая кнопка по значку — «Выход») и повторите установку.';
+  begin
+    if MsgBox(ExpandConstant('{cm:AppRunningAsk}'), mbConfirmation, MB_YESNO) <> IDYES then
+    begin
+      Result := ExpandConstant('{cm:AppRunningManual}');
+      Exit;
+    end;
+    if not AskAppToQuit() then
+    begin
+      Result := ExpandConstant('{cm:AppRunningManual}');
+      Exit;
+    end;
+  end;
+  RemovePreviousVersion();
 end;
 
 function InitializeUninstall(): Boolean;
@@ -139,9 +221,11 @@ begin
   Result := True;
   if IsAppRunning() then
   begin
-    MsgBox('Multik Sila сейчас запущена. Закройте её через меню в трее' + #13#10 +
-           '(правая кнопка по значку — «Выход») и повторите удаление.',
-           mbError, MB_OK);
-    Result := False;
+    if MsgBox(ExpandConstant('{cm:AppRunningAsk}'), mbConfirmation, MB_YESNO) = IDYES then
+      Result := AskAppToQuit()
+    else
+      Result := False;
+    if not Result then
+      MsgBox(ExpandConstant('{cm:AppRunningUninstall}'), mbError, MB_OK);
   end;
 end;
