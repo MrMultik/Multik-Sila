@@ -133,6 +133,16 @@ const Map<String, Map<String, String>> _strings = {
   // --- Главный экран ---
   'home.protectedOn': {'ru': 'Защита включена', 'en': 'Protected'},
   'home.protectedOff': {'ru': 'Защита выключена', 'en': 'Not protected'},
+  // Формулировка намеренно называет, ЧТО не покрыто, а не «работает не всегда».
+  // Расплывчатое предупреждение человек пролистывает, конкретное — проверяет.
+  'home.proxyModeCoverage': {
+    'ru': 'Обычный режим подменяет системный прокси: через VPN идут браузеры и '
+        'программы, которые его читают. Игры и часть приложений ходят напрямую. '
+        'Для всего трафика включите TUN.',
+    'en': 'Normal mode replaces the system proxy: browsers and apps that honour '
+        'it go through the VPN. Games and some apps connect directly. '
+        'Turn on TUN to cover all traffic.',
+  },
   'home.connect': {'ru': 'Подключить VPN', 'en': 'Connect VPN'},
   'home.disconnect': {'ru': 'Отключить VPN', 'en': 'Disconnect VPN'},
   'home.noData': {'ru': 'Нет данных', 'en': 'No data'},
