@@ -12,6 +12,9 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:archive/archive.dart';
 import 'diagnostics.dart';
 import 'l10n.dart';
+import 'onboarding.dart';
+import 'prefs_keys.dart';
+import 'system_proxy.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tray_manager/tray_manager.dart';
@@ -435,9 +438,38 @@ class AppSettings {
     this.muxPadding = false,
     // Значения по умолчанию покрывают петлю, локальные имена и все частные
     // подсети — то, что заведомо не должно ходить через VPN.
-    this.proxyBypassList =
-        '<-loopback>;<local>;localhost;*.local;127.*;10.*;172.16.*;172.17.*;'
-        '172.18.*;172.19.*;172.2*;172.30.*;172.31.*;192.168.*',
+    //
+    // ТОКЕНА `<-loopback>` ЗДЕСЬ БЫТЬ НЕ ДОЛЖНО. Он выглядит как «исключить
+    // петлю», а означает ровно обратное: минус отменяет встроенное правило
+    // Windows «localhost мимо прокси» и загоняет петлевой трафик В ТУННЕЛЬ.
+    // Это тот токен, который советуют добавлять, когда петлю надо ПЕРЕХВАТИТЬ
+    // (например, снифферам). Пока системный прокси фактически не включался,
+    // строка лежала мёртвым грузом; как только включение заработало, через
+    // туннель пошло общение программ с их же локальными службами — снаружи
+    // это выглядит как «приложение вдруг перестало видеть свой сервер».
+    //
+    // IPv6-петлю (`::1`, `[::1]`) сюда ПИСАТЬ НЕЛЬЗЯ, хотя и хочется:
+    // WinINET такой записи не принимает и отвергает ВЕСЬ набор опций целиком —
+    // `InternetSetOption` возвращает отказ, и прокси не включается вовсе.
+    // Наружу это вышло как «Chrome работает, а всё остальное нет»: плоские
+    // значения реестра Chromium читает сам, а WinINET остаётся на «прямом
+    // подключении». Отдельные записи для петли и не нужны: как только из
+    // списка убран `<-loopback>`, Windows освобождает петлю сама, оба семейства.
+    //
+    // Каждая восьмёрка 172.16–172.31 выписана отдельной строкой. Сокращения
+    // вида `172.2*` здесь НЕЛЬЗЯ: маска WinINET сравнивает текст, и `172.2*`
+    // ловит не только частные 172.20–172.29, но и вполне публичные 172.2xx —
+    // в том числе 172.217.*.* и 172.253.*.* (Google/YouTube) и 172.224.*.*
+    // (Akamai). Всё, к чему обращаются по голому IP из этих диапазонов, тихо
+    // уходило мимо туннеля.
+    // Список намеренно отличается от заведомо рабочего ровно двумя вещами:
+    // убран `<-loopback>` и развёрнута маска `172.2*`. Ничего «заодно» сюда
+    // добавлять нельзя — каждая новая запись это риск, что WinINET отвергнет
+    // набор целиком, а отказ у него молчаливый (см. историю с `::1`).
+    this.proxyBypassList = '<local>;localhost;*.local;127.*;10.*;'
+        '172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;'
+        '172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;'
+        '172.30.*;172.31.*;192.168.*',
     this.autoRestartCore = true,
     this.dnsFakeIp = false,
     this.dnsHijack = true,
@@ -655,6 +687,27 @@ class AppSettings {
         'xrayFragInterval': xrayFragInterval,
       };
 
+  // Чинит списки исключений, сохранённые прежними версиями. Смена дефолта
+  // сама по себе не лечит НИКОГО: список у всех уже лежит в настройках.
+  //
+  //  * `<-loopback>` — выкидываем. Он загонял петлевой трафик в туннель
+  //    (см. комментарий у дефолта), из-за чего программы теряли связь со
+  //    своими же локальными службами.
+  //  * `172.2*` — разворачиваем в честные восьмёрки 172.20–172.29: маска
+  //    сравнивается текстом и задевала публичные 172.2xx, включая Google.
+  //  * `::1`/`[::1]` — ВЫКИДЫВАЕМ, если кто-то их вписал (я и вписал, в
+  //    промежуточной версии). WinINET на такой записи отвергает весь набор
+  //    опций, и системный прокси не включается вовсе — см. дефолт выше.
+  static const Set<String> _badBypassEntries = {'<-loopback>', '::1', '[::1]'};
+
+  static String _fixLegacyBypassList(String list) => list
+      .split(';')
+      .map((e) => e.trim())
+      .where((e) => e.isNotEmpty && !_badBypassEntries.contains(e))
+      .expand((e) =>
+          e == '172.2*' ? [for (var i = 20; i <= 29; i++) '172.$i.*'] : [e])
+      .join(';');
+
   factory AppSettings.fromJson(Map<String, dynamic> j) {
     final d = AppSettings();
     return AppSettings(
@@ -704,7 +757,8 @@ class AppSettings {
       muxProtocol: j['muxProtocol'] as String? ?? d.muxProtocol,
       muxMaxStreams: j['muxMaxStreams'] as int? ?? d.muxMaxStreams,
       muxPadding: j['muxPadding'] as bool? ?? d.muxPadding,
-      proxyBypassList: j['proxyBypassList'] as String? ?? d.proxyBypassList,
+      proxyBypassList: _fixLegacyBypassList(
+          j['proxyBypassList'] as String? ?? d.proxyBypassList),
       autoRestartCore: j['autoRestartCore'] as bool? ?? d.autoRestartCore,
       dnsFakeIp: j['dnsFakeIp'] as bool? ?? d.dnsFakeIp,
       dnsHijack: j['dnsHijack'] as bool? ?? d.dnsHijack,
@@ -1178,7 +1232,7 @@ class MyApp extends StatelessWidget {
             themeMode: mode,
             theme: _theme(seed, Brightness.light),
             darkTheme: _theme(seed, Brightness.dark),
-            home: const CoreControlPage(),
+            home: const _StartGate(),
           ),
         ),
       ),
@@ -1218,6 +1272,72 @@ class MyApp extends StatelessWidget {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
       ),
     );
+  }
+}
+
+/// Что показать при старте: мастер первого запуска или главный экран.
+///
+/// Отдельной прослойкой, а не проверкой внутри CoreControlPage: главный экран
+/// в `initState` поднимает трей, читает профили, чинит системный прокси и
+/// может сразу подключиться — на свежей установке всё это должно случиться
+/// ПОСЛЕ того, как человек принял условия и завёл профиль, а не параллельно
+/// с мастером.
+class _StartGate extends StatefulWidget {
+  const _StartGate();
+
+  @override
+  State<_StartGate> createState() => _StartGateState();
+}
+
+class _StartGateState extends State<_StartGate> {
+  bool? _needOnboarding;
+
+  @override
+  void initState() {
+    super.initState();
+    _decide();
+  }
+
+  Future<void> _decide() async {
+    final prefs = await SharedPreferences.getInstance();
+    // Язык поднимаем ДО показа мастера: обычно его читает CoreControlPage, но
+    // до неё дело ещё не дошло, и мастер иначе открылся бы по-русски у того,
+    // кто в прошлый раз выбрал английский.
+    final raw = prefs.getString(kSettingsPrefsKey);
+    if (raw != null) {
+      try {
+        final lang = (jsonDecode(raw) as Map<String, dynamic>)['language'];
+        if (lang is String && languageNames.containsKey(lang)) {
+          appLang.value = lang;
+        }
+      } catch (_) {
+        // Битые настройки не должны мешать первому запуску.
+      }
+    }
+    // Уже работающая установка мастер не видит. Признак — заведённый профиль
+    // (в том числе по старой однопрофильной схеме): без этой поблажки после
+    // обновления людям с настроенным приложением снова предложили бы принять
+    // условия и вставить ссылку, которая у них давно вставлена.
+    final done = prefs.getBool(kOnboardingPrefsKey) ??
+        (prefs.getString(kProfilesPrefsKey) != null ||
+            prefs.getString(kLegacySubscriptionUrlKey) != null);
+    if (!mounted) return;
+    setState(() => _needOnboarding = !done);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_needOnboarding == null) {
+      // Пустой экран, а не колесо: чтение SharedPreferences занимает
+      // миллисекунды, и мелькнувший индикатор выглядит хуже, чем ничего.
+      return const Scaffold(body: SizedBox.shrink());
+    }
+    if (_needOnboarding!) {
+      return OnboardingScreen(
+        onDone: () => setState(() => _needOnboarding = false),
+      );
+    }
+    return const CoreControlPage();
   }
 }
 
@@ -1279,7 +1399,10 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   static const String _autostartAskedPrefsKey = 'autostart_asked';
 
   AppSettings _settings = AppSettings();
-  static const String _settingsPrefsKey = 'app_settings';
+  // Имена ключей — из prefs_keys.dart: их читает и пишет не только этот экран
+  // (мастер первого запуска заводит профиль до того, как экран существует).
+  // Короткие приватные псевдонимы оставлены, чтобы не править сотню обращений.
+  static const String _settingsPrefsKey = kSettingsPrefsKey;
   Timer? _autoSelectTimer;
   Timer? _subUpdateTimer;
   // Взводится при нажатии «Остановить». Старт, начатый раньше, обязан
@@ -1303,8 +1426,8 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   String _serverSort = 'default'; // default | latency | name
 
   String get _clashApiBase => 'http://127.0.0.1:${_settings.clashApiPort}';
-  static const String _profilesPrefsKey = 'subscription_profiles';
-  static const String _activeProfilePrefsKey = 'active_profile_id';
+  static const String _profilesPrefsKey = kProfilesPrefsKey;
+  static const String _activeProfilePrefsKey = kActiveProfilePrefsKey;
 
   @override
   void initState() {
@@ -1697,6 +1820,44 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     }
   }
 
+  // Плоские значения реестра — зеркало для «Параметров сети» и для тех
+  // программ, что читают их напрямую. ДЕЙСТВУЮЩУЮ конфигурацию Windows держит
+  // не здесь, а в бинарном блобе `Connections\DefaultConnectionSettings`, и
+  // пишется она только через WinINET (см. system_proxy.dart) — поэтому одной
+  // записи в реестр мало, но и без неё нельзя: иначе окно системных настроек
+  // показывает пользователю не то, что происходит на самом деле.
+  //
+  // Пустое значение УДАЛЯЕМ, а не пропускаем. Пропуск (как было раньше)
+  // оставлял наш `127.0.0.1:<порт>` в системе навсегда у тех, у кого своего
+  // прокси не было: стоило потом чему угодно выставить ProxyEnable=1 — и
+  // интернет ложился во всех программах разом, на мёртвый порт.
+  Future<void> _writeProxyRegistry({
+    required bool enable,
+    required String server,
+    required String bypass,
+    required String pac,
+  }) async {
+    Future<void> put(String value, String data) => data.isEmpty
+        ? Process.run('reg', ['delete', _inetKey, '/v', value, '/f'])
+        : Process.run('reg',
+            ['add', _inetKey, '/v', value, '/t', 'REG_SZ', '/d', data, '/f']);
+    await put('ProxyServer', server);
+    await put('ProxyOverride', bypass);
+    await put('AutoConfigURL', pac);
+    // Код возврата проверяем только у этого ключа — он решающий, и его отказ
+    // означает, что процессу вообще не дают писать в свою ветку реестра
+    // (так бывает, когда приложение запущено из ограниченного окружения).
+    // Молчаливый провал тут стоил целого раунда отладки.
+    final r = await Process.run('reg', [
+      'add', _inetKey, '/v', 'ProxyEnable', '/t', 'REG_DWORD',
+      '/d', enable ? '1' : '0', '/f',
+    ]);
+    if (r.exitCode != 0) {
+      _appendLog(tp('log.sysProxyOnFailed',
+          {'e': tp('log.regWriteFailed', {'code': r.exitCode, 'err': r.stderr})}));
+    }
+  }
+
   Future<void> _enableSystemProxy() async {
     if (!_settings.autoSetSystemProxy || _tunMode) return;
     // Пока мы сюда шли, пользователь мог нажать «Остановить» — включать
@@ -1715,24 +1876,46 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
           // v2rayN) — вернуть обязаны и его, иначе после нас локальная сеть
           // останется настроенной по-нашему.
           'override': await _regRead(_inetKey, 'ProxyOverride') ?? '',
+          // PAC-скрипт имеет приоритет над фиксированным адресом прокси:
+          // пока он стоит, наш адрес не действует вообще. Мы его снимаем —
+          // и обязаны вернуть, иначе тихо сломаем корпоративную сеть.
+          'pac': await _regRead(_inetKey, 'AutoConfigURL') ?? '',
         }),
       );
     }
     try {
-      await Process.run('reg', [
-        'add', _inetKey, '/v', 'ProxyServer', '/t', 'REG_SZ',
-        '/d', '127.0.0.1:${_settings.localPort}', '/f',
-      ]);
+      final server = '127.0.0.1:${_settings.localPort}';
       final bypass = _settings.proxyBypassList.trim();
-      if (bypass.isNotEmpty) {
-        await Process.run('reg', [
-          'add', _inetKey, '/v', 'ProxyOverride', '/t', 'REG_SZ', '/d', bypass, '/f',
-        ]);
+      await _writeProxyRegistry(
+          enable: true, server: server, bypass: bypass, pac: '');
+      // Вот это и есть настоящее включение. Без него ядро работало, лог писал
+      // «системный прокси включён», а на порт не приходило ни одного
+      // соединения: Windows продолжала считать подключение прямым.
+      final applied = WinInetProxy.enable(server, bypass);
+      // Читаем обратно и сверяем. «Вызов вернул успех» и «система реально
+      // переключилась» — разные утверждения, и расхождение между ними уже
+      // стоило дня отладки: в логе стояло «прокси включён», а Windows
+      // оставалась на прямом подключении.
+      final actual = WinInetProxy.current();
+      if (applied && actual != null && actual.proxyOn && actual.server == server) {
+        _appendLog(tp('log.sysProxyOn', {'port': _settings.localPort}));
+        if (WinInetProxy.bypassDropped) _appendLog(t('log.sysProxyBypassDropped'));
+      } else if (applied) {
+        // Вызов прошёл, а система осталась при своём. Пишем, НА ЧЁМ именно
+        // она осталась: без этой цифры отказ выглядит беспричинным, а с ней
+        // сразу видно, чужой ли там прокси или прямое подключение.
+        _appendLog(tp('log.sysProxyOnFailed', {
+          'e': tp('log.sysProxyMismatch', {
+            'state': actual == null
+                ? t('log.sysProxyUnreadable')
+                : (actual.proxyOn ? actual.server : t('log.sysProxyDirect')),
+          }),
+        }));
+      } else {
+        _appendLog(tp('log.sysProxyOnFailed', {
+          'e': tp('log.sysProxySetFailed', {'code': WinInetProxy.lastError}),
+        }));
       }
-      await Process.run('reg', [
-        'add', _inetKey, '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', '1', '/f',
-      ]);
-      _appendLog(tp('log.sysProxyOn', {'port': _settings.localPort}));
     } catch (e) {
       _appendLog(tp('log.sysProxyOnFailed', {'e': e}));
     }
@@ -1744,24 +1927,33 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     if (raw == null) return;
     try {
       final backup = jsonDecode(raw) as Map<String, dynamic>;
-      // reg query отдаёт 0x0/0x1, а reg add ждёт десятичное.
-      final enable = (backup['enable'] as String? ?? '0x0').toLowerCase().endsWith('1') ? '1' : '0';
+      // reg query отдаёт 0x0/0x1.
+      final enabled =
+          (backup['enable'] as String? ?? '0x0').toLowerCase().endsWith('1');
       final server = backup['server'] as String? ?? '';
-      await Process.run('reg', [
-        'add', _inetKey, '/v', 'ProxyEnable', '/t', 'REG_DWORD', '/d', enable, '/f',
-      ]);
-      if (server.isNotEmpty) {
-        await Process.run('reg', [
-          'add', _inetKey, '/v', 'ProxyServer', '/t', 'REG_SZ', '/d', server, '/f',
-        ]);
-      }
       final override = backup['override'] as String? ?? '';
-      if (override.isNotEmpty) {
-        await Process.run('reg', [
-          'add', _inetKey, '/v', 'ProxyOverride', '/t', 'REG_SZ', '/d', override, '/f',
-        ]);
+      final pac = backup['pac'] as String? ?? '';
+      await _writeProxyRegistry(
+          enable: enabled, server: server, bypass: override, pac: pac);
+      final applied = WinInetProxy.restore(
+        enabled: enabled,
+        server: server,
+        bypass: override,
+        autoConfigUrl: pac,
+      );
+      if (!applied) {
+        _appendLog(tp('log.sysProxyRestoreFailed',
+            {'e': tp('log.sysProxySetFailed', {'code': WinInetProxy.lastError})}));
+      } else {
+        _appendLog(t('log.sysProxyRestored'));
+        // Прокси мы сняли, но часть чужих настроек вернуть не смогли. Молчать
+        // об этом нельзя: человек должен знать, что его список исключений или
+        // PAC придётся восстановить руками, а не искать потом, почему в
+        // локальной сети что-то ходит не туда.
+        if (WinInetProxy.restoreDegraded) {
+          _appendLog(t('log.sysProxyRestoreDegraded'));
+        }
       }
-      _appendLog(t('log.sysProxyRestored'));
     } catch (e) {
       _appendLog(tp('log.sysProxyRestoreFailed', {'e': e}));
     } finally {
@@ -3810,11 +4002,24 @@ del "%~f0"
       return;
     }
 
-    // валим только зависший sing-box — мост на Xray (если только что подняли
-    // для TUN-режима) трогать нельзя, иначе он погибнет вместе с ним
+    // Предыдущее ядро гасим ПЕРЕД киллерами и сразу обнуляем ссылки.
+    //
+    // Оба киллера намеренно пропускают PID'ы из _coreProcess/_xrayProcess —
+    // иначе они расстреливали бы собственные мосты. Но пока ссылка указывает
+    // на ещё ЖИВОЕ старое ядро, эта защита работает против нас: старый
+    // процесс остаётся сидеть на порту 1337 (и на Clash API, и на адаптере
+    // SilaTUN), новое ядро на них не встаёт и умирает, а UI при этом
+    // рапортует «подключено» — трафик продолжает идти через прежний сервер.
+    // Путь: _switchServer зовёт _startCore БЕЗ остановки — то есть при любой
+    // смене движка (xhttp <-> sing-box) и при недоступном Clash API.
+    // Валим только зависший sing-box — мост на Xray (если только что подняли
+    // для TUN-режима) трогать нельзя, иначе он погибнет вместе с ним.
+    _coreProcess?.kill();
+    _xrayProcess?.kill();
+    _coreProcess = null;
+    _xrayProcess = null;
     await _killStrayOnOurPorts();
     await _killOurProcessesByPath();
-    _coreProcess = null;
 
     _resetLog(t('log.generatingConfig'));
     await _writeConfig();
@@ -3842,10 +4047,15 @@ del "%~f0"
   }
 
   Future<void> _startXrayCore(ParsedServer server) async {
-    await _killStrayOnOurPorts();
-    await _killOurProcessesByPath();
+    // То же, что и в _startSingboxCore: сначала гасим предыдущее ядро и
+    // обнуляем ссылки, и только потом зовём киллеров — иначе они пропустят
+    // ещё живой процесс как «свой», и Xray не сможет занять порт.
+    _coreProcess?.kill();
+    _xrayProcess?.kill();
     _coreProcess = null;
     _xrayProcess = null;
+    await _killStrayOnOurPorts();
+    await _killOurProcessesByPath();
 
     _resetLog(tp('log.generatingXrayConfig', {'name': server.name}));
     await _writeXrayConfig(server, port: _settings.localPort, isBridge: false, configPath: _xrayConfigPath);
@@ -5125,7 +5335,7 @@ del "%~f0"
 // Версия приложения. Держится тут, а не читается пакетом package_info_plus:
 // ради одной строки тянуть зависимость незачем. МЕНЯТЬ ВМЕСТЕ с полем
 // `version:` в pubspec.yaml — они не связаны автоматически.
-const String kAppVersion = '1.0.0';
+const String kAppVersion = '1.0.1';
 
 // Блок «О программе»: версии приложения и обоих ядер, ручная проверка
 // обновлений и пути, которые спрашивают первыми, когда что-то не работает.

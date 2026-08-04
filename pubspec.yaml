@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: ^3.12.2
@@ -43,6 +43,10 @@ dependencies:
   zxing2: ^0.2.4
   image: ^4.9.1
   archive: ^4.0.9
+  # Системный прокси Windows включается вызовом WinINET (InternetSetOption),
+  # а не только записью в реестр — см. lib/system_proxy.dart. Отсюда нужны
+  # malloc/Utf16 для нативных структур.
+  ffi: ^2.2.0
 
 dev_dependencies:
   flutter_test:

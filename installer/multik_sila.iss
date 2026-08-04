@@ -9,7 +9,7 @@
 ; автоматически, и разъехавшиеся номера сломают самообновление приложения.
 
 #define AppName "Multik Sila"
-#define AppVersion "1.0.0"
+#define AppVersion "1.0.1"
 #define AppExeName "proxy_app_test.exe"
 #define BuildDir "..\build\windows\x64\runner\Release"
 
@@ -43,8 +43,12 @@ UninstallDisplayIcon={app}\{#AppExeName}
 MinVersion=10.0
 
 [Languages]
-Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
-Name: "english"; MessagesFile: "compiler:Default.isl"
+; Лицензия своя на каждый язык: Inno сначала спрашивает язык, потом показывает
+; соглашение — читать его человек должен на том языке, который выбрал.
+; Файлы обязаны быть в UTF-8 С BOM: без BOM Inno читает их в кодировке языка,
+; и кириллица приезжает мусором.
+Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"; LicenseFile: "license_ru.txt"
+Name: "english"; MessagesFile: "compiler:Default.isl"; LicenseFile: "license_en.txt"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
@@ -53,7 +57,21 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; Само приложение: перезаписываем ВСЕГДА и без оглядки на версии файлов —
 ; при обновлении поверх старой установки должны замениться и exe, и dll,
 ; и содержимое data (там лежат ассеты сборки, включая наборы правил).
-Source: "{#BuildDir}\*"; DestDir: "{app}"; Excludes: "sing-box.exe,xray.exe"; \
+;
+; Excludes ОБЯЗАТЕЛЕН и держится в актуальном состоянии. Папка Release — это
+; ещё и рабочий каталог приложения при запуске из сборки: туда ложатся
+; config.json и конфиги мостов с РЕАЛЬНЫМИ адресами серверов, UUID и паролями
+; из подписки, лог со всей историей соединений и кэш наборов правил. Без
+; исключений всё это запекается внутрь setup.exe и уезжает каждому, кто его
+; скачает. Поймано перед первой публикацией на GitHub.
+; Каждый шаблон начинается с "\" — это ЯКОРЬ НА КОРЕНЬ папки сборки. Без него
+; Inno применяет шаблон на любом уровне вложенности, и `rulesets\*` вырезал не
+; только рабочий кэш рядом с .exe, но и вшитые в сборку наборы правил
+; `data\flutter_assets\assets\rulesets\*.srs` — раздельное туннелирование
+; поехало бы к людям без единого набора и молча выродилось в «всё через VPN».
+; Поймано проверкой списка файлов в собранном пакете, а не глазами.
+Source: "{#BuildDir}\*"; DestDir: "{app}"; \
+    Excludes: "\sing-box.exe,\xray.exe,\config.json,\xray_config.json,\xray_bridge_*.json,\*_probe.json,\app_log.txt,\app_log.txt.*,\capture.txt,\*.new,\*.bak,\rulesets\*,\update_staging\*,\backup_*\*"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; Ядра — ТОЛЬКО если их ещё нет. Приложение обновляет их само, и к моменту

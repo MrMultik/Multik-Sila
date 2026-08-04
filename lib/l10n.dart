@@ -61,6 +61,69 @@ const Map<String, Map<String, String>> _strings = {
   'common.notFound': {'ru': 'Ничего не найдено', 'en': 'Nothing found'},
   'common.ms': {'ru': 'мс', 'en': 'ms'},
 
+  // --- Мастер первого запуска ---
+  //
+  // Текст соглашения — ЧЕРНОВИК, написанный по фактическому поведению
+  // приложения (логи и настройки не покидают устройство, серверы приложение
+  // не предоставляет, ядра — чужой открытый код). Перед публикацией его
+  // должен вычитать человек: это юридический текст, а не строка интерфейса.
+  'onb.licenseTitle': {
+    'ru': 'Условия использования',
+    'en': 'Terms of use',
+  },
+  'onb.licenseText': {
+    'ru': 'Multik Sila — клиент для подключения к прокси-серверам, которые '
+        'выбираете вы сами. Приложение не предоставляет серверы, не входит в '
+        'состав каких-либо сервисов и не имеет отношения к содержимому '
+        'передаваемого трафика.\n\n'
+        '1. Программа предоставляется «как есть», без гарантий работоспособности '
+        'и пригодности для конкретных задач. Автор не отвечает за убытки, '
+        'связанные с её использованием.\n\n'
+        '2. Вы самостоятельно отвечаете за соблюдение законодательства своей '
+        'страны и условий сервисов, к которым подключаетесь.\n\n'
+        '3. Приложение не собирает и никуда не передаёт персональные данные. '
+        'Профили, настройки и журнал работы хранятся только на этом устройстве.\n\n'
+        '4. В состав входят сторонние программы с открытым исходным кодом '
+        '(sing-box, Xray-core), распространяемые на условиях их собственных '
+        'лицензий.\n\n'
+        'Нажимая «Принимаю», вы подтверждаете согласие с этими условиями.',
+    'en': 'Multik Sila is a client for connecting to proxy servers that you '
+        'choose yourself. The application does not provide servers, is not part '
+        'of any service, and has no relation to the contents of the traffic '
+        'passing through it.\n\n'
+        '1. The software is provided "as is", without warranty of any kind, '
+        'including fitness for a particular purpose. The author is not liable '
+        'for any damages arising from its use.\n\n'
+        '2. You are solely responsible for complying with the laws of your '
+        'country and with the terms of the services you connect to.\n\n'
+        '3. The application collects no personal data and sends none anywhere. '
+        'Profiles, settings and the activity log stay on this device only.\n\n'
+        '4. It bundles third-party open-source software (sing-box, Xray-core) '
+        'distributed under their own licenses.\n\n'
+        'By pressing "Accept" you confirm your agreement with these terms.',
+  },
+  'onb.accept': {'ru': 'Принимаю', 'en': 'Accept'},
+  'onb.decline': {'ru': 'Не согласен — выйти', 'en': 'Decline and quit'},
+  'onb.profileTitle': {'ru': 'Добавьте профиль', 'en': 'Add a profile'},
+  'onb.profileHint': {
+    'ru': 'Вставьте ссылку на подписку — приложение само загрузит список '
+        'серверов. Ссылку выдаёт ваш провайдер VPN.',
+    'en': 'Paste your subscription link — the app will fetch the server list '
+        'itself. The link comes from your VPN provider.',
+  },
+  'onb.profileUrlLabel': {'ru': 'Ссылка на подписку', 'en': 'Subscription link'},
+  'onb.profileNameLabel': {
+    'ru': 'Название (необязательно)',
+    'en': 'Name (optional)',
+  },
+  'onb.profileDefaultName': {'ru': 'Профиль 1', 'en': 'Profile 1'},
+  'onb.profileUrlBad': {
+    'ru': 'Ссылка должна начинаться с http:// или https://',
+    'en': 'The link must start with http:// or https://',
+  },
+  'onb.profileAdd': {'ru': 'Добавить и продолжить', 'en': 'Add and continue'},
+  'onb.profileSkip': {'ru': 'Пропустить — добавлю позже', 'en': 'Skip, I will add it later'},
+
   // --- Шапка ---
   'bar.connections': {'ru': 'Активные соединения', 'en': 'Active connections'},
   'bar.diagnostics': {'ru': 'Диагностика и тест скорости', 'en': 'Diagnostics and speed test'},
@@ -984,6 +1047,40 @@ const Map<String, Map<String, String>> _strings = {
   'log.sysProxyRestored': {
     'ru': 'Системный прокси возвращён в прежнее состояние',
     'en': 'System proxy restored to its previous state',
+  },
+  // Диагностика WinINET. Формулировки намеренно называют конкретную причину:
+  // «не удалось» без деталей уже стоило раунда отладки вслепую.
+  'log.sysProxySetFailed': {
+    'ru': 'WinINET отклонил вызов InternetSetOption, код Windows {code}',
+    'en': 'WinINET rejected InternetSetOption, Windows error {code}',
+  },
+  'log.sysProxyMismatch': {
+    'ru': 'вызов прошёл, но система осталась на: {state}',
+    'en': 'the call succeeded, but the system stayed on: {state}',
+  },
+  'log.sysProxyDirect': {
+    'ru': 'прямом подключении, без прокси',
+    'en': 'a direct connection, no proxy',
+  },
+  'log.sysProxyUnreadable': {
+    'ru': 'состояние не читается',
+    'en': 'state cannot be read',
+  },
+  'log.sysProxyBypassDropped': {
+    'ru': 'WinINET не принял список исключений — прокси включён без него. '
+        'Локальная сеть пойдёт через туннель.',
+    'en': 'WinINET did not accept the bypass list — the proxy is on without it. '
+        'Local network traffic will go through the tunnel.',
+  },
+  'log.sysProxyRestoreDegraded': {
+    'ru': 'Прежние настройки прокси вернулись НЕ полностью: список исключений '
+        'или PAC-скрипт придётся восстановить вручную в параметрах сети.',
+    'en': 'The previous proxy settings were NOT fully restored: the bypass list '
+        'or the PAC script has to be restored manually in network settings.',
+  },
+  'log.regWriteFailed': {
+    'ru': 'запись в реестр не прошла (reg вернул {code}): {err}',
+    'en': 'registry write failed (reg returned {code}): {err}',
   },
   'log.sysProxyRestoreFailed': {
     'ru': 'Не удалось вернуть системный прокси: {e}',
