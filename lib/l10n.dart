@@ -967,6 +967,13 @@ const Map<String, Map<String, String>> _strings = {
   },
   'dns.pickResult': {'ru': 'Выбран {name} — {list}', 'en': 'Picked {name} — {list}'},
   'dns.backup': {'ru': 'запасной', 'en': 'secondary'},
+  // Не адрес, а «спросить Windows». Подпись объясняет, почему это дефолт:
+  // публичный адрес может быть закрыт у провайдера, и тогда под TUN не
+  // резолвится даже хост самого прокси-сервера.
+  'dns.system': {
+    'ru': 'Системный — как настроена сеть (надёжнее всего)',
+    'en': 'System — as the network is configured (most reliable)',
+  },
   'dns.blocksMalware': {
     'ru': 'режет вредоносные домены',
     'en': 'blocks malicious domains',

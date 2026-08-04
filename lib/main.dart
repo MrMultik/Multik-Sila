@@ -386,8 +386,26 @@ class AppSettings {
   String xrayFragLength;
   String xrayFragInterval;
 
+  // Значение `local` = системный резолвер Windows, а не конкретный адрес.
+  // Это ЕДИНСТВЕННЫЙ вариант, который работает на любой сети, поэтому он и
+  // стоит по умолчанию: см. историю в комментарии к `dnsDirect` ниже.
+  static const String kSystemDns = 'local';
+
   AppSettings({
-    this.dnsDirect = '1.1.1.1',
+    // Системный резолвер, а НЕ 1.1.1.1. Прибитый публичный адрес — ловушка:
+    // под TUN этот запрос уходит по физическому каналу, и если провайдер
+    // 1.1.1.1 не пропускает (обычное дело), резолв встаёт на 10 секунд.
+    //
+    // Наружу это вышло как «включаю VPN — сайты не открываются вообще».
+    // Ядро на уровне debug сказало прямым текстом:
+    //   dns: lookup domain fill.mrmultik.shop
+    //   dns: lookup failed for fill.mrmultik.shop: context deadline exceeded
+    // Замкнутый круг: чтобы поднять прокси, надо узнать адрес его хоста, а
+    // резолвер для этого недостижим — значит не поднимается ничего.
+    // Системный резолвер работает на той сети, к которой человек подключён,
+    // какой бы она ни была. Так же устроен Karing (у него direct-DNS по
+    // умолчанию — `kDNSLocal`).
+    this.dnsDirect = kSystemDns,
     this.dnsRemote = '8.8.8.8',
     // ipv4_only, а НЕ prefer_ipv4. prefer_ipv4 означает лишь «предпочитать
     // A-запись», но AAAA всё равно отдаётся клиенту — и Windows выбирает IPv6.
@@ -553,6 +571,7 @@ class AppSettings {
   // «режет рекламу»), а const-карта вызов t() внутрь не пускает. Ключи —
   // сами адреса, они от языка не зависят и в настройках хранятся как есть.
   static Map<String, String> get dnsPresets => {
+        kSystemDns: t('dns.system'),
         '1.1.1.1': 'Cloudflare — 1.1.1.1',
         '1.0.0.1': 'Cloudflare ${t('dns.backup')} — 1.0.0.1',
         '8.8.8.8': 'Google — 8.8.8.8',
@@ -748,7 +767,16 @@ class AppSettings {
   factory AppSettings.fromJson(Map<String, dynamic> j) {
     final d = AppSettings();
     return AppSettings(
-      dnsDirect: j['dnsDirect'] as String? ?? d.dnsDirect,
+      // `1.1.1.1` было НАШИМ дефолтом, а не выбором человека, и именно оно
+      // ломало резолв под TUN там, где провайдер этот адрес не пропускает.
+      // Поэтому старое значение переводим на системный резолвер: смена
+      // дефолта сама по себе не лечит никого — у всех оно уже сохранено.
+      // Тот, кто выбрал 1.1.1.1 осознанно, вернёт его в настройках одним
+      // щелчком, а тот, кто не выбирал, просто перестанет сидеть без сети.
+      dnsDirect: () {
+        final v = j['dnsDirect'] as String? ?? d.dnsDirect;
+        return v == '1.1.1.1' ? AppSettings.kSystemDns : v;
+      }(),
       dnsRemote: j['dnsRemote'] as String? ?? d.dnsRemote,
       dnsStrategy: j['dnsStrategy'] as String? ?? d.dnsStrategy,
       localPort: j['localPort'] as int? ?? d.localPort,
@@ -3269,6 +3297,64 @@ del "%~f0"
     return cidrs.toList();
   }
 
+  // Кэш «хост -> IPv4», чтобы не резолвить один и тот же адрес по разу на
+  // каждый сервер: вся подписка обычно живёт на одном хосте.
+  final Map<String, String?> _hostIpCache = {};
+
+  /// Подставляет в outbound'ы IP вместо имени хоста.
+  ///
+  /// Это лечение самой упрямой поломки TUN-режима: ядро не может подключиться
+  /// к прокси-серверу, потому что не знает его адрес, а узнать не может,
+  /// потому что DNS-запрос сам едет в ещё не поднятый туннель. Круг замкнут,
+  /// и наружу он выходит как «включаю VPN — не открывается ни один сайт»,
+  /// при полностью исправном туннеле. В логе ядра:
+  ///   ERROR connection: ... lookup <хост>: context deadline exceeded  (10 с)
+  /// и так по кругу на каждое соединение.
+  ///
+  /// Разорвать его выбором резолвера НЕЛЬЗЯ, проверено обоими вариантами:
+  /// публичный адрес (1.1.1.1) под TUN уходит по физическому каналу и может
+  /// быть закрыт у провайдера; системный резолвер сам ходит через туннель и
+  /// попадает в тот же круг. Единственный надёжный выход — не резолвить в
+  /// рантайме вовсе: адрес известен ЗАРАНЕЕ, на этапе генерации конфига,
+  /// когда туннеля ещё нет и сеть обычная.
+  ///
+  /// Имя хоста при этом не теряется: оно нужно TLS для SNI и проверки
+  /// сертификата, поэтому перед подменой обязательно проставляется в
+  /// `tls.server_name` (если его там ещё нет). Без этого сервер увидит
+  /// подключение без SNI и оборвёт рукопожатие.
+  ///
+  /// Не удалось отрезолвить — оставляем имя как было: пусть ядро попробует
+  /// само, это не хуже, чем не подключиться совсем.
+  Future<void> _bakeServerIps(List<ParsedServer> servers) async {
+    for (final s in servers) {
+      final host = s.outbound['server'];
+      if (host is! String || host.isEmpty) continue;
+      if (RegExp(r'^[\d.]+$').hasMatch(host) || host.contains(':')) continue;
+
+      if (!_hostIpCache.containsKey(host)) {
+        try {
+          final addrs = await InternetAddress.lookup(host, type: InternetAddressType.IPv4)
+              .timeout(const Duration(seconds: 5));
+          _hostIpCache[host] = addrs.isEmpty ? null : addrs.first.address;
+        } catch (_) {
+          _hostIpCache[host] = null;
+        }
+      }
+      final ip = _hostIpCache[host];
+      if (ip == null) {
+        _appendLog(tp('log.resolveBypassFailed', {'host': host}));
+        continue;
+      }
+
+      final tls = s.outbound['tls'];
+      if (tls is Map && tls['enabled'] == true) {
+        final sni = tls['server_name'];
+        if (sni is! String || sni.isEmpty) tls['server_name'] = host;
+      }
+      s.outbound['server'] = ip;
+    }
+  }
+
   // Серверы с engine == 'xray' (xhttp-транспорт) sing-box поднять сам не может —
   // в обычном режиме они просто не попадают в его конфиг (см. _startXrayCore).
   // В TUN-режиме для них добавляется bridge-outbound на локальный Xray.
@@ -3348,6 +3434,19 @@ del "%~f0"
       "outbounds": selectorTags,
       "default": defaultTag,
     };
+
+    // Имена хостов прокси-серверов ЗАПОМИНАЕМ ДО подмены на IP: ниже они
+    // нужны как домены для DNS-правил («хосты серверов резолвим напрямую»),
+    // а после подмены в outbound'ах лежат уже адреса.
+    final proxyHostNames = <String>{
+      ...singboxServers.map((s) => s.outbound['server'] as String),
+      ...xraySeversForBridge.map((s) => _xrayOutboundHost(s.outbound)).whereType<String>(),
+    };
+
+    // И только теперь — подмена. Обязательно ДО сборки config["outbounds"]:
+    // там значения уже копируются в конфиг, и правка после этой строки в
+    // готовый JSON не попадёт. На это я один раз наступил.
+    await _bakeServerIps(singboxServers);
 
     final Map<String, dynamic> config = {
       "log": {"level": "info"},
@@ -3517,10 +3616,9 @@ del "%~f0"
     // Для xhttp-серверов это тоже обязательно: в конфиг sing-box они попадают
     // как мост на 127.0.0.1, но реальный коннект до сервера делает отдельный
     // процесс xray.exe, и резолвить хост он будет через системный DNS.
-    final proxyHosts = <String>{
-      ...singboxServers.map((s) => s.outbound['server'] as String),
-      ...xraySeversForBridge.map((s) => _xrayOutboundHost(s.outbound)).whereType<String>(),
-    };
+    // Берём сохранённые ИМЕНА, а не текущее содержимое outbound'ов: там уже
+    // подставлены IP (см. _bakeServerIps выше).
+    final proxyHosts = proxyHostNames;
     final bypassDomains =
         proxyHosts.where((h) => !RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(h)).toList();
     // Хост NTP резолвим напрямую по той же причине, что и прокси-серверы:
@@ -3534,6 +3632,7 @@ del "%~f0"
         bypassDomains.add(ntpHost);
       }
     }
+
 
     // DNS идёт через АКТИВНЫЙ сервер (selector), а не через фиксированный
     // первый, и по TCP, а не по UDP.
@@ -3593,10 +3692,33 @@ del "%~f0"
       hosts.putIfAbsent(domain, () => []).add(addr);
     }
 
+    // Системный резолвер отдельным сервером, ВСЕГДА. На него вешается
+    // `route.default_domain_resolver` — то, чем ядро узнаёт адрес самого
+    // прокси-сервера. Этот резолв обязан работать по физическому каналу,
+    // до того как поднялся хоть один туннель, поэтому зависеть от публичного
+    // адреса он не имеет права: если провайдер его не пропускает, ядро
+    // встаёт намертво (доказано debug-логом: `lookup failed for
+    // fill.mrmultik.shop: context deadline exceeded`, 10 с, и по кругу).
+    const localDnsTag = 'dns-local';
+    // `local` — это тип сервера в sing-box, а не адрес: он спрашивает
+    // резолвер операционной системы, какой бы тот ни был на текущей сети.
+    Map<String, Object> dnsServer(String tag, String value, {String? detour}) =>
+        value == AppSettings.kSystemDns
+            ? {"type": "local", "tag": tag}
+            : {
+                "type": "udp",
+                "tag": tag,
+                "server": value,
+                // `?` перед значением — запись попадёт в карту, только если
+                // оно не null.
+                "detour": ?detour,
+              };
+
     config["dns"] = {
       "servers": [
-        {"type": "udp", "tag": "dns-direct", "server": _settings.dnsDirect},
-        {"type": "udp", "tag": "dns-remote", "server": _settings.dnsRemote, "detour": dnsDetourTag},
+        {"type": "local", "tag": localDnsTag},
+        dnsServer("dns-direct", _settings.dnsDirect),
+        dnsServer("dns-remote", _settings.dnsRemote, detour: dnsDetourTag),
         if (hosts.isNotEmpty) {"type": "hosts", "tag": "dns-hosts", "predefined": hosts},
         // FakeIP отдаёт выдуманный адрес мгновенно, а настоящий узнаётся уже
         // при подключении — это убирает ожидание DNS перед каждым запросом.
@@ -3734,9 +3856,16 @@ del "%~f0"
         // «to continuing using this feature, set ENABLE_DEPRECATED_MISSING_
         // DOMAIN_RESOLVER=true». Поймано при проверке кандидата на
         // автообновление — с текущим ядром конфиг работал, а с новым падал.
-        // dns-direct, а не dns-remote: адрес прокси-сервера надо узнавать
-        // мимо туннеля, иначе замкнутый круг (см. bypassDomains выше).
-        "default_domain_resolver": "dns-direct",
+        //
+        // ИМЕННО системный резолвер, а не dns-direct и тем более не
+        // dns-remote. Этим ключом ядро узнаёт адрес самого прокси-сервера —
+        // то есть резолвит ДО того, как поднялся хоть какой-то туннель, по
+        // голому физическому каналу. Публичный адрес тут ставить нельзя: у
+        // провайдера он может быть закрыт, и тогда всё встаёт намертво —
+        // без резолва нет прокси, без прокси нет DNS. Поймано debug-логом:
+        //   dns: lookup failed for <хост сервера>: context deadline exceeded
+        // по 10 секунд и по кругу, при полностью исправном туннеле.
+        "default_domain_resolver": localDnsTag,
       };
     } else {
       config["inbounds"] = [
@@ -3755,8 +3884,10 @@ del "%~f0"
         if (ruleSetDecls.isNotEmpty) "rule_set": ruleSetDecls,
         "rules": splitRules(),
         "final": "proxy",
-        // См. комментарий в TUN-ветке: без этого ключа свежие ядра не стартуют.
-        "default_domain_resolver": "dns-direct",
+        // См. комментарий в TUN-ветке: без этого ключа свежие ядра не
+        // стартуют, а резолвить адрес прокси-сервера обязан системный
+        // резолвер — единственный, который работает на любой сети.
+        "default_domain_resolver": localDnsTag,
       };
     }
 
