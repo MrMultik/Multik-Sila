@@ -12,7 +12,13 @@ TUN adapter, and split tunnelling.
 - **TUN mode** — system-wide VPN: all traffic from the machine goes through the
   tunnel, no need to configure a proxy in each program. Requires administrator rights.
 - **Regular mode** — a local proxy plus automatic Windows system-proxy setup
-  (the previous value is saved and restored when you disconnect).
+  (the previous value is saved and restored when you disconnect). Note that a
+  system proxy only covers programs that honour it: browsers and most
+  messengers do, games and some desktop apps connect directly and ignore it.
+  Use TUN mode when you need *everything* tunnelled — the app says so on the
+  main screen rather than leaving you to find out the hard way.
+- **First-run wizard**: language, terms of use, then your subscription — so a
+  fresh install does not drop you onto an empty screen.
 - **Split tunnelling**: local sites go direct, everything else through the VPN.
   Driven by GeoSite/GeoIP rule sets that ship inside the app — no internet
   connection is needed for the first run.
@@ -82,6 +88,15 @@ their own licences: sing-box and Xray-core.
 
 **[Download the installer for Windows →](https://github.com/MrMultik/Multik-Sila/releases/latest)**
 
-A regular installer: it puts the app into Program Files, creates shortcuts and
-registers an uninstaller. Both engines are already inside — nothing else to
-download. Windows 10 or newer, 64-bit.
+A regular installer: it installs into your user profile
+(`%LOCALAPPDATA%\Programs\Multik Sila`), creates shortcuts and registers an
+uninstaller. **No administrator rights are required to install** — they are
+only requested when you switch TUN mode on, and the app restarts itself
+elevated at that point.
+
+Both engines are already inside — nothing else to download. Windows 10 or
+newer, 64-bit.
+
+Profiles and settings live in `%APPDATA%\com.example\proxy_app_test` and are
+kept when you update or uninstall, so an update never costs you your
+subscription.
