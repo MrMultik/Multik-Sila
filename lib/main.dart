@@ -3302,11 +3302,46 @@ del "%~f0"
       }
     }
 
-    // DNS всегда детурится через фиксированный sing-box-нативный сервер,
-    // а не через активный selector "proxy" — если сейчас выбран xhttp-мост
-    // (тип "http"), он физически не может нести UDP, и DNS-запросы к нему
-    // просто отваливаются с "invalid argument" каждый раз при переключении.
-    final dnsDetourTag = singboxServers.isNotEmpty ? singboxServers.first.outbound['tag'] as String : 'proxy';
+    // DNS идёт через АКТИВНЫЙ сервер (selector), а не через фиксированный
+    // первый, и по TCP, а не по UDP.
+    //
+    // Раньше detour был прибит к `singboxServers.first`: xhttp-мост не несёт
+    // UDP, и DNS к нему отваливался с «invalid argument». Побочный эффект
+    // оказался хуже болезни — если тормозил именно первый сервер подписки,
+    // ложился резолв ЦЕЛИКОМ, хотя человек сидел на другом, живом сервере.
+    // Пользователь поймал это как «половина зарубежных сайтов не грузится»,
+    // Discord — ERR_CONNECTION_RESET; в логе:
+    //   dns: lookup failed for cp.cloudflare.com: context deadline exceeded (10.0s)
+    // При этом через активный сервер шло 178 соединений, а через первый — 6,
+    // и все шесть были DNS.
+    //
+    // DNS детурится через ФИКСИРОВАННЫЙ сервер, а не через активный selector.
+    // Это выстрадано: попытка пустить DNS через selector сломала резолв
+    // напрочь, стоило автовыбору встать на gRPC-сервер. Замеры на живом
+    // приложении, активный сервер VLESS GRPC:
+    //   UDP  через selector — 0 из 3 сайтов, 3 ошибки резолва
+    //   DoH  через selector — 2 из 3, 1 ошибка
+    //   UDP  через фиксированный — работает стабильно (как было всегда)
+    // Причина: транспорт сервера может не переносить UDP (gRPC, xhttp), и
+    // тогда ложится ВЕСЬ резолв, а не отдельный сайт.
+    //
+    // Но «первый попавшийся» тоже не годится: если тормозит именно он,
+    // DNS ложится, хотя человек сидит на другом, живом сервере. Пользователь
+    // поймал это как «половина зарубежных сайтов не грузится», в логе:
+    //   dns: lookup failed for cp.cloudflare.com: context deadline exceeded (10.0s)
+    // Поэтому берём первый сервер с ПРОСТЫМ транспортом: у такого UDP
+    // проходит гарантированно. gRPC/WebSocket/HTTP-транспорты пропускаем.
+    const udpUnfriendly = {'grpc', 'ws', 'http', 'httpupgrade', 'xhttp'};
+    final dnsCapable = singboxServers.where((s) {
+      final tr = s.outbound['transport'];
+      if (tr is! Map) return true; // без транспорта — обычный TCP, UDP пройдёт
+      return !udpUnfriendly.contains('${tr['type']}');
+    }).toList();
+    final dnsDetourTag = dnsCapable.isNotEmpty
+        ? dnsCapable.first.outbound['tag'] as String
+        : (singboxServers.isNotEmpty
+            ? singboxServers.first.outbound['tag'] as String
+            : 'proxy');
 
     // DNS задаём В ОБОИХ режимах, а не только в TUN. В обычном режиме его
     // раньше не было вовсе, и резолв шёл через системный. С включённым geoip-ru
