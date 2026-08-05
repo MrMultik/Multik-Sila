@@ -197,6 +197,36 @@ begin
   Sleep(1000);
 end;
 
+// Ядро без версии — тупик, из которого приложение само не выберется.
+//
+// Ядра ставятся только если их ещё нет (см. [Files]): приложение обновляет их
+// само, и откатывать назад то, что оно подняло, нельзя. Но у самосборного
+// sing-box версия печатается как `unknown`, а автообновление сравнивает
+// ЧИСЛА и такое ядро не трогает вообще — навсегда. Плюс такие сборки обычно
+// собраны без части возможностей: у пойманного экземпляра не было gVisor, и
+// TUN-режим на стеках `gvisor` и `mixed` падал на старте.
+//
+// Поэтому: увидели ядро, которое не называет свою версию, — удаляем, и на
+// его место встаёт официальная сборка из дистрибутива. Ядро с нормальной
+// версией не трогаем, оно в состоянии обновиться самостоятельно.
+procedure ReplaceUnversionedCore();
+var
+  CorePath, OutFile: String;
+  // Именно AnsiString: LoadStringFromFile отдаёт байты как есть, а в
+  // Unicode-версии Inno обычная String с ним не сходится по типу.
+  Content: AnsiString;
+  ResultCode: Integer;
+begin
+  CorePath := ExpandConstant('{app}\sing-box.exe');
+  if not FileExists(CorePath) then Exit;
+  OutFile := ExpandConstant('{tmp}\core_version.txt');
+  if not Exec(ExpandConstant('{cmd}'), '/c ""' + CorePath + '" version > "' + OutFile + '" 2>&1"',
+              '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then Exit;
+  if not LoadStringFromFile(OutFile, Content) then Exit;
+  if Pos('version unknown', Content) > 0 then
+    DeleteFile(CorePath);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
@@ -214,6 +244,7 @@ begin
     end;
   end;
   RemovePreviousVersion();
+  ReplaceUnversionedCore();
 end;
 
 function InitializeUninstall(): Boolean;

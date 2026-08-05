@@ -379,7 +379,20 @@ class AppSettings {
   // устройств перестаёт отвечать.
   String proxyBypassList;
   bool autoRestartCore;
-  bool dnsFakeIp;
+  /// Чем резолвятся домены, которые идут ЧЕРЕЗ прокси. Три способа, как в
+  /// Karing («Способ разрешения в DNS» для трафика прокси):
+  ///
+  ///  * `current` — активным сервером. Резолв и соединение идут одним путём,
+  ///    поэтому адрес приходит тот же, что увидит сервер. Значение по умолчанию.
+  ///  * `direct`  — мимо туннеля. Быстрее, но провайдер видит, какие домена
+  ///    запрашиваются, а под TUN этот путь может не работать вовсе.
+  ///  * `fakeip`  — выдуманный адрес мгновенно, настоящий узнаётся уже при
+  ///    подключении. Убирает ожидание DNS перед каждым запросом.
+  ///
+  /// Раньше это была галочка «FakeIP» плюс жёстко зашитый выбор сервера, и
+  /// поменять способ было нельзя.
+  String dnsProxyResolve; // current | direct | fakeip
+  bool get dnsFakeIp => dnsProxyResolve == 'fakeip';
   bool dnsHijack;
   int dnsTtl; // 0 — не переписывать TTL
   String dnsClientSubnet; // пусто — не отправлять ECS
@@ -420,20 +433,21 @@ class AppSettings {
   static const String kSystemDns = 'local';
 
   AppSettings({
-    // Системный резолвер, а НЕ 1.1.1.1. Прибитый публичный адрес — ловушка:
-    // под TUN этот запрос уходит по физическому каналу, и если провайдер
-    // 1.1.1.1 не пропускает (обычное дело), резолв встаёт на 10 секунд.
+    // Обычный публичный адрес, а НЕ системный резолвер (`kSystemDns`).
     //
-    // Наружу это вышло как «включаю VPN — сайты не открываются вообще».
-    // Ядро на уровне debug сказало прямым текстом:
-    //   dns: lookup domain fill.mrmultik.shop
-    //   dns: lookup failed for fill.mrmultik.shop: context deadline exceeded
-    // Замкнутый круг: чтобы поднять прокси, надо узнать адрес его хоста, а
-    // резолвер для этого недостижим — значит не поднимается ничего.
-    // Системный резолвер работает на той сети, к которой человек подключён,
-    // какой бы она ни была. Так же устроен Karing (у него direct-DNS по
-    // умолчанию — `kDNSLocal`).
-    this.dnsDirect = kSystemDns,
+    // Через `dns-direct` резолвятся РОССИЙСКИЕ домены — те, что по режиму
+    // «РФ напрямую» идут мимо туннеля. Системный резолвер для этого не
+    // годится: под TUN запрос к нему сам заходит в туннель и упирается в
+    // перехват DNS, то есть в круг. Я один раз поставил сюда `local` — и
+    // зарубежные сайты открывались, а yandex.ru, mail.ru и gosuslugi.ru
+    // висели по 12 секунд и не открывались вовсе. Замерено: у зарубежных
+    // `dns=0.12 s`, у российских `dns=0.000` и таймаут.
+    //
+    // Тот резолв, ради которого затевался `local` — адрес самого
+    // прокси-сервера, — больше не нужен вообще: адреса запекаются в конфиг
+    // заранее (см. _bakeServerIps). Выбрать системный резолвер вручную
+    // по-прежнему можно, он остаётся в списке.
+    this.dnsDirect = '1.1.1.1',
     this.dnsRemote = '8.8.8.8',
     // ipv4_only, а НЕ prefer_ipv4. prefer_ipv4 означает лишь «предпочитать
     // A-запись», но AAAA всё равно отдаётся клиенту — и Windows выбирает IPv6.
@@ -449,8 +463,34 @@ class AppSettings {
     this.tunIpv4 = '172.19.0.1/30',
     this.tunIpv6 = 'fdfe:dcba:9876::1/126',
     this.tunIpv6Enabled = true,
-    this.tunStack = 'system',
-    this.tunMtu = 9000,
+    // `system` — потому что ЛЕЖАЩЕЕ В КОМПЛЕКТЕ ядро другого не умеет.
+    //
+    // Karing на Windows ставит `gvisor` (и ссылается на
+    // https://github.com/SagerNet/sing-box/issues/1592), но он раздаёт свою
+    // сборку sing-box. Наша собрана с `Tags: with_quic,with_utls,with_clash_api`
+    // — без `with_gvisor`, и на этом стеке падает намертво:
+    //   FATAL start inbound/tun: gVisor is not included in this build
+    // Я один раз поменял дефолт «как у Karing», не проверив тег, и приложение
+    // перестало подключаться совсем. Дефолт обязан работать с тем ядром,
+    // которое лежит рядом, а не с идеальным.
+    //
+    // `mixed` — системный стек для TCP и gVisor для UDP. Берёт лучшее от
+    // обоих: скорость системного на потоках и устойчивость gVisor на UDP.
+    // Требует ядра, собранного с `with_gvisor`; официальные релизы SagerNet
+    // такие, и именно они теперь идут в комплекте.
+    //
+    // Если ядро окажется без этого тега (самосборный бинарник, подложенный
+    // руками), приложение не упадёт: оно спросит у ядра, что оно умеет, и
+    // возьмёт `system`, написав об этом в лог. Один раз я поставил сюда
+    // `gvisor`, не проверив тег, и приложение перестало подключаться совсем —
+    // ядро падало на старте с `gVisor is not included in this build`.
+    this.tunStack = 'mixed',
+    // 4064, а не 9000 (дефолт sing-box). Внутри туннель идёт по TCP через
+    // интернет, где MTU около 1500: при 9000 система отдаёт в туннель куски,
+    // которые приходится резать по дороге, и на долгих передачах это
+    // оборачивается обрывами. Значение взято у Karing — там оно выставлено
+    // явно, а не оставлено дефолтным.
+    this.tunMtu = 4064,
     this.strictRoute = true,
     this.launchAtStartup = false,
     // Приложение запускают ради того, чтобы оно работало, а не чтобы каждый
@@ -488,7 +528,12 @@ class AppSettings {
     this.latencyTimeoutMs = 5000,
     this.latencyWarmup = true,
     this.tolerance = 30,
-    this.autoSelectIntervalMin = 0,
+    // Раз в 15 минут, а не «никогда». Сервер, самый быстрый на момент
+    // подключения, через час может им уже не быть: провайдер меняет нагрузку,
+    // маршруты плавают. Смысл авто-выбора теряется, если он срабатывает
+    // ровно один раз за сеанс. Переключение при этом не дёргает соединение
+    // попусту — есть допуск (tolerance), ниже которого сервер не меняется.
+    this.autoSelectIntervalMin = 15,
     this.autoSelectFilter = '',
     this.autoSelectLimit = 0,
     this.autoSelectFavFirst = false,
@@ -501,7 +546,12 @@ class AppSettings {
     this.xrayFragInterval = '10-20',
     this.autoSetSystemProxy = true,
     this.autoUpdateSubscription = true,
-    this.subUpdateIntervalHours = 0,
+    // 12 часов. Ноль означал «взять интервал из заголовка панели», и это
+    // выглядело разумно, пока не выяснилось, что заголовок присылают не все
+    // панели: у кого его нет — подписка не обновлялась вообще никогда, и
+    // список серверов тихо устаревал. Явное число работает у всех, а тот,
+    // кому важен интервал панели, по-прежнему может поставить 0.
+    this.subUpdateIntervalHours = 12,
     this.checkCoreUpdates = true,
     this.autoUpdateCores = true,
     // Свои же релизы на GitHub. Раньше тут было пусто — «своего места
@@ -561,7 +611,11 @@ class AppSettings {
         '172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;'
         '172.30.*;172.31.*;192.168.*',
     this.autoRestartCore = true,
-    this.dnsFakeIp = false,
+    // FakeIP по умолчанию: адрес выдаётся мгновенно, и ожидание DNS перед
+    // каждым запросом исчезает совсем. Домены, которым нужен НАСТОЯЩИЙ адрес
+    // (обход РФ по geoip, личные списки «напрямую», хосты прокси-серверов),
+    // резолвятся честно — правило FakeIP стоит последним, уже после них.
+    this.dnsProxyResolve = 'fakeip',
     this.dnsHijack = true,
     this.dnsTtl = 0,
     this.dnsClientSubnet = '',
@@ -757,7 +811,7 @@ class AppSettings {
         'muxPadding': muxPadding,
         'proxyBypassList': proxyBypassList,
         'autoRestartCore': autoRestartCore,
-        'dnsFakeIp': dnsFakeIp,
+        'dnsProxyResolve': dnsProxyResolve,
         'dnsHijack': dnsHijack,
         'dnsTtl': dnsTtl,
         'dnsClientSubnet': dnsClientSubnet,
@@ -802,15 +856,12 @@ class AppSettings {
   factory AppSettings.fromJson(Map<String, dynamic> j) {
     final d = AppSettings();
     return AppSettings(
-      // `1.1.1.1` было НАШИМ дефолтом, а не выбором человека, и именно оно
-      // ломало резолв под TUN там, где провайдер этот адрес не пропускает.
-      // Поэтому старое значение переводим на системный резолвер: смена
-      // дефолта сама по себе не лечит никого — у всех оно уже сохранено.
-      // Тот, кто выбрал 1.1.1.1 осознанно, вернёт его в настройках одним
-      // щелчком, а тот, кто не выбирал, просто перестанет сидеть без сети.
+      // Откат моей же неудачной правки: значение `local` попало в настройки
+      // автоматической миграцией, а не выбором человека, и ломало резолв
+      // российских доменов под TUN. Возвращаем на публичный адрес.
       dnsDirect: () {
         final v = j['dnsDirect'] as String? ?? d.dnsDirect;
-        return v == '1.1.1.1' ? AppSettings.kSystemDns : v;
+        return v == AppSettings.kSystemDns ? d.dnsDirect : v;
       }(),
       dnsRemote: j['dnsRemote'] as String? ?? d.dnsRemote,
       dnsStrategy: j['dnsStrategy'] as String? ?? d.dnsStrategy,
@@ -822,7 +873,12 @@ class AppSettings {
       tunIpv6: j['tunIpv6'] as String? ?? d.tunIpv6,
       tunIpv6Enabled: j['tunIpv6Enabled'] as bool? ?? d.tunIpv6Enabled,
       tunStack: j['tunStack'] as String? ?? d.tunStack,
-      tunMtu: j['tunMtu'] as int? ?? d.tunMtu,
+      // Прежний дефолт MTU (9000) переводим на 4064. Это было НАШЕ значение,
+      // а не выбор человека. Кто выставил своё — сохранит: остальные не трогаем.
+      tunMtu: () {
+        final v = j['tunMtu'] as int? ?? d.tunMtu;
+        return v == 9000 ? d.tunMtu : v;
+      }(),
       strictRoute: j['strictRoute'] as bool? ?? d.strictRoute,
       launchAtStartup: j['launchAtStartup'] as bool? ?? d.launchAtStartup,
       autoConnectAfterLaunch: j['autoConnectAfterLaunch'] as bool? ?? d.autoConnectAfterLaunch,
@@ -834,14 +890,28 @@ class AppSettings {
       latencyTimeoutMs: j['latencyTimeoutMs'] as int? ?? d.latencyTimeoutMs,
       latencyWarmup: j['latencyWarmup'] as bool? ?? d.latencyWarmup,
       tolerance: j['tolerance'] as int? ?? d.tolerance,
-      autoSelectIntervalMin: j['autoSelectIntervalMin'] as int? ?? d.autoSelectIntervalMin,
+      // Ноль был НАШИМ прежним дефолтом («не перепроверять по расписанию»), и
+      // из-за него авто-выбор срабатывал ровно один раз за сеанс. Переводим на
+      // новое значение — как и остальные наши неудачные умолчания. Кому нужно
+      // «никогда», выставит 0 заново, и оно сохранится: сравниваем с прежним
+      // дефолтом только при чтении, а записанное руками уже не трогаем.
+      autoSelectIntervalMin: () {
+        final v = j['autoSelectIntervalMin'] as int? ?? d.autoSelectIntervalMin;
+        return v == 0 ? d.autoSelectIntervalMin : v;
+      }(),
       autoSelectFilter: j['autoSelectFilter'] as String? ?? d.autoSelectFilter,
       autoSelectLimit: j['autoSelectLimit'] as int? ?? d.autoSelectLimit,
       autoSelectFavFirst: j['autoSelectFavFirst'] as bool? ?? d.autoSelectFavFirst,
       autoSelectOnConnect: j['autoSelectOnConnect'] as bool? ?? d.autoSelectOnConnect,
       autoSetSystemProxy: j['autoSetSystemProxy'] as bool? ?? d.autoSetSystemProxy,
       autoUpdateSubscription: j['autoUpdateSubscription'] as bool? ?? d.autoUpdateSubscription,
-      subUpdateIntervalHours: j['subUpdateIntervalHours'] as int? ?? d.subUpdateIntervalHours,
+      // Ноль означал «взять интервал из заголовка панели», но заголовок
+      // присылают не все — у таких подписка не обновлялась вообще никогда.
+      // Это тоже наш прежний дефолт, переводим на явные 12 часов.
+      subUpdateIntervalHours: () {
+        final v = j['subUpdateIntervalHours'] as int? ?? d.subUpdateIntervalHours;
+        return v == 0 ? d.subUpdateIntervalHours : v;
+      }(),
       checkCoreUpdates: j['checkCoreUpdates'] as bool? ?? d.checkCoreUpdates,
       autoUpdateCores: j['autoUpdateCores'] as bool? ?? d.autoUpdateCores,
       // Пустая строка в сохранённых настройках — это НЕ выбор человека, а
@@ -867,7 +937,10 @@ class AppSettings {
       proxyBypassList: _fixLegacyBypassList(
           j['proxyBypassList'] as String? ?? d.proxyBypassList),
       autoRestartCore: j['autoRestartCore'] as bool? ?? d.autoRestartCore,
-      dnsFakeIp: j['dnsFakeIp'] as bool? ?? d.dnsFakeIp,
+      // Старая галочка превращается в способ: включённый FakeIP так и
+      // остаётся FakeIP, выключенный — «активным сервером».
+      dnsProxyResolve: j['dnsProxyResolve'] as String? ??
+          ((j['dnsFakeIp'] as bool? ?? false) ? 'fakeip' : d.dnsProxyResolve),
       dnsHijack: j['dnsHijack'] as bool? ?? d.dnsHijack,
       dnsTtl: j['dnsTtl'] as int? ?? d.dnsTtl,
       dnsClientSubnet: j['dnsClientSubnet'] as String? ?? d.dnsClientSubnet,
@@ -3375,6 +3448,29 @@ del "%~f0"
   // каждый сервер: вся подписка обычно живёт на одном хосте.
   final Map<String, String?> _hostIpCache = {};
 
+  // Умеет ли лежащее рядом ядро сетевой стек gvisor. Спрашиваем у самого
+  // бинарника, а не предполагаем: сборки sing-box отличаются набором тегов, и
+  // `gvisor` есть далеко не в каждой. Конфиг с неподдерживаемым стеком не
+  // ругается предупреждением, а роняет ядро на старте:
+  //   FATAL start inbound/tun: gVisor is not included in this build
+  // На этом приложение однажды перестало подключаться совсем — дефолт был
+  // выставлен «как у Karing», а тот раздаёт собственную сборку ядра.
+  bool? _coreHasGvisor;
+
+  Future<bool> _coreSupportsGvisor() async {
+    if (_coreHasGvisor != null) return _coreHasGvisor!;
+    try {
+      final r = await Process.run(_singBoxPath, ['version'])
+          .timeout(const Duration(seconds: 5));
+      _coreHasGvisor = '${r.stdout}'.contains('with_gvisor');
+    } catch (_) {
+      // Не спросили — считаем, что не умеет: system поддерживают все сборки,
+      // и ошибиться в эту сторону безопаснее.
+      _coreHasGvisor = false;
+    }
+    return _coreHasGvisor!;
+  }
+
   /// Подставляет в outbound'ы IP вместо имени хоста.
   ///
   /// Это лечение самой упрямой поломки TUN-режима: ядро не может подключиться
@@ -3737,17 +3833,17 @@ del "%~f0"
     //   dns: lookup failed for cp.cloudflare.com: context deadline exceeded (10.0s)
     // Поэтому берём первый сервер с ПРОСТЫМ транспортом: у такого UDP
     // проходит гарантированно. gRPC/WebSocket/HTTP-транспорты пропускаем.
-    const udpUnfriendly = {'grpc', 'ws', 'http', 'httpupgrade', 'xhttp'};
-    final dnsCapable = singboxServers.where((s) {
-      final tr = s.outbound['transport'];
-      if (tr is! Map) return true; // без транспорта — обычный TCP, UDP пройдёт
-      return !udpUnfriendly.contains('${tr['type']}');
-    }).toList();
-    final dnsDetourTag = dnsCapable.isNotEmpty
-        ? dnsCapable.first.outbound['tag'] as String
-        : (singboxServers.isNotEmpty
-            ? singboxServers.first.outbound['tag'] as String
-            : 'proxy');
+    // ЭТО ОПИСАНИЕ ОСТАВЛЕНО КАК ИСТОРИЯ: фиксированный детур убран, теперь
+    // способ выбирает человек («Способ разрешения в DNS», см. ниже), и по
+    // умолчанию DNS идёт через активный сервер — как в Karing.
+    //
+    // Замер 2026-08-05 на всех девяти серверах подписки показал, что UDP
+    // несут ВСЕ, включая gRPC-транспорт: DNS через каждый из них отдаёт 204
+    // за 0.2–0.5 с. То есть причина, по которой детур когда-то прибили к
+    // фиксированному серверу, к нынешней сборке ядра не относится.
+    // Если она вернётся, симптом будет прежний — «половина зарубежных сайтов
+    // не грузится» и `dns: lookup failed ... context deadline exceeded` в
+    // логе, — и лечится он переключением способа на «Напрямую».
 
     // DNS задаём В ОБОИХ режимах, а не только в TUN. В обычном режиме его
     // раньше не было вовсе, и резолв шёл через системный. С включённым geoip-ru
@@ -3766,16 +3862,11 @@ del "%~f0"
       hosts.putIfAbsent(domain, () => []).add(addr);
     }
 
-    // Системный резолвер отдельным сервером, ВСЕГДА. На него вешается
-    // `route.default_domain_resolver` — то, чем ядро узнаёт адрес самого
-    // прокси-сервера. Этот резолв обязан работать по физическому каналу,
-    // до того как поднялся хоть один туннель, поэтому зависеть от публичного
-    // адреса он не имеет права: если провайдер его не пропускает, ядро
-    // встаёт намертво (доказано debug-логом: `lookup failed for
-    // fill.mrmultik.shop: context deadline exceeded`, 10 с, и по кругу).
-    const localDnsTag = 'dns-local';
     // `local` — это тип сервера в sing-box, а не адрес: он спрашивает
-    // резолвер операционной системы, какой бы тот ни был на текущей сети.
+    // резолвер операционной системы. ПОД TUN ЭТО ЛОВУШКА: запрос системного
+    // резолвера сам заходит в туннель и упирается в перехват DNS. Поэтому
+    // такой сервер появляется в конфиге, только если человек выбрал его
+    // сознательно, и никогда не ставится по умолчанию.
     Map<String, Object> dnsServer(String tag, String value, {String? detour}) =>
         value == AppSettings.kSystemDns
             ? {"type": "local", "tag": tag}
@@ -3788,11 +3879,31 @@ del "%~f0"
                 "detour": ?detour,
               };
 
+    // Каким сервером резолвить то, что ПОЙДЁТ МИМО туннеля (RU-домены, личные
+    // списки «напрямую», хосты прокси-серверов). См. длинный комментарий ниже:
+    // под TUN запрос мимо туннеля не доходит никуда, поэтому резолвим через
+    // туннель, а маршрутизацию оставляем прежней.
+    final directDnsTag = _tunMode ? 'dns-remote' : 'dns-direct';
+
+    // Способ разрешения для трафика прокси (настройка «Способ разрешения в
+    // DNS», как в Karing). Меняется только ДЕТУР сервера dns-remote и то,
+    // добавляется ли FakeIP:
+    //
+    //  * current — через АКТИВНЫЙ сервер (селектор `proxy`). Резолв и
+    //    соединение идут одним путём, поэтому и адрес приходит тот же,
+    //    что увидит сервер. Раньше детур был жёстко прибит к первому серверу
+    //    с простым транспортом, и при переключении сервера DNS продолжал
+    //    ходить через старый — незаметно и неверно.
+    //  * direct — мимо туннеля. Быстро, но провайдер видит запрашиваемые
+    //    домены, а под TUN этот путь может не работать вовсе.
+    //  * fakeip — адрес выдаётся мгновенно, настоящий узнаётся при коннекте.
+    final proxyResolve = _settings.dnsProxyResolve;
+    final remoteDetour = proxyResolve == 'direct' ? null : 'proxy';
+
     config["dns"] = {
       "servers": [
-        {"type": "local", "tag": localDnsTag},
         dnsServer("dns-direct", _settings.dnsDirect),
-        dnsServer("dns-remote", _settings.dnsRemote, detour: dnsDetourTag),
+        dnsServer("dns-remote", _settings.dnsRemote, detour: remoteDetour),
         if (hosts.isNotEmpty) {"type": "hosts", "tag": "dns-hosts", "predefined": hosts},
         // FakeIP отдаёт выдуманный адрес мгновенно, а настоящий узнаётся уже
         // при подключении — это убирает ожидание DNS перед каждым запросом.
@@ -3809,7 +3920,7 @@ del "%~f0"
         if (bypassDomains.isNotEmpty)
           {
             "domain": bypassDomains,
-            "server": "dns-direct",
+            "server": directDnsTag,
             if (_settings.dnsTtl > 0) "rewrite_ttl": _settings.dnsTtl,
           },
       ],
@@ -3832,13 +3943,31 @@ del "%~f0"
     // напрямую, а детур на пустой direct-outbound ядро считает бессмыслицей.
     // ВАЖНО: `sing-box check` эту ошибку НЕ ловит — она возникает при старте
     // сервиса, а не при разборе конфига. Проверять только реальным запуском.
-    // RU-домены резолвим тоже напрямую. Иначе geoip-ru не сработает: адрес
-    // придёт от зарубежного DNS, и для российского сайта запросто вернётся
-    // не тот IP, что видит местный резолвер — правило по IP промахнётся.
+    //
+    // ПОД TUN «резолвить напрямую» НЕ РАБОТАЕТ, и это отдельная беда.
+    // Замерено на живой машине: через туннель `cp.cloudflare.com` даёт 204 за
+    // 0.1 с, а `yandex.ru` висит 11 секунд с `dns=0.000` — то есть DNS-запрос
+    // мимо туннеля не доходит вообще, ни к 1.1.1.1, ни к 77.88.8.8, ни к
+    // 8.8.8.8. `strict_route` тут ни при чём: A/B с ним и без него дал
+    // одинаковый результат.
+    //
+    // При этом сам outbound `direct` ЖИВ — по нему ядро ходит до
+    // прокси-сервера, и туннель поднимается. Не работает именно DNS.
+    //
+    // Отсюда развязка: «резолвить» и «маршрутизировать» — разные вещи, и
+    // связывать их не обязано. Под TUN резолвим ВСЁ через туннель (он
+    // заведомо работает), а трафик по-прежнему пускаем мимо по route.rules.
+    // Российский сайт получит адрес от зарубежного DNS, но пойдёт к нему
+    // напрямую — а это ровно то, что нужно.
+    //
+    // Цена: geoip-ru может промахнуться, если зарубежный DNS отдаст не тот
+    // адрес, что видит местный резолвер. Доменное правило geosite-ru при этом
+    // работает как прежде, а промах по IP несравнимо дешевле, чем нынешнее
+    // «российские сайты не открываются вовсе».
     if (geoSiteReady) {
       (config["dns"]["rules"] as List).add({
         "rule_set": [_rsGeositeRu.tag],
-        "server": "dns-direct",
+        "server": directDnsTag,
       });
     }
     // То же и для личного списка «напрямую»: без этого домен уходит мимо
@@ -3847,7 +3976,7 @@ del "%~f0"
     if (userDirectDomains != null && userDirectDomains.isNotEmpty) {
       (config["dns"]["rules"] as List).add({
         "domain_suffix": userDirectDomains,
-        "server": "dns-direct",
+        "server": directDnsTag,
       });
     }
     // Сервисы, помеченные «напрямую», тоже резолвим настоящим DNS. При
@@ -3857,7 +3986,7 @@ del "%~f0"
     if (directServices != null && directServices.isNotEmpty) {
       (config["dns"]["rules"] as List).add({
         "domain_suffix": directServices,
-        "server": "dns-direct",
+        "server": directDnsTag,
       });
     }
     // FakeIP — САМЫМ последним правилом, когда всё, что требует настоящего
@@ -3870,6 +3999,17 @@ del "%~f0"
     }
 
     if (_tunMode) {
+      // Стек сверяем с возможностями ядра. Конфиг с неподдерживаемым стеком
+      // не даёт предупреждения — он роняет ядро на старте, и приложение
+      // перестаёт подключаться вообще. Лучше молча взять рабочий и сказать
+      // об этом в лог, чем оставить человека без сети.
+      // `mixed` тоже требует gVisor — он использует его для UDP.
+      var tunStack = _settings.tunStack;
+      if ((tunStack == 'gvisor' || tunStack == 'mixed') &&
+          !await _coreSupportsGvisor()) {
+        _appendLog(t('log.tunStackFallback'));
+        tunStack = 'system';
+      }
       config["inbounds"] = [
         {
           "type": "tun",
@@ -3887,7 +4027,7 @@ del "%~f0"
           ],
           "auto_route": true,
           "strict_route": _settings.strictRoute,
-          "stack": _settings.tunStack,
+          "stack": tunStack,
           "mtu": _settings.tunMtu,
         }
       ];
@@ -3939,7 +4079,11 @@ del "%~f0"
         // без резолва нет прокси, без прокси нет DNS. Поймано debug-логом:
         //   dns: lookup failed for <хост сервера>: context deadline exceeded
         // по 10 секунд и по кругу, при полностью исправном туннеле.
-        "default_domain_resolver": localDnsTag,
+        // dns-direct, а не системный резолвер: под TUN системный сам ходит
+        // через туннель. Резолвить тут по сути нечего — адреса серверов уже
+        // подставлены в конфиг (_bakeServerIps), — но ключ обязателен, без
+        // него свежие ядра не стартуют.
+        "default_domain_resolver": "dns-direct",
       };
     } else {
       config["inbounds"] = [
@@ -3961,7 +4105,11 @@ del "%~f0"
         // См. комментарий в TUN-ветке: без этого ключа свежие ядра не
         // стартуют, а резолвить адрес прокси-сервера обязан системный
         // резолвер — единственный, который работает на любой сети.
-        "default_domain_resolver": localDnsTag,
+        // dns-direct, а не системный резолвер: под TUN системный сам ходит
+        // через туннель. Резолвить тут по сути нечего — адреса серверов уже
+        // подставлены в конфиг (_bakeServerIps), — но ключ обязателен, без
+        // него свежие ядра не стартуют.
+        "default_domain_resolver": "dns-direct",
       };
     }
 
@@ -4500,6 +4648,15 @@ del "%~f0"
   }
 
   Future<void> _fetchStats() async {
+    // Ядро не работает — спрашивать нечего и жаловаться не на что. Без этой
+    // проверки после падения ядра на экране повисало красное «API недоступен:
+    // TimeoutException», хотя человек видел выключенный щит: сообщение об
+    // ошибке там, где ошибки нет, только сбивает с толку.
+    if (_runningEngine == null) {
+      _statsTimer?.cancel();
+      if (mounted && _statsText.isNotEmpty) setState(() => _statsText = '');
+      return;
+    }
     try {
       final versionResp = await http.get(Uri.parse('$_clashApiBase/version')).timeout(const Duration(seconds: 2));
       final connectionsResp = await http.get(Uri.parse('$_clashApiBase/connections')).timeout(const Duration(seconds: 2));
@@ -5795,7 +5952,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late String _muxProtocol;
   late bool _muxPadding;
   late final TextEditingController _muxStreams;
-  late bool _dnsFakeIp;
+  late String _dnsProxyResolve;
   late bool _dnsHijack;
   late final TextEditingController _dnsTtl;
   late final TextEditingController _dnsEcs;
@@ -5863,7 +6020,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _muxProtocol = s.muxProtocol;
     _muxPadding = s.muxPadding;
     _muxStreams = TextEditingController(text: '${s.muxMaxStreams}');
-    _dnsFakeIp = s.dnsFakeIp;
+    _dnsProxyResolve = s.dnsProxyResolve;
     _dnsHijack = s.dnsHijack;
     _dnsTtl = TextEditingController(text: '${s.dnsTtl}');
     _dnsEcs = TextEditingController(text: s.dnsClientSubnet);
@@ -5965,7 +6122,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         muxProtocol: _muxProtocol,
         muxMaxStreams: int.tryParse(_muxStreams.text.trim()) ?? s.muxMaxStreams,
         muxPadding: _muxPadding,
-        dnsFakeIp: _dnsFakeIp,
+        dnsProxyResolve: _dnsProxyResolve,
         dnsHijack: _dnsHijack,
         dnsTtl: int.tryParse(_dnsTtl.text.trim()) ?? s.dnsTtl,
         dnsClientSubnet: _dnsEcs.text.trim(),
@@ -6022,17 +6179,51 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Widget _sectionMenu() => ListView(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        children: _sectionIcons.entries
-            .map((e) => ListTile(
-                  leading: Icon(e.value),
-                  title: Text(t('section.${e.key}')),
-                  subtitle:
-                      Text(t('section.${e.key}Hint'), style: const TextStyle(fontSize: 11)),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () => setState(() => _openSection = e.key),
-                ))
-            .toList(),
+        children: [
+          ..._sectionIcons.entries.map((e) => ListTile(
+                leading: Icon(e.value),
+                title: Text(t('section.${e.key}')),
+                subtitle:
+                    Text(t('section.${e.key}Hint'), style: const TextStyle(fontSize: 11)),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => setState(() => _openSection = e.key),
+              )),
+          const Divider(height: 24),
+          // Сброс на заводские значения. Нужен потому, что настроек много и
+          // взаимосвязанных: одна неудачная комбинация (не тот стек TUN, не
+          // тот способ резолва) роняет подключение целиком, а вспомнить, что
+          // именно менял, человек уже не может. Профили и подписки при этом
+          // не трогаем — терять их из-за настроек было бы несоразмерно.
+          ListTile(
+            leading: Icon(Icons.restart_alt, color: Theme.of(context).colorScheme.error),
+            title: Text(t('set.reset')),
+            subtitle: Text(t('hint.reset'), style: const TextStyle(fontSize: 11)),
+            onTap: _confirmReset,
+          ),
+        ],
       );
+
+  Future<void> _confirmReset() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(t('set.reset')),
+        content: Text(t('dlg.resetText')),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text(t('common.cancel'))),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text(t('set.reset'))),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    // Возвращаем экран настроек с чистым объектом — сохранение и перезапись
+    // файла делает главный экран, как и при обычном «Сохранить».
+    Navigator.pop(context, AppSettings());
+  }
 
   // Автоподбор: опрашиваем каждый DNS-сервер из списка и берём самый быстрый.
   // Меряем реальным DNS-запросом по UDP, а не пингом: ICMP многие провайдеры
@@ -6459,14 +6650,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
             value: _dnsHijack,
             onChanged: (v) => setState(() => _dnsHijack = v),
           ),
-          SwitchListTile(
+          // Способ разрешения в DNS для трафика прокси — выпадающий список, а
+          // не галочка «FakeIP». Галочка описывала только один из трёх
+          // способов, а какой сервер резолвит остальные два, человек вообще
+          // не видел и поменять не мог.
+          ListTile(
             contentPadding: EdgeInsets.zero,
-            title: Text(t('set.dnsFakeIp')),
-            subtitle: Text(
-                t('hint.dnsFakeIp'),
-                style: TextStyle(fontSize: 12)),
-            value: _dnsFakeIp,
-            onChanged: (v) => setState(() => _dnsFakeIp = v),
+            title: Text(t('set.dnsProxyResolve')),
+            subtitle: Text(t('hint.dnsProxyResolve.$_dnsProxyResolve'),
+                style: const TextStyle(fontSize: 12)),
+            trailing: DropdownButton<String>(
+              value: _dnsProxyResolve,
+              onChanged: (v) =>
+                  setState(() => _dnsProxyResolve = v ?? _dnsProxyResolve),
+              items: [
+                for (final m in const ['current', 'direct', 'fakeip'])
+                  DropdownMenuItem(value: m, child: Text(t('dns.mode.$m'))),
+              ],
+            ),
           ),
           _field(_dnsTtl, t('set.dnsTtl'), hint: t('hint.dnsTtl')),
           _field(_dnsEcs, t('set.dnsEcs'),

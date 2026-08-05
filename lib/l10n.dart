@@ -72,13 +72,14 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'Terms of use',
   },
   'onb.licenseText': {
-    'ru': 'Multik Sila — клиент для подключения к прокси-серверам, которые '
+    'ru': 'Правообладатель: Multik\n\n'
+        'Multik Sila — клиент для подключения к прокси-серверам, которые '
         'выбираете вы сами. Приложение не предоставляет серверы, не входит в '
         'состав каких-либо сервисов и не имеет отношения к содержимому '
         'передаваемого трафика.\n\n'
         '1. Программа предоставляется «как есть», без гарантий работоспособности '
-        'и пригодности для конкретных задач. Автор не отвечает за убытки, '
-        'связанные с её использованием.\n\n'
+        'и пригодности для конкретных задач. Правообладатель не отвечает за '
+        'убытки, связанные с её использованием.\n\n'
         '2. Вы самостоятельно отвечаете за соблюдение законодательства своей '
         'страны и условий сервисов, к которым подключаетесь.\n\n'
         '3. Приложение не собирает и никуда не передаёт персональные данные. '
@@ -87,13 +88,14 @@ const Map<String, Map<String, String>> _strings = {
         '(sing-box, Xray-core), распространяемые на условиях их собственных '
         'лицензий.\n\n'
         'Нажимая «Принимаю», вы подтверждаете согласие с этими условиями.',
-    'en': 'Multik Sila is a client for connecting to proxy servers that you '
+    'en': 'Copyright holder: Multik\n\n'
+        'Multik Sila is a client for connecting to proxy servers that you '
         'choose yourself. The application does not provide servers, is not part '
         'of any service, and has no relation to the contents of the traffic '
         'passing through it.\n\n'
         '1. The software is provided "as is", without warranty of any kind, '
-        'including fitness for a particular purpose. The author is not liable '
-        'for any damages arising from its use.\n\n'
+        'including fitness for a particular purpose. The copyright holder is '
+        'not liable for any damages arising from its use.\n\n'
         '2. You are solely responsible for complying with the laws of your '
         'country and with the terms of the services you connect to.\n\n'
         '3. The application collects no personal data and sends none anywhere. '
@@ -450,6 +452,51 @@ const Map<String, Map<String, String>> _strings = {
   'set.dnsPicking': {'ru': 'Опрашиваю серверы…', 'en': 'Querying servers…'},
   'set.dnsHijack': {'ru': 'Перехватывать DNS в TUN', 'en': 'Hijack DNS in TUN'},
   'set.dnsFakeIp': {'ru': 'FakeIP', 'en': 'FakeIP'},
+  'set.reset': {
+    'ru': 'Сбросить настройки',
+    'en': 'Reset settings',
+  },
+  'hint.reset': {
+    'ru': 'Вернуть все значения по умолчанию. Профили и подписки останутся',
+    'en': 'Restore every value to its default. Profiles and subscriptions stay',
+  },
+  'dlg.resetText': {
+    'ru': 'Все настройки вернутся к значениям по умолчанию: DNS, TUN, '
+        'маршрутизация, автозапуск и остальное.\n\nПрофили, подписки и '
+        'сохранённые серверы НЕ затрагиваются.\n\nПродолжить?',
+    'en': 'Every setting goes back to its default: DNS, TUN, routing, '
+        'startup behaviour and the rest.\n\nProfiles, subscriptions and saved '
+        'servers are NOT affected.\n\nContinue?',
+  },
+  'set.dnsProxyResolve': {
+    'ru': 'Способ разрешения в DNS',
+    'en': 'DNS resolution method',
+  },
+  'dns.mode.current': {'ru': 'Текущий сервер', 'en': 'Current server'},
+  'dns.mode.direct': {'ru': 'Напрямую', 'en': 'Direct'},
+  'dns.mode.fakeip': {'ru': 'FakeIP', 'en': 'FakeIP'},
+  // Подпись меняется вместе с выбором: у каждого способа своя цена, и знать
+  // её человек должен до того, как переключит, а не после.
+  'hint.dnsProxyResolve.current': {
+    'ru': 'Домены резолвит активный сервер. Адрес приходит тот же, что увидит '
+        'сервер при подключении — самый предсказуемый вариант.',
+    'en': 'Domains are resolved by the active server, so the address matches '
+        'what the server will see — the most predictable option.',
+  },
+  'hint.dnsProxyResolve.direct': {
+    'ru': 'Домены резолвятся мимо туннеля. Быстрее, но провайдер видит, что вы '
+        'запрашиваете, а в TUN-режиме этот путь может не работать вовсе.',
+    'en': 'Domains are resolved outside the tunnel. Faster, but your ISP sees '
+        'the queries, and in TUN mode this path may not work at all.',
+  },
+  'hint.dnsProxyResolve.fakeip': {
+    'ru': 'Адрес выдаётся мгновенно, настоящий узнаётся уже при подключении — '
+        'убирает ожидание DNS перед каждым запросом. Домены, которым нужен '
+        'настоящий адрес (обход РФ, ваши списки), резолвятся честно.',
+    'en': 'The address is returned instantly and the real one is resolved when '
+        'connecting, removing the DNS wait before every request. Domains that '
+        'need a real address (RU bypass, your own lists) still resolve honestly.',
+  },
   'set.dnsTtl': {'ru': 'Переписывать TTL, секунд', 'en': 'Rewrite TTL, seconds'},
   'set.dnsEcs': {'ru': 'ECS — подсеть клиента', 'en': 'ECS — client subnet'},
   'set.dnsHosts': {'ru': 'Статические записи', 'en': 'Static entries'},
@@ -1060,6 +1107,12 @@ const Map<String, Map<String, String>> _strings = {
   'log.sysProxyOnFailed': {
     'ru': 'Не удалось включить системный прокси: {e}',
     'en': 'Could not enable the system proxy: {e}',
+  },
+  'log.tunStackFallback': {
+    'ru': 'Ядро собрано без gVisor — беру системный сетевой стек. Чтобы '
+        'пользоваться gVisor, нужна сборка sing-box с тегом with_gvisor.',
+    'en': 'The core is built without gVisor — falling back to the system stack. '
+        'Using gVisor requires a sing-box build with the with_gvisor tag.',
   },
   'log.sysProxyRestored': {
     'ru': 'Системный прокси возвращён в прежнее состояние',

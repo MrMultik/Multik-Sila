@@ -1,12 +1,14 @@
 ﻿TERMS OF USE
 
+Copyright holder: Multik
+
 Multik Sila is a client for connecting to proxy servers that you choose
 yourself. The application does not provide servers, is not part of any service,
 and has no relation to the contents of the traffic passing through it.
 
 1. The software is provided "as is", without warranty of any kind, including
-   fitness for a particular purpose. The author is not liable for any damages
-   arising from its use.
+   fitness for a particular purpose. The copyright holder is not liable for any
+   damages arising from its use.
 
 2. You are solely responsible for complying with the laws of your country and
    with the terms of the services you connect to.
