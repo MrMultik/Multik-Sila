@@ -8,6 +8,7 @@ import 'package:image/image.dart' as img;
 import 'package:zxing2/qrcode.dart';
 import 'package:flutter/services.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:screen_retriever/screen_retriever.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:archive/archive.dart';
 import 'diagnostics.dart';
@@ -122,31 +123,58 @@ void main() async {
   // Перехватываем закрытие окна сами — иначе крестик убьёт процесс вместе с
   // ядром, а нам нужно свернуть в трей и продолжить держать соединение.
   await windowManager.setPreventClose(true);
-  // Ниже этого размера нижний блок (тумблер TUN, маршрутизация, кнопки) уже не
-  // помещается и колонка переливается через край — именно так и вылезла
-  // жёлто-чёрная полоса "BOTTOM OVERFLOWED".
-  await windowManager.setMinimumSize(const Size(420, 660));
+  // Рабочая область экрана — то, что остаётся за вычетом панели задач. Всё
+  // остальное считается ОТ НЕЁ, а не от жёстких чисел.
+  //
+  // Причина: раньше окно открывалось фиксированными 480x880, а на ноутбуке
+  // 1536x864 рабочая область по высоте всего 816 — окно физически не
+  // помещалось на экран, и нижняя часть уходила под край. На больших мониторах
+  // этого не видно, поэтому и прожило долго.
+  //
+  // visibleSize может не отдаться (несколько мониторов, экзотические драйверы) —
+  // тогда откатываемся на полный размер экрана, а если и его нет, на прежние
+  // константы. Ошибка тут не должна мешать приложению запуститься вообще.
+  Size work = const Size(1280, 800);
+  try {
+    final display = await screenRetriever.getPrimaryDisplay();
+    work = display.visibleSize ?? display.size;
+  } catch (_) {}
 
-  // Размер по умолчанию — рабочий, а не минимальный. Раньше окно открывалось
-  // ровно в minimumSize (560 px), и всё выглядело зажатым.
-  Size size = const Size(480, 880);
+  // Минимум задаём с оглядкой на экран: на маленьком ноутбуке жёсткие 660
+  // сами по себе не дали бы окну поместиться. Главный экран это переживает —
+  // блок щита лежит в SingleChildScrollView и на низком окне прокручивается,
+  // а не переливается через край жёлто-чёрной полосой.
+  final minH = math.min(620.0, work.height - 40);
+  final minW = math.min(420.0, work.width - 40);
+  await windowManager.setMinimumSize(Size(minW, minH));
+
+  // Размер по умолчанию — рабочий, а не минимальный: раньше окно открывалось
+  // ровно в minimumSize, и всё выглядело зажатым. Но не выше рабочей области.
+  Size size = Size(
+    math.min(480.0, work.width - 40),
+    math.min(860.0, work.height - 40),
+  );
   Offset? position;
   try {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(windowBoundsPrefsKey);
     if (raw != null) {
       final b = jsonDecode(raw) as Map<String, dynamic>;
-      // Ограничиваем сверху: если окно когда-то разворачивали, в память попал
-      // размер во весь экран, и приложение потом каждый раз открывалось
-      // распахнутым. Ниже минимума тоже не пускаем — иначе всё зажимается.
-      final w = (b['w'] as num).toDouble().clamp(420.0, 1200.0);
-      final h = (b['h'] as num).toDouble().clamp(660.0, 1040.0);
+      // Ограничиваем сверху размерами экрана, а не константой: если окно
+      // когда-то разворачивали, в память попал размер во весь экран, и
+      // приложение потом каждый раз открывалось распахнутым. Снизу — минимумом,
+      // иначе всё зажимается.
+      final w = (b['w'] as num).toDouble().clamp(minW, work.width);
+      final h = (b['h'] as num).toDouble().clamp(minH, work.height);
       size = Size(w, h);
       final x = (b['x'] as num).toDouble();
       final y = (b['y'] as num).toDouble();
-      // Отрицательные координаты означают, что окно было на отключённом
-      // сейчас мониторе — тогда лучше просто открыться по центру.
-      if (x >= 0 && y >= 0) position = Offset(x, y);
+      // Окно должно оказаться на экране целиком. Отрицательные координаты либо
+      // выход за правый/нижний край означают, что монитор с тех пор отключили
+      // или сменили разрешение, — тогда лучше открыться по центру, чем за краем.
+      if (x >= 0 && y >= 0 && x + w <= work.width && y + h <= work.height) {
+        position = Offset(x, y);
+      }
     }
   } catch (_) {
     // битые координаты не должны мешать запуску — откроемся с дефолтом
@@ -476,7 +504,14 @@ class AppSettings {
     this.subUpdateIntervalHours = 0,
     this.checkCoreUpdates = true,
     this.autoUpdateCores = true,
-    this.updateFeedUrl = '',
+    // Свои же релизы на GitHub. Раньше тут было пусто — «своего места
+    // публикации у проекта пока нет», — и самообновление не делало ничего:
+    // людям приходилось следить за выходом версий вручную. Место появилось,
+    // так что адрес по умолчанию прописан. Поле остаётся редактируемым:
+    // сгодится любой хостинг, отдающий JSON (см. _fetchAppUpdate — он
+    // понимает и формат GitHub, и простой манифест `{version, url}`).
+    this.updateFeedUrl =
+        'https://api.github.com/repos/MrMultik/Multik-Sila/releases/latest',
     this.autoUpdateApp = true,
     this.ruleSetRefreshDays = 1,
     this.geoSiteEnabled = true,
@@ -809,7 +844,14 @@ class AppSettings {
       subUpdateIntervalHours: j['subUpdateIntervalHours'] as int? ?? d.subUpdateIntervalHours,
       checkCoreUpdates: j['checkCoreUpdates'] as bool? ?? d.checkCoreUpdates,
       autoUpdateCores: j['autoUpdateCores'] as bool? ?? d.autoUpdateCores,
-      updateFeedUrl: j['updateFeedUrl'] as String? ?? d.updateFeedUrl,
+      // Пустая строка в сохранённых настройках — это НЕ выбор человека, а
+      // прежний дефолт «источника нет». Тем, у кого он остался, подставляем
+      // новый адрес: иначе самообновление у них так и не включится никогда.
+      // Кто вписал свой хостинг — сохранит его, пустым он не бывает.
+      updateFeedUrl: () {
+        final v = (j['updateFeedUrl'] as String? ?? '').trim();
+        return v.isEmpty ? d.updateFeedUrl : v;
+      }(),
       autoUpdateApp: j['autoUpdateApp'] as bool? ?? d.autoUpdateApp,
       ruleSetRefreshDays: j['ruleSetRefreshDays'] as int? ?? d.ruleSetRefreshDays,
       geoSiteEnabled: j['geoSiteEnabled'] as bool? ?? d.geoSiteEnabled,
@@ -2221,17 +2263,49 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   String get _stagingDir => '$_workDir${Platform.pathSeparator}update_staging';
 
   /// Забирает манифест и возвращает (версия, ссылка на zip), если там что-то
-  /// новее установленного. Формат манифеста намеренно простой:
-  /// `{"version": "1.0.1", "url": "https://.../MultikSila-1.0.1.zip"}`
+  /// новее установленного.
+  ///
+  /// Понимает ДВА формата, и различает их по содержимому ответа, а не по
+  /// адресу — чтобы человек мог подставить свой хостинг, не меняя код:
+  ///
+  ///  * свой манифест: `{"version": "1.0.1", "url": "https://.../app.zip"}`
+  ///  * ответ GitHub `/releases/latest` — там версия лежит в `tag_name`
+  ///    (с ведущей `v`), а ссылка на файл — в списке `assets`.
+  ///
+  /// Из ассетов берётся ZIP, а НЕ установщик: механизм применения обновления
+  /// распаковывает папку рядом и подменяет её батником после выхода
+  /// приложения (см. _stageAppUpdate / _applyAppUpdateAndRestart). Запускать
+  /// установщик из работающего приложения нельзя — он первым делом попросит
+  /// это самое приложение закрыться.
   Future<(String, String)?> _fetchAppUpdate() async {
     final feed = _settings.updateFeedUrl.trim();
     if (feed.isEmpty) return null;
     try {
-      final r = await http.get(Uri.parse(feed)).timeout(const Duration(seconds: 20));
+      final r = await http.get(
+        Uri.parse(feed),
+        // GitHub без Accept отдаёт HTML-страницу вместо JSON.
+        headers: const {'Accept': 'application/vnd.github+json'},
+      ).timeout(const Duration(seconds: 20));
       if (r.statusCode != 200) return null;
       final j = jsonDecode(r.body) as Map<String, dynamic>;
-      final version = '${j['version'] ?? ''}'.trim();
-      final url = '${j['url'] ?? ''}'.trim();
+
+      String version;
+      String url;
+      if (j['tag_name'] != null) {
+        version = '${j['tag_name']}'.trim();
+        if (version.startsWith('v')) version = version.substring(1);
+        final assets = (j['assets'] as List?) ?? const [];
+        final zip = assets.cast<Map<String, dynamic>>().where((a) {
+          final name = '${a['name'] ?? ''}'.toLowerCase();
+          return name.endsWith('.zip');
+        }).toList();
+        if (zip.isEmpty) return null;
+        url = '${zip.first['browser_download_url'] ?? ''}'.trim();
+      } else {
+        version = '${j['version'] ?? ''}'.trim();
+        url = '${j['url'] ?? ''}'.trim();
+      }
+
       if (version.isEmpty || url.isEmpty) return null;
       if (_compareVersions(version, kAppVersion) <= 0) return null;
       return (version, url);
