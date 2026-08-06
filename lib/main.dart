@@ -37,6 +37,66 @@ ServerSocket? _instanceLock;
 /// возвратом системного прокси и снятием TUN-адаптера.
 const String kQuitCommand = 'quit';
 
+/// Стук второй копии: «покажи окно». Раньше она не присылала ничего и рвала
+/// соединение — этого хватало, пока ответ никого не интересовал.
+const String kShowCommand = 'show';
+
+/// Ответ первой копии: окно ПОКАЗАНО. Отправляется строго после `show()`,
+/// поэтому его получение — доказательство, а не предположение.
+const String kShownAck = 'shown';
+
+/// Отдельный маленький журнал только про захват замка.
+///
+/// Нужен потому, что копия, решившая «приложение уже работает», выходит из
+/// `main()` до создания экрана — то есть до того, как появляется `app_log.txt`.
+/// Сеанс, в котором «ничего не произошло», не оставлял вообще никаких следов,
+/// и разбирать было нечего.
+String? _startupLogPathCache;
+String _startupLogPath() {
+  final cached = _startupLogPathCache;
+  if (cached != null) return cached;
+  // Та же развилка, что у _workDir на экране: рядом с .exe, если туда можно
+  // писать, иначе в профиль. Продублирована намеренно — _workDir живёт в
+  // состоянии экрана, которого здесь ещё нет.
+  final exeDir = File(Platform.resolvedExecutable).parent.path;
+  try {
+    final probe = File('$exeDir${Platform.pathSeparator}.write_test');
+    probe.writeAsStringSync('x', flush: true);
+    probe.deleteSync();
+    _startupLogPathCache = '$exeDir${Platform.pathSeparator}startup_log.txt';
+  } catch (_) {
+    final appData = Platform.environment['APPDATA'] ??
+        Platform.environment['LOCALAPPDATA'] ??
+        exeDir;
+    final dir = '$appData${Platform.pathSeparator}Multik Sila';
+    try {
+      Directory(dir).createSync(recursive: true);
+    } catch (_) {}
+    _startupLogPathCache = '$dir${Platform.pathSeparator}startup_log.txt';
+  }
+  return _startupLogPathCache!;
+}
+
+void _startupLog(String text) {
+  try {
+    final file = File(_startupLogPath());
+    // Файл пишут ВСЕ копии сразу, поэтому он только дописывается и никогда не
+    // перезаписывается при старте — иначе копия, выходящая первой, стёрла бы
+    // запись той, что осталась работать. Обрезаем по размеру, а не по запуску.
+    if (file.existsSync() && file.lengthSync() > 64 * 1024) {
+      final tail = file.readAsStringSync();
+      file.writeAsStringSync(tail.substring(tail.length ~/ 2), flush: true);
+    }
+    file.writeAsStringSync(
+      '[${DateTime.now().toIso8601String()}] pid=$pid $text\n',
+      mode: FileMode.append,
+      flush: true,
+    );
+  } catch (_) {
+    // Диагностика не имеет права мешать запуску.
+  }
+}
+
 /// Штатный выход, выставляется главным экраном. Нужен установщику: тот не может
 /// просто убить процесс. Во-первых, приложение в TUN-режиме работает от
 /// администратора, а установщик — от обычного пользователя (`PrivilegesRequired=lowest`),
@@ -55,54 +115,127 @@ Future<bool> _claimSingleInstance() async {
     try {
       _instanceLock =
           await ServerSocket.bind(InternetAddress.loopbackIPv4, kSingleInstancePort);
-      _instanceLock!.listen((socket) async {
-        // Читаем, ЧТО пришло: пустой стук (вторая копия) означает «покажи
-        // окно», строка `quit` — «закройся по-нормальному». Без чтения
+      _startupLog('замок занят нами, запускаемся');
+      _instanceLock!.listen((socket) {
+        // Читаем, ЧТО пришло: `show` (или пустой стук от старой копии) —
+        // «покажи окно», `quit` — «закройся по-нормальному». Без чтения
         // отличить их нельзя, а установщику нужен именно второй случай.
-        // Таймаут короткий: вторая копия обычно просто рвёт соединение,
-        // и ждать её нечего.
-        var command = '';
-        try {
-          final data = await socket
-              .fold<List<int>>(<int>[], (acc, chunk) => acc..addAll(chunk))
-              .timeout(const Duration(milliseconds: 700), onTimeout: () => <int>[]);
-          command = String.fromCharCodes(data).trim();
-        } catch (_) {}
-        socket.destroy();
-        if (command == kQuitCommand) {
-          final quit = appQuitHandler;
-          if (quit != null) {
-            await quit();
-          } else {
-            // Экран ещё не поднялся — уборке нечего делать, но уйти обязаны:
-            // иначе установщик упрётся в занятый .exe.
-            exit(0);
+        //
+        // Разбираем по подписке, а не через fold: fold ждёт конца потока,
+        // то есть закрытия соединения ДРУГОЙ стороной, — а нам нужно на это
+        // же соединение ответить. Таймер на 700 мс страхует от копии,
+        // которая соединилась и не прислала ничего.
+        final buffer = <int>[];
+        late StreamSubscription<List<int>> sub;
+        var handled = false;
+
+        Future<void> handle() async {
+          if (handled) return;
+          handled = true;
+          final command = String.fromCharCodes(buffer).trim();
+          if (command == kQuitCommand) {
+            await sub.cancel();
+            socket.destroy();
+            final quit = appQuitHandler;
+            if (quit != null) {
+              await quit();
+            } else {
+              // Экран ещё не поднялся — уборке нечего делать, но уйти обязаны:
+              // иначе установщик упрётся в занятый .exe.
+              exit(0);
+            }
+            return;
           }
-          return;
+          try {
+            await windowManager.show();
+            await windowManager.focus();
+            // Подтверждение отправляем ТОЛЬКО после показа: в нём весь смысл.
+            // Вторая копия по нему отличает «окно показали» от «порт открыт,
+            // а копия висит», и во втором случае не уходит молча.
+            socket.write(kShownAck);
+            await socket.flush();
+            _startupLog('стук обработан, окно показано');
+          } catch (e) {
+            _startupLog('стук пришёл, но показать окно не вышло: $e');
+          }
+          await sub.cancel();
+          socket.destroy();
         }
-        try {
-          await windowManager.show();
-          await windowManager.focus();
-        } catch (_) {}
+
+        sub = socket.listen(
+          (chunk) {
+            buffer.addAll(chunk);
+            handle();
+          },
+          onDone: handle,
+          onError: (_) => handle(),
+          cancelOnError: false,
+        );
+        Timer(const Duration(milliseconds: 700), handle);
       });
       return true;
     } catch (_) {
       // Занято — стучимся: если там живая копия, она покажет окно.
       try {
-        final s = await Socket.connect(InternetAddress.loopbackIPv4, kSingleInstancePort,
-            timeout: const Duration(milliseconds: 400));
-        s.destroy();
-        return false; // достучались, значит копия действительно работает
+        final shown = await _knock();
+        if (shown) {
+          _startupLog('копия показала окно, выходим');
+          return false;
+        }
+        // Соединение прошло, а подтверждения нет. Это НЕ значит «копия
+        // работает»: соединение на петле завершает ядро Windows из очереди
+        // прослушивания, поэтому connect удаётся и к намертво зависшему
+        // процессу. Раньше здесь стоял безусловный выход — и человек, дважды
+        // щёлкнув по ярлыку, не получал ровно ничего.
+        _startupLog('порт занят, подтверждения нет — попытка ${attempt + 1}');
+        await Future.delayed(const Duration(milliseconds: 300));
       } catch (_) {
-        // Порт занят, но никто не отвечает — вероятно, прошлая копия ещё
-        // не отпустила сокет. Ждём и пробуем снова.
+        // Порт занят, но соединение не устанавливается — вероятно, прошлая
+        // копия ещё не отпустила сокет. Ждём и пробуем снова.
+        _startupLog('порт занят, соединения нет — попытка ${attempt + 1}');
         await Future.delayed(const Duration(milliseconds: 300));
       }
     }
   }
-  // Не смогли ни занять, ни достучаться — запускаемся, это лучше, чем
-  // не запуститься вовсе.
+  // Ни занять, ни добиться ответа. Запускаемся: две копии — беда, но копия,
+  // которая не отвечает на стук, окна и не покажет, а невидимое приложение
+  // человек чинить не может в принципе.
+  _startupLog('ответа так и нет — запускаемся без замка');
   return true;
+}
+
+/// Стук в работающую копию. `true` — она подтвердила, что показала окно.
+Future<bool> _knock() async {
+  final socket = await Socket.connect(
+    InternetAddress.loopbackIPv4,
+    kSingleInstancePort,
+    timeout: const Duration(milliseconds: 400),
+  );
+  final answered = Completer<bool>();
+  final reply = <int>[];
+  void settle() {
+    if (!answered.isCompleted) {
+      answered.complete(String.fromCharCodes(reply).trim() == kShownAck);
+    }
+  }
+
+  socket.listen(
+    (chunk) {
+      reply.addAll(chunk);
+      settle();
+    },
+    onDone: settle,
+    onError: (_) => settle(),
+    cancelOnError: false,
+  );
+  socket.write(kShowCommand);
+  await socket.flush();
+  // Полторы секунды: живая копия отвечает за миллисекунды, а ждать дольше
+  // значит держать человека перед пустым экраном.
+  final acked = await answered.future
+      .timeout(const Duration(milliseconds: 1500), onTimeout: () => false);
+  socket.destroy();
+  return acked;
 }
 
 /// Отпустить замок перед намеренным перезапуском самих себя.
@@ -379,6 +512,25 @@ class AppSettings {
   // устройств перестаёт отвечать.
   String proxyBypassList;
   bool autoRestartCore;
+
+  /// Проверка, что сервер не просто отзывается, а РЕАЛЬНО пропускает трафик.
+  ///
+  /// Задержка меряется до `latencyUrl` — короткого эндпоинта, который отдаёт
+  /// 204 и почти всегда доступен. Сервер может честно показывать 80 мс и при
+  /// этом не открывать YouTube: провайдер режет конкретные направления,
+  /// упирается в лимит, или шифрование в чужом профиле подобрано так, что
+  /// живёт ровно до первого настоящего запроса. Пинг про это не знает.
+  ///
+  /// Поэтому проверка ходит по ОТДЕЛЬНОМУ адресу — по умолчанию к YouTube,
+  /// на тот же `generate_204` (страницу целиком качать незачем).
+  bool healthCheckEnabled;
+  String healthCheckUrl;
+  int healthCheckIntervalSec;
+
+  /// Переключаться самим на следующий сервер, когда проверка провалилась
+  /// дважды подряд. Дважды, а не один раз: одиночный промах бывает от
+  /// заминки сети, и дёргать сервер под человеком из-за него нельзя.
+  bool healthCheckAutoSwitch;
   /// Чем резолвятся домены, которые идут ЧЕРЕЗ прокси. Три способа, как в
   /// Karing («Способ разрешения в DNS» для трафика прокси):
   ///
@@ -611,6 +763,15 @@ class AppSettings {
         '172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;'
         '172.30.*;172.31.*;192.168.*',
     this.autoRestartCore = true,
+    this.healthCheckEnabled = true,
+    // Именно YouTube: это и есть тот случай, из-за которого проверка
+    // заведена, и одновременно самый строгий из массовых — он идёт к Google,
+    // требует живого TLS и первым отваливается на проблемном сервере.
+    this.healthCheckUrl = 'https://www.youtube.com/generate_204',
+    // Минута: чаще — лишний трафик и шум в логе, реже — человек успевает
+    // упереться в неработающий сервер раньше проверки.
+    this.healthCheckIntervalSec = 60,
+    this.healthCheckAutoSwitch = true,
     // FakeIP по умолчанию: адрес выдаётся мгновенно, и ожидание DNS перед
     // каждым запросом исчезает совсем. Домены, которым нужен НАСТОЯЩИЙ адрес
     // (обход РФ по geoip, личные списки «напрямую», хосты прокси-серверов),
@@ -811,6 +972,10 @@ class AppSettings {
         'muxPadding': muxPadding,
         'proxyBypassList': proxyBypassList,
         'autoRestartCore': autoRestartCore,
+        'healthCheckEnabled': healthCheckEnabled,
+        'healthCheckUrl': healthCheckUrl,
+        'healthCheckIntervalSec': healthCheckIntervalSec,
+        'healthCheckAutoSwitch': healthCheckAutoSwitch,
         'dnsProxyResolve': dnsProxyResolve,
         'dnsHijack': dnsHijack,
         'dnsTtl': dnsTtl,
@@ -937,6 +1102,12 @@ class AppSettings {
       proxyBypassList: _fixLegacyBypassList(
           j['proxyBypassList'] as String? ?? d.proxyBypassList),
       autoRestartCore: j['autoRestartCore'] as bool? ?? d.autoRestartCore,
+      healthCheckEnabled: j['healthCheckEnabled'] as bool? ?? d.healthCheckEnabled,
+      healthCheckUrl: j['healthCheckUrl'] as String? ?? d.healthCheckUrl,
+      healthCheckIntervalSec:
+          j['healthCheckIntervalSec'] as int? ?? d.healthCheckIntervalSec,
+      healthCheckAutoSwitch:
+          j['healthCheckAutoSwitch'] as bool? ?? d.healthCheckAutoSwitch,
       // Старая галочка превращается в способ: включённый FakeIP так и
       // остаётся FakeIP, выключенный — «активным сервером».
       dnsProxyResolve: j['dnsProxyResolve'] as String? ??
@@ -1472,6 +1643,13 @@ class _StartGate extends StatefulWidget {
 class _StartGateState extends State<_StartGate> {
   bool? _needOnboarding;
 
+  // Мастер только что закрылся — значит, ссылку подписки вставили секунду
+  // назад, прямо у нас на глазах. Подключаться в этот момент самим нельзя:
+  // человек добавил профиль, а не просил поднять VPN, и молча уходить в
+  // туннель сразу после ввода ссылки — решение за него. Со следующего
+  // запуска автоподключение работает как обычно, по своей настройке.
+  bool _cameFromOnboarding = false;
+
   @override
   void initState() {
     super.initState();
@@ -1514,15 +1692,24 @@ class _StartGateState extends State<_StartGate> {
     }
     if (_needOnboarding!) {
       return OnboardingScreen(
-        onDone: () => setState(() => _needOnboarding = false),
+        onDone: () => setState(() {
+          _needOnboarding = false;
+          _cameFromOnboarding = true;
+        }),
       );
     }
-    return const CoreControlPage();
+    return CoreControlPage(autoConnectOnStart: !_cameFromOnboarding);
   }
 }
 
 class CoreControlPage extends StatefulWidget {
-  const CoreControlPage({super.key});
+  /// Разрешено ли автоподключение при этом открытии главного экрана.
+  /// Ложь ровно в одном случае — экран открылся сразу после мастера первого
+  /// запуска, см. `_StartGateState._cameFromOnboarding`. Настройку
+  /// `autoConnectAfterLaunch` это не отменяет и не переписывает.
+  final bool autoConnectOnStart;
+
+  const CoreControlPage({super.key, this.autoConnectOnStart = true});
 
   @override
   State<CoreControlPage> createState() => _CoreControlPageState();
@@ -1585,6 +1772,13 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   static const String _settingsPrefsKey = kSettingsPrefsKey;
   Timer? _autoSelectTimer;
   Timer? _subUpdateTimer;
+  // Проверка живости активного сервера: таймер, счётчик подряд идущих
+  // провалов и список тех, кто проверку уже завалил. Список — по ИМЕНИ, как
+  // и избранное: теги srv_N раздаются по порядку в подписке и после её
+  // обновления могут указывать на другие серверы.
+  Timer? _healthTimer;
+  int _healthFails = 0;
+  final Set<String> _unhealthy = {};
   // Взводится при нажатии «Остановить». Старт, начатый раньше, обязан
   // проверить его перед включением системного прокси — иначе включение
   // придёт уже после остановки и оставит систему с мёртвым прокси.
@@ -1604,6 +1798,19 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   static const String _favoritesPrefsKey = 'favorite_servers';
   String _serverSearch = '';
   String _serverSort = 'default'; // default | latency | name
+  static const String _serverSortPrefsKey = 'server_sort';
+  // Строка поиска намеренно НЕ сохраняется: это разовый фильтр «где тут
+  // Trojan», и восстановить его при запуске значило бы показать человеку
+  // урезанный список без видимой причины. Порядок сортировки — наоборот,
+  // выбирается один раз и надолго.
+  static const Set<String> _serverSortValues = {'default', 'latency', 'name'};
+
+  Future<void> _setServerSort(String value) async {
+    if (!_serverSortValues.contains(value)) return;
+    setState(() => _serverSort = value);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_serverSortPrefsKey, value);
+  }
 
   String get _clashApiBase => 'http://127.0.0.1:${_settings.clashApiPort}';
   static const String _profilesPrefsKey = kProfilesPrefsKey;
@@ -1821,8 +2028,15 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     final savedBlockAds = prefs.getBool(_blockAdsPrefsKey) ?? false;
     final rawSettings = prefs.getString(_settingsPrefsKey);
     final savedFavorites = prefs.getStringList(_favoritesPrefsKey) ?? [];
+    // Значение сверяем со списком допустимых: DropdownButton падает утверждением,
+    // если его value не совпадает ни с одним пунктом, а в настройках может
+    // лежать что угодно — от старого имени режима до правки файла руками.
+    final savedSort = prefs.getString(_serverSortPrefsKey);
     if (!mounted) return;
     setState(() {
+      if (savedSort != null && _serverSortValues.contains(savedSort)) {
+        _serverSort = savedSort;
+      }
       _favorites = savedFavorites.toSet();
       if (rawSettings != null) {
         try {
@@ -1964,6 +2178,7 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     appLang.value = s.language;
     _rescheduleAutoSelect();
     _rescheduleSubscriptionUpdate();
+    _rescheduleHealthCheck();
     _appendLog(tp('log.settingsSaved', {'hint': _restartHint}));
   }
 
@@ -2647,7 +2862,16 @@ del "%~f0"
     if (_settings.hideAfterLaunch) {
       await windowManager.hide();
     }
-    if (_settings.autoConnectAfterLaunch && _servers.isNotEmpty && _runningEngine == null) {
+    if (!widget.autoConnectOnStart) {
+      // Пишем в лог, а не молчим: иначе человек, у которого автоподключение
+      // включено, увидит на первом запуске выключенный щит и решит, что
+      // настройка не работает.
+      if (_settings.autoConnectAfterLaunch && _servers.isNotEmpty) {
+        _appendLog(t('log.noAutoConnectAfterOnboarding'));
+      }
+    } else if (_settings.autoConnectAfterLaunch &&
+        _servers.isNotEmpty &&
+        _runningEngine == null) {
       _appendLog(t('log.autoConnect'));
       await _startCore();
     }
@@ -2844,12 +3068,50 @@ del "%~f0"
   // с ним ровно как с обычной подпиской, без отдельной ветки.
   String _localProfilePath(String id) => '$_workDir${Platform.pathSeparator}profile_$id.txt';
 
+  /// Имя, которого ещё нет среди профилей. Занятое дополняется номером:
+  /// «Профиль 1» -> «Профиль 1 (2)».
+  ///
+  /// Одинаковые имена ломают ровно то, ради чего профили и заведены —
+  /// понять, какой из них сейчас активен. В выпадающем списке два «Профиль 1»
+  /// неразличимы, а переключение между ними выглядит как «ничего не
+  /// произошло». Внутри всё живёт по `id`, так что технически дубли
+  /// работали, — тем неприятнее, что путался только человек.
+  ///
+  /// Сравнение без учёта регистра: «профиль 1» и «Профиль 1» человек читает
+  /// как одно и то же имя.
+  ///
+  /// `exceptId` — профиль, который сейчас переименовывают: собственное имя
+  /// не должно считаться занятым, иначе правка «Дом» -> «Дом» превратила бы
+  /// его в «Дом (2)».
+  ///
+  /// Дополняем номером, а не отказываем: имя приезжает и из QR-кода, и из
+  /// файла, где показать ошибку негде и человек остался бы без профиля
+  /// вообще.
+  String _uniqueProfileName(String desired, {String? exceptId}) {
+    // Имя по умолчанию считается от длины списка, поэтому после удаления
+    // профиля оно само по себе может оказаться занятым — этот случай тоже
+    // проходит через проверку ниже.
+    final base = desired.trim().isEmpty
+        ? '${t('sub.profile')} ${_profiles.length + 1}'
+        : desired.trim();
+    final taken = _profiles
+        .where((p) => p.id != exceptId)
+        .map((p) => p.name.trim().toLowerCase())
+        .toSet();
+    if (!taken.contains(base.toLowerCase())) return base;
+    for (var n = 2;; n++) {
+      final candidate = '$base ($n)';
+      if (!taken.contains(candidate.toLowerCase())) return candidate;
+    }
+  }
+
   // Профиль по обычной ссылке подписки. Вынесено из диалога, потому что
   // тем же путём заводится профиль из QR-кода.
   Future<void> _createProfileFromUrl(String name, String url) async {
+    final unique = _uniqueProfileName(name);
     final profile = SubscriptionProfile(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
-      name: name,
+      name: unique,
       url: url,
     );
     setState(() {
@@ -2860,7 +3122,7 @@ del "%~f0"
       _latencyMs.clear();
     });
     await _saveProfiles();
-    _appendLog(tp('log.profileImported', {'name': name}));
+    _appendLog(tp('log.profileImported', {'name': unique}));
     await _loadSubscription(profile);
   }
 
@@ -2872,13 +3134,14 @@ del "%~f0"
     final id = DateTime.now().millisecondsSinceEpoch.toString();
     final path = _localProfilePath(id);
     await File(path).writeAsString(content, flush: true);
-    final profile = SubscriptionProfile(id: id, name: name, url: Uri.file(path).toString());
+    final unique = _uniqueProfileName(name);
+    final profile = SubscriptionProfile(id: id, name: unique, url: Uri.file(path).toString());
     setState(() {
       _profiles.add(profile);
       _activeProfile = profile;
     });
     await _saveProfiles();
-    _appendLog(tp('log.profileImported', {'name': name}));
+    _appendLog(tp('log.profileImported', {'name': unique}));
     await _loadSubscription(profile);
   }
 
@@ -3155,9 +3418,9 @@ del "%~f0"
     if (saved != true || urlController.text.trim().isEmpty) return;
 
     final url = urlController.text.trim();
-    final name = nameController.text.trim().isNotEmpty
-        ? nameController.text.trim()
-        : '${t('sub.profile')} ${_profiles.length + 1}';
+    // Пустое поле отдаём помощнику как есть: имя по умолчанию он строит сам
+    // и там же проверяет, не занято ли оно.
+    final name = _uniqueProfileName(nameController.text, exceptId: editing?.id);
 
     if (editing != null) {
       setState(() {
@@ -4423,6 +4686,7 @@ del "%~f0"
     final process = await Process.start(_singBoxPath, ['run', '-c', _configPath]);
     _coreProcess = process;
     _runningEngine = 'singbox';
+    _rescheduleHealthCheck();
     _refreshTrayMenu();
     _enableSystemProxy();
     _watchCore(process);
@@ -4459,6 +4723,7 @@ del "%~f0"
     final process = await Process.start(_xrayPath, ['run', '-c', _xrayConfigPath]);
     _xrayProcess = process;
     _runningEngine = 'xray';
+    _rescheduleHealthCheck();
     _refreshTrayMenu();
     _enableSystemProxy();
     _watchCore(process);
@@ -4578,6 +4843,10 @@ del "%~f0"
     _xrayProcess?.kill();
     _stopAllXrayBridges();
     _runningEngine = null;
+    // Метки «плохой сервер» живут в пределах сеанса: причина могла быть
+    // временной, и тащить приговор в следующее подключение незачем.
+    _unhealthy.clear();
+    _rescheduleHealthCheck();
     _refreshTrayMenu();
     _statsTimer?.cancel();
     await _restoreSystemProxy();
@@ -4916,11 +5185,165 @@ del "%~f0"
     }
   }
 
-  Future<void> _testXrayLatencies(List<ParsedServer> servers) async {
-    const probePort = 17392;
-    final probeConfigPath = '$_workDir${Platform.pathSeparator}xray_probe.json';
+  // Замер через уже поднятый HTTP-прокси на порту `port`. Вынесено из
+  // _testXrayLatencies, потому что этим же кодом меряет и запасной путь
+  // «по одному серверу», и общий пробный процесс.
+  //
+  // Прогрев здесь, в отличие от sing-box-ветки, работает по-настоящему:
+  // HttpClient переиспользует соединение, поэтому первый запрос платит за
+  // холодный хендшейк (TCP+Reality/TLS+XHTTP-сессия), а второй идёт по
+  // готовому каналу и показывает задержку обычного сёрфинга.
+  Future<int?> _measureViaHttpProxy(int port, String name) async {
     final testUrl = _settings.latencyUrl;
     final reqTimeout = Duration(milliseconds: _settings.latencyTimeoutMs + 1000);
+    final client = HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$port';
+    try {
+      if (_settings.latencyWarmup) {
+        final warmupReq = await client.getUrl(Uri.parse(testUrl)).timeout(reqTimeout);
+        final warmupResp = await warmupReq.close().timeout(reqTimeout);
+        await warmupResp.drain();
+      }
+
+      // Замер с одной повторной попыткой на СВЕЖЕМ соединении. Прогрев
+      // оставляет соединение открытым, но не всякий прокси его переживает
+      // (обычный HTTP через Xray — не переживает), и тогда второй запрос
+      // по тому же клиенту падает. Пересоздание клиента это лечит, поэтому
+      // чужая ссылка в настройках больше не сможет обнулить весь тест.
+      int? elapsed;
+      Object? lastError;
+      for (var attempt = 0; attempt < 2 && elapsed == null; attempt++) {
+        final c = attempt == 0
+            ? client
+            : (HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$port');
+        try {
+          final stopwatch = Stopwatch()..start();
+          final req = await c.getUrl(Uri.parse(testUrl)).timeout(reqTimeout);
+          final resp = await req.close().timeout(reqTimeout);
+          await resp.drain();
+          stopwatch.stop();
+          elapsed = stopwatch.elapsedMilliseconds;
+        } catch (e) {
+          lastError = e;
+        } finally {
+          if (attempt > 0) c.close(force: true);
+        }
+      }
+      if (elapsed == null) throw lastError ?? Exception(t('lat.failed'));
+      return elapsed;
+    } catch (e) {
+      // Раньше ошибка глоталась молча, и «недоступен» ничего не объяснял —
+      // на разбор одного такого случая ушёл целый заход. Теперь видно причину.
+      _appendLog(tp('log.latencyError', {'name': name, 'e': e}));
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Все xray-серверы меряются ОДНИМ пробным процессом и одновременно.
+  ///
+  /// Раньше здесь был цикл: на каждый сервер поднимался свой `xray.exe` на
+  /// общем порту 17392, замер, убийство процесса и 300 мс на остывание порта.
+  /// Пять xhttp-серверов пользователя занимали так около шести секунд из
+  /// семи, которые уходили на весь тест, — при том что sing-box-ветка рядом
+  /// давно мерила свои девять серверов разом.
+  ///
+  /// Теперь конфиг один: у каждого сервера свой HTTP-вход на своём порту и
+  /// правило маршрутизации `inboundTag -> outboundTag`. Процесс поднимается
+  /// один раз, замеры идут параллельно. Это тот же приём, что у sing-box,
+  /// только там роль отдельных входов играет переключаемый селектор.
+  ///
+  /// Побочный эффект честно оговорим: соединения устанавливаются
+  /// одновременно и делят один канал, поэтому цифры могут оказаться чуть
+  /// выше, чем при замере в одиночку. Сравнивать серверы между собой это не
+  /// мешает — условия у всех одинаковые, — а sing-box-ветка так мерила всегда.
+  static const int _xrayProbeBasePort = 17400;
+
+  Future<void> _testXrayLatencies(List<ParsedServer> servers) async {
+    final probeConfigPath = '$_workDir${Platform.pathSeparator}xray_probe.json';
+    final ports = <String, int>{
+      for (var i = 0; i < servers.length; i++)
+        servers[i].outbound['tag'] as String: _xrayProbeBasePort + i,
+    };
+
+    final config = {
+      "log": {"loglevel": "warning"},
+      "inbounds": [
+        for (final s in servers)
+          {
+            "listen": "127.0.0.1",
+            "port": ports[s.outbound['tag']],
+            "protocol": "http",
+            "tag": "probe_in_${s.outbound['tag']}",
+          }
+      ],
+      "outbounds": [...servers.map((s) => s.outbound)],
+      "routing": {
+        "rules": [
+          for (final s in servers)
+            {
+              "type": "field",
+              "inboundTag": ["probe_in_${s.outbound['tag']}"],
+              "outboundTag": s.outbound['tag'],
+            }
+        ]
+      },
+    };
+    await File(probeConfigPath)
+        .writeAsString(const JsonEncoder.withIndent('  ').convert(config));
+
+    Process? probe;
+    try {
+      probe = await Process.start(_xrayPath, ['run', '-c', probeConfigPath]);
+
+      // Ждём входы параллельно, а не по очереди: последовательное ожидание
+      // с таймаутом 5 с на порт вернуло бы ту же арифметику, от которой
+      // мы здесь и уходим.
+      final ready = <ParsedServer>[];
+      await Future.wait(servers.map((s) async {
+        if (await _waitForPort(ports[s.outbound['tag']]!)) ready.add(s);
+      }));
+
+      // Ни один вход не поднялся — почти наверняка ядро вообще не стартовало
+      // (одного нерабочего outbound хватает, чтобы Xray отказался читать весь
+      // конфиг). Тогда честно откатываемся на прежний путь по одному серверу:
+      // он медленный, но у него сбоит ровно тот сервер, который сломан, а не
+      // все сразу.
+      if (ready.isEmpty) {
+        probe.kill();
+        probe = null;
+        await Future.delayed(const Duration(milliseconds: 300));
+        await _testXrayLatenciesOneByOne(servers);
+        return;
+      }
+
+      for (final s in servers) {
+        if (!ready.contains(s)) {
+          _appendLog(tp('log.probeXrayPortBusy',
+              {'name': s.name, 'port': ports[s.outbound['tag']]!}));
+        }
+      }
+
+      await Future.wait(ready.map((s) async {
+        final tag = s.outbound['tag'] as String;
+        final elapsed = await _measureViaHttpProxy(ports[tag]!, s.name);
+        if (elapsed != null && mounted) {
+          setState(() => _latencyMs[tag] = elapsed);
+        }
+      }));
+    } catch (e) {
+      _appendLog(tp('log.latencyError', {'name': 'xray', 'e': e}));
+    } finally {
+      probe?.kill();
+    }
+  }
+
+  /// Запасной путь: по серверу за раз, каждый со своим процессом на общем
+  /// порту. Держится ради изоляции сбоев — если общий конфиг не принимается
+  /// ядром целиком, здесь отвалится только виновный сервер.
+  Future<void> _testXrayLatenciesOneByOne(List<ParsedServer> servers) async {
+    const probePort = 17392;
+    final probeConfigPath = '$_workDir${Platform.pathSeparator}xray_probe_single.json';
 
     for (final server in servers) {
       final tag = server.outbound['tag'] as String;
@@ -4931,7 +5354,8 @@ del "%~f0"
         ],
         "outbounds": [server.outbound],
       };
-      await File(probeConfigPath).writeAsString(const JsonEncoder.withIndent('  ').convert(config));
+      await File(probeConfigPath)
+          .writeAsString(const JsonEncoder.withIndent('  ').convert(config));
 
       Process? probe;
       try {
@@ -4941,51 +5365,16 @@ del "%~f0"
               {'name': server.name, 'port': probePort}));
           continue;
         }
-
-        final client = HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$probePort';
-
-        // Здесь, в отличие от sing-box-ветки, прогрев работает по-настоящему:
-        // HttpClient переиспользует соединение, поэтому первый запрос платит за
-        // холодный хендшейк (TCP+Reality/TLS+XHTTP-сессия), а второй идёт по
-        // готовому каналу и показывает задержку обычного сёрфинга.
-        if (_settings.latencyWarmup) {
-          final warmupReq = await client.getUrl(Uri.parse(testUrl)).timeout(reqTimeout);
-          final warmupResp = await warmupReq.close().timeout(reqTimeout);
-          await warmupResp.drain();
+        final elapsed = await _measureViaHttpProxy(probePort, server.name);
+        if (elapsed != null && mounted) {
+          setState(() => _latencyMs[tag] = elapsed);
         }
-
-        // Замер с одной повторной попыткой на СВЕЖЕМ соединении. Прогрев
-        // оставляет соединение открытым, но не всякий прокси его переживает
-        // (обычный HTTP через Xray — не переживает), и тогда второй запрос
-        // по тому же клиенту падает. Пересоздание клиента это лечит, поэтому
-        // чужая ссылка в настройках больше не сможет обнулить весь тест.
-        int? elapsed;
-        Object? lastError;
-        for (var attempt = 0; attempt < 2 && elapsed == null; attempt++) {
-          final c = attempt == 0 ? client : (HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$probePort');
-          try {
-            final stopwatch = Stopwatch()..start();
-            final req = await c.getUrl(Uri.parse(testUrl)).timeout(reqTimeout);
-            final resp = await req.close().timeout(reqTimeout);
-            await resp.drain();
-            stopwatch.stop();
-            elapsed = stopwatch.elapsedMilliseconds;
-          } catch (e) {
-            lastError = e;
-          } finally {
-            if (attempt > 0) c.close(force: true);
-          }
-        }
-        client.close(force: true);
-        if (elapsed == null) throw lastError ?? Exception(t('lat.failed'));
-        if (mounted) setState(() => _latencyMs[tag] = elapsed);
       } catch (e) {
-        // Раньше ошибка глоталась молча, и «недоступен» ничего не объяснял —
-        // на разбор одного такого случая ушёл целый заход. Теперь видно причину.
         _appendLog(tp('log.latencyError', {'name': server.name, 'e': e}));
       } finally {
         probe?.kill();
-        // Xray у ксhttp иногда чуть задерживает освобождение сокета — даём порту остыть перед следующим прогоном
+        // Xray у xhttp иногда чуть задерживает освобождение сокета — даём
+        // порту остыть перед следующим прогоном.
         await Future.delayed(const Duration(milliseconds: 300));
       }
     }
@@ -5052,6 +5441,120 @@ del "%~f0"
 
     _appendLog(tp('log.autoSelectResult', {'name': best.name, 'ms': bestMs}));
     await _switchServer(best);
+  }
+
+  // --- Проверка, что активный сервер реально работает ---
+  //
+  // Задача не та же, что у теста задержки. Тест меряет, ОТЗЫВАЕТСЯ ли сервер,
+  // и делает это до короткого 204-эндпоинта. Здесь проверяется, проходит ли
+  // через него настоящий запрос к настоящему сайту: сервер с прекрасным
+  // пингом может не открывать YouTube — упирается в лимит, режет направление
+  // или отваливается на первом же полноценном TLS.
+  void _rescheduleHealthCheck() {
+    _healthTimer?.cancel();
+    _healthTimer = null;
+    _healthFails = 0;
+    if (!_settings.healthCheckEnabled || _runningEngine == null) return;
+    final secs = _settings.healthCheckIntervalSec;
+    if (secs <= 0) return;
+    _healthTimer =
+        Timer.periodic(Duration(seconds: secs), (_) => _runHealthCheck());
+  }
+
+  Future<void> _runHealthCheck() async {
+    // Во время запуска и остановки проверять нечего: ядро как раз меняется
+    // под нами, и провал означал бы только это.
+    if (_runningEngine == null || _busy || _stopRequested) return;
+
+    if (await _probeActiveServer()) {
+      if (_healthFails > 0) _appendLog(t('log.healthRecovered'));
+      _healthFails = 0;
+      return;
+    }
+
+    _healthFails++;
+    _appendLog(tp('log.healthFailed', {
+      'name': _selectedServer?.name ?? '-',
+      'n': _healthFails,
+    }));
+    // Один промах — это заминка сети, а не приговор серверу. Дёргать
+    // соединение под человеком из-за одного неудачного запроса нельзя.
+    if (_healthFails < 2 || !_settings.healthCheckAutoSwitch) return;
+    await _switchAwayFromUnhealthy();
+  }
+
+  /// Настоящий запрос через ТЕКУЩЕЕ соединение. `true` — сервер живой.
+  Future<bool> _probeActiveServer() async {
+    final url = _settings.healthCheckUrl;
+    final timeout = Duration(milliseconds: _settings.latencyTimeoutMs + 1000);
+
+    // sing-box спрашиваем через его же Clash API: запрос уходит по текущему
+    // выбранному outbound, и в TUN-режиме, и в обычном. Отдельного процесса
+    // и порта не нужно, живое соединение не трогается.
+    if (_runningEngine == 'singbox') {
+      try {
+        final resp = await http
+            .get(Uri.parse('$_clashApiBase/proxies/proxy/delay'
+                '?url=${Uri.encodeComponent(url)}'
+                '&timeout=${_settings.latencyTimeoutMs}'))
+            .timeout(timeout);
+        // 200 — прошло. Недоступный адрес Clash отдаёт как ошибку, и это
+        // ровно то, что мы ловим.
+        return resp.statusCode == 200;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    // У Xray Clash API нет вообще — идём через локальный порт соединения.
+    // Это тот же путь, которым ходит браузер, то есть проверка честная.
+    final client = HttpClient()
+      ..findProxy = (_) => 'PROXY 127.0.0.1:${_settings.localPort}';
+    try {
+      final req = await client.getUrl(Uri.parse(url)).timeout(timeout);
+      final resp = await req.close().timeout(timeout);
+      await resp.drain();
+      return resp.statusCode >= 200 && resp.statusCode < 400;
+    } catch (_) {
+      return false;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<void> _switchAwayFromUnhealthy() async {
+    final current = _selectedServer;
+    if (current != null) _unhealthy.add(current.name);
+
+    // Кандидаты — всё, что ещё не завалило проверку, лучший по измеренной
+    // задержке первым. Неизмеренные уходят в конец: про них ничего не
+    // известно, но они всё же лучше заведомо плохого.
+    final candidates =
+        _servers.where((s) => !_unhealthy.contains(s.name)).toList()
+          ..sort((a, b) {
+            final la = _latencyMs[a.outbound['tag']];
+            final lb = _latencyMs[b.outbound['tag']];
+            if (la == null && lb == null) return 0;
+            if (la == null) return 1;
+            if (lb == null) return -1;
+            return la.compareTo(lb);
+          });
+
+    if (candidates.isEmpty) {
+      // Плохими оказались все — значит причина общая (упал интернет,
+      // отвалилась подписка), а не в серверах. Метки снимаем и остаёмся где
+      // были: сидеть на сомнительном сервере лучше, чем метаться по кругу.
+      _appendLog(t('log.healthAllBad'));
+      _unhealthy.clear();
+      _healthFails = 0;
+      return;
+    }
+
+    final next = candidates.first;
+    _appendLog(tp('log.healthSwitching',
+        {'from': current?.name ?? '-', 'to': next.name}));
+    _healthFails = 0;
+    await _switchServer(next);
   }
 
   // Периодический авто-выбор. Пересоздаём таймер при каждом сохранении
@@ -5310,6 +5813,7 @@ del "%~f0"
     _stopAllXrayBridges();
     _statsTimer?.cancel();
     _autoSelectTimer?.cancel();
+    _healthTimer?.cancel();
     _subUpdateTimer?.cancel();
     _boundsSaveTimer?.cancel();
     super.dispose();
@@ -5530,7 +6034,9 @@ del "%~f0"
                       DropdownMenuItem(value: 'latency', child: Text(t('servers.sortLatency'))),
                       DropdownMenuItem(value: 'name', child: Text(t('servers.sortName'))),
                     ],
-                    onChanged: (v) => setState(() => _serverSort = v ?? _serverSort),
+                    onChanged: (v) {
+                      if (v != null) _setServerSort(v);
+                    },
                   ),
                 ],
               ),
@@ -5947,6 +6453,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late final TextEditingController _updateFeed;
   late bool _autoUpdateApp;
   late bool _autoRestart;
+  late bool _healthCheck;
+  late final TextEditingController _healthUrl;
+  late final TextEditingController _healthInterval;
+  late bool _healthSwitch;
   late final TextEditingController _bypassList;
   late bool _muxEnabled;
   late String _muxProtocol;
@@ -6015,6 +6525,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _updateFeed = TextEditingController(text: s.updateFeedUrl);
     _autoUpdateApp = s.autoUpdateApp;
     _autoRestart = s.autoRestartCore;
+    _healthCheck = s.healthCheckEnabled;
+    _healthUrl = TextEditingController(text: s.healthCheckUrl);
+    _healthInterval = TextEditingController(text: '${s.healthCheckIntervalSec}');
+    _healthSwitch = s.healthCheckAutoSwitch;
     _bypassList = TextEditingController(text: s.proxyBypassList);
     _muxEnabled = s.muxEnabled;
     _muxProtocol = s.muxProtocol;
@@ -6117,6 +6631,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ntpPort: int.tryParse(_ntpPort.text.trim()) ?? s.ntpPort,
         ntpInterval: _textOr(_ntpInterval, s.ntpInterval),
         autoRestartCore: _autoRestart,
+        healthCheckEnabled: _healthCheck,
+        healthCheckUrl: _textOr(_healthUrl, s.healthCheckUrl),
+        // Ниже 15 секунд не опускаем: проверка ходит к настоящему сайту, и
+        // чаще этого она превращается в собственный источник трафика.
+        healthCheckIntervalSec: math.max(
+            15, int.tryParse(_healthInterval.text.trim()) ?? s.healthCheckIntervalSec),
+        healthCheckAutoSwitch: _healthSwitch,
         proxyBypassList: _bypassList.text.trim(),
         muxEnabled: _muxEnabled,
         muxProtocol: _muxProtocol,
@@ -6385,6 +6906,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
             value: _autoRestart,
             onChanged: (v) => setState(() => _autoRestart = v),
           ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(t('set.healthCheck')),
+            subtitle: Text(t('set.healthCheckSub'),
+                style: const TextStyle(fontSize: 12)),
+            value: _healthCheck,
+            onChanged: (v) => setState(() => _healthCheck = v),
+          ),
+          if (_healthCheck) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: TextField(
+                controller: _healthUrl,
+                decoration: InputDecoration(
+                  labelText: t('set.healthCheckUrl'),
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: TextField(
+                controller: _healthInterval,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  labelText: t('set.healthCheckInterval'),
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(t('set.healthCheckSwitch')),
+              value: _healthSwitch,
+              onChanged: (v) => setState(() => _healthSwitch = v),
+            ),
+          ],
           ],
           if (_openSection == 'look') ...[
           Padding(
@@ -7589,10 +8149,33 @@ class _ShieldPowerState extends State<ShieldPower> with TickerProviderStateMixin
     duration: const Duration(milliseconds: 900),
     value: widget.active ? 1 : 0,
   );
+  // Третья анимация — только на время работы. Заливка показывает, СКОЛЬКО
+  // осталось, но при автовыборе она ползёт вверх незаметно медленно, и щит
+  // выглядит застывшим. Бегущий сегмент даёт движение, которое видно сразу.
+  late final AnimationController _spin = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1400),
+  );
+
+  @override
+  void initState() {
+    super.initState();
+    // Экран может быть построен уже в состоянии «идёт запуск» — например,
+    // при автоподключении сразу после старта.
+    if (widget.busy) _spin.repeat();
+  }
 
   @override
   void didUpdateWidget(covariant ShieldPower old) {
     super.didUpdateWidget(old);
+    if (widget.busy != old.busy) {
+      if (widget.busy) {
+        _spin.repeat();
+      } else {
+        _spin.stop();
+        _spin.value = 0;
+      }
+    }
     // Подключение показываем самой заливкой, а не отдельным колесиком:
     // вода медленно прибывает, пока идёт работа, и доливается до верха,
     // когда соединение поднялось. Крутящийся индикатор поверх щита выглядел
@@ -7621,6 +8204,7 @@ class _ShieldPowerState extends State<ShieldPower> with TickerProviderStateMixin
   void dispose() {
     _wave.dispose();
     _level.dispose();
+    _spin.dispose();
     super.dispose();
   }
 
@@ -7637,23 +8221,37 @@ class _ShieldPowerState extends State<ShieldPower> with TickerProviderStateMixin
           width: widget.height * 168 / 196,
           height: widget.height,
           child: AnimatedBuilder(
-            animation: Listenable.merge([_wave, _level]),
-            builder: (context, _) => CustomPaint(
-              painter: _ShieldPainter(
-                phase: _wave.value,
-                fill: Curves.easeInOut.transform(_level.value),
-                accent: scheme.primary,
-                outline: scheme.outlineVariant,
-                surface: scheme.surfaceContainerHighest,
-              ),
-              child: Center(
-                child: Icon(
-                  widget.active ? Icons.lock_rounded : Icons.power_settings_new_rounded,
-                  size: widget.height * 44 / 196,
-                  color: _level.value > 0.55 ? scheme.onPrimary : scheme.onSurfaceVariant,
+            animation: Listenable.merge([_wave, _level, _spin]),
+            builder: (context, _) {
+              // Щит слегка сжимается и разжимается за тот же оборот, что
+              // проходит бегущий сегмент. Шесть процентов — намеренно мало:
+              // на этом месте лежит кнопка, и заметное «дыхание» под курсором
+              // читается как дрожь, а не как работа.
+              final squeeze = widget.busy
+                  ? 1 - 0.06 * (0.5 - 0.5 * math.cos(_spin.value * 2 * math.pi))
+                  : 1.0;
+              return Transform.scale(
+                scale: squeeze,
+                child: CustomPaint(
+                  painter: _ShieldPainter(
+                    phase: _wave.value,
+                    fill: Curves.easeInOut.transform(_level.value),
+                    // null — работы нет, сегмент не рисуется вовсе.
+                    spin: widget.busy ? _spin.value : null,
+                    accent: scheme.primary,
+                    outline: scheme.outlineVariant,
+                    surface: scheme.surfaceContainerHighest,
+                  ),
+                  child: Center(
+                    child: Icon(
+                      widget.active ? Icons.lock_rounded : Icons.power_settings_new_rounded,
+                      size: widget.height * 44 / 196,
+                      color: _level.value > 0.55 ? scheme.onPrimary : scheme.onSurfaceVariant,
+                    ),
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
           ),
         ),
       ),
@@ -7664,6 +8262,8 @@ class _ShieldPowerState extends State<ShieldPower> with TickerProviderStateMixin
 class _ShieldPainter extends CustomPainter {
   final double phase;
   final double fill;
+  /// Положение бегущего сегмента, 0..1. `null` — работы нет, не рисуем.
+  final double? spin;
   final Color accent;
   final Color outline;
   final Color surface;
@@ -7671,6 +8271,7 @@ class _ShieldPainter extends CustomPainter {
   _ShieldPainter({
     required this.phase,
     required this.fill,
+    required this.spin,
     required this.accent,
     required this.outline,
     required this.surface,
@@ -7729,11 +8330,60 @@ class _ShieldPainter extends CustomPainter {
         ..strokeWidth = 2.5
         ..color = fill > 0.5 ? accent : outline,
     );
+
+    // Бегущий по контуру сегмент — индикатор работы. Это тот же «кружочек»,
+    // только формы щита: обычное колесо поверх картинки выглядело приклеенным
+    // (уже пробовали и отказались), а сегмент на собственной границе читается
+    // как часть щита и не спорит с волной внутри.
+    final position = spin;
+    if (position != null) {
+      final metrics = shield.computeMetrics().toList();
+      if (metrics.isNotEmpty) {
+        final metric = metrics.first;
+        final total = metric.length;
+        // Пятая часть периметра: короче — теряется на фоне обводки, длиннее —
+        // перестаёт читаться как движение.
+        final segment = total * 0.2;
+        final start = (position % 1.0) * total;
+        final runner = Path();
+        if (start + segment <= total) {
+          runner.addPath(metric.extractPath(start, start + segment), Offset.zero);
+        } else {
+          // Через шов замкнутого контура: хвост и голова отдельными кусками,
+          // иначе сегмент раз в оборот пропадал бы на месте стыка.
+          runner
+            ..addPath(metric.extractPath(start, total), Offset.zero)
+            ..addPath(metric.extractPath(0, start + segment - total), Offset.zero);
+        }
+        // Сначала размытая подложка, поверх — чёткая линия: так сегмент виден
+        // и на светлой теме, где акцентный цвет сам по себе бледный.
+        canvas.drawPath(
+          runner,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 6
+            ..strokeCap = StrokeCap.round
+            ..color = accent.withValues(alpha: 0.35)
+            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
+        );
+        canvas.drawPath(
+          runner,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 3.5
+            ..strokeCap = StrokeCap.round
+            ..color = accent,
+        );
+      }
+    }
   }
 
   @override
   bool shouldRepaint(_ShieldPainter old) =>
-      old.phase != phase || old.fill != fill || old.accent != accent;
+      old.phase != phase ||
+      old.fill != fill ||
+      old.spin != spin ||
+      old.accent != accent;
 }
 
 // Правила для популярных сервисов: каждому можно задать «через VPN»,

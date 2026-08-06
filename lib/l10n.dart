@@ -1236,6 +1236,51 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Автоподключение после запуска...',
     'en': 'Connecting automatically after startup...',
   },
+  'log.healthFailed': {
+    'ru': 'Проверка сервера «{name}» не прошла (подряд: {n})',
+    'en': 'Health check failed for "{name}" (in a row: {n})',
+  },
+  'log.healthRecovered': {
+    'ru': 'Проверка сервера снова проходит',
+    'en': 'The server passes the health check again',
+  },
+  'log.healthSwitching': {
+    'ru': 'Сервер «{from}» не пропускает трафик — переключаюсь на «{to}»',
+    'en': 'Server "{from}" does not pass traffic — switching to "{to}"',
+  },
+  'log.healthAllBad': {
+    'ru': 'Проверку не прошёл ни один сервер — похоже, дело не в них. '
+        'Остаюсь на текущем.',
+    'en': 'No server passed the check — the cause is probably elsewhere. '
+        'Staying on the current one.',
+  },
+  'set.healthCheck': {
+    'ru': 'Проверять, что сервер реально работает',
+    'en': 'Check that the server actually works',
+  },
+  'set.healthCheckSub': {
+    'ru': 'Пинг показывает только, что сервер отзывается. Проверка ходит к '
+        'настоящему сайту и ловит серверы, у которых задержка отличная, а '
+        'YouTube не открывается.',
+    'en': 'Latency only shows that the server responds. This check requests a '
+        'real site and catches servers with great latency that still fail to '
+        'open YouTube.',
+  },
+  'set.healthCheckUrl': {'ru': 'Адрес проверки', 'en': 'Check address'},
+  'set.healthCheckInterval': {
+    'ru': 'Как часто проверять, секунд',
+    'en': 'How often to check, seconds',
+  },
+  'set.healthCheckSwitch': {
+    'ru': 'Переключать сервер самому, если проверка провалилась дважды',
+    'en': 'Switch the server automatically after two failed checks',
+  },
+  'log.noAutoConnectAfterOnboarding': {
+    'ru': 'Профиль добавлен. Автоподключение пропущено — нажмите щит, '
+        'когда будете готовы. Со следующего запуска оно сработает само.',
+    'en': 'Profile added. Skipped connecting automatically — press the shield '
+        'when you are ready. It will work as usual from the next launch.',
+  },
   'log.blockAds': {
     'ru': 'Блокировка рекламы: {state}{hint}',
     'en': 'Ad blocking: {state}{hint}',
