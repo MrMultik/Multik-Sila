@@ -114,9 +114,12 @@ const Map<String, Map<String, String>> _strings = {
         'itself. The link comes from your VPN provider.',
   },
   'onb.profileUrlLabel': {'ru': 'Ссылка на подписку', 'en': 'Subscription link'},
+  // Название теперь обязательно, и подпись обязана это отражать. Пока в ней
+  // стояло «(необязательно)», интерфейс прямо противоречил собственной
+  // проверке: поле подсвечивалось красным ровно за то, что подпись разрешала.
   'onb.profileNameLabel': {
-    'ru': 'Название (необязательно)',
-    'en': 'Name (optional)',
+    'ru': 'Название профиля',
+    'en': 'Profile name',
   },
   'onb.profileDefaultName': {'ru': 'Профиль 1', 'en': 'Profile 1'},
   'onb.profileUrlBad': {
@@ -1235,6 +1238,46 @@ const Map<String, Map<String, String>> _strings = {
   'log.autoConnect': {
     'ru': 'Автоподключение после запуска...',
     'en': 'Connecting automatically after startup...',
+  },
+  'onb.profileHow': {
+    'ru': 'Как добавить профиль?',
+    'en': 'How would you like to add a profile?',
+  },
+  'onb.profileHowHint': {
+    'ru': 'Ссылку на подписку выдаёт ваш провайдер VPN. Если она уже '
+        'скопирована или пришла картинкой с кодом — не набирайте руками.',
+    'en': 'Your VPN provider issues the subscription link. If you already '
+        'copied it, or received it as a QR image, there is no need to type it.',
+  },
+  'onb.fromClipboard': {
+    'ru': 'Вставить из буфера обмена',
+    'en': 'Paste from clipboard',
+  },
+  'onb.fromClipboardHint': {
+    'ru': 'Если вы только что скопировали ссылку',
+    'en': 'If you have just copied the link',
+  },
+  'onb.fromQr': {'ru': 'Из QR-кода', 'en': 'From a QR code'},
+  'onb.fromQrHint': {
+    'ru': 'Картинка с кодом: скриншот, фотография, сохранённое изображение',
+    'en': 'An image with the code: screenshot, photo, saved picture',
+  },
+  'onb.manual': {'ru': 'Ввести ссылку вручную', 'en': 'Type the link myself'},
+  'onb.manualHint': {
+    'ru': 'Длинный адрес, начинается с https://',
+    'en': 'A long address starting with https://',
+  },
+  'onb.clipboardEmpty': {
+    'ru': 'В буфере обмена нет ссылки. Скопируйте её и попробуйте снова.',
+    'en': 'No link in the clipboard. Copy it and try again.',
+  },
+  'onb.qrNotFound': {
+    'ru': 'В картинке не нашлось QR-кода',
+    'en': 'No QR code found in the image',
+  },
+  'onb.nameRequired': {
+    'ru': 'Придумайте название — по нему вы будете узнавать профиль в списке',
+    'en': 'Give it a name — you will recognise the profile by it in the list',
   },
   'log.latencyUdpSkipped': {
     'ru': 'Серверов на UDP-протоколах пропущено: {n}. Их порт не принимает '

@@ -2,10 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:image/image.dart' as img;
-import 'package:zxing2/qrcode.dart';
 import 'package:flutter/services.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:screen_retriever/screen_retriever.dart';
@@ -17,6 +14,7 @@ import 'l10n.dart';
 import 'onboarding.dart';
 import 'platform_env.dart';
 import 'prefs_keys.dart';
+import 'qr_import.dart';
 import 'system_proxy.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -3354,36 +3352,12 @@ del "%~f0"
   // сохранённая картинка из чата. Декодируем её сами через zxing2.
   Future<void> _importProfileFromQr() async {
     try {
-      final file = await openFile(acceptedTypeGroups: [
-        XTypeGroup(
-          label: t('dlg.fileImages'),
-          extensions: const ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'webp'],
-        ),
-        XTypeGroup(label: t('dlg.fileAll'), extensions: const []),
-      ]);
-      if (file == null) return;
-      final bytes = await file.readAsBytes();
-      final decoded = img.decodeImage(bytes);
-      if (decoded == null) {
-        _appendLog(t('log.qrNoImage'));
-        return;
-      }
-      // zxing2 ждёт линейный массив ARGB-пикселей, а не объект картинки.
-      final pixels = Int32List(decoded.width * decoded.height);
-      var i = 0;
-      for (var y = 0; y < decoded.height; y++) {
-        for (var x = 0; x < decoded.width; x++) {
-          final p = decoded.getPixel(x, y);
-          pixels[i++] = (0xFF << 24) |
-              (p.r.toInt() << 16) |
-              (p.g.toInt() << 8) |
-              p.b.toInt();
-        }
-      }
-      final source = RGBLuminanceSource(decoded.width, decoded.height, pixels);
-      final bitmap = BinaryBitmap(HybridBinarizer(source));
-      final result = QRCodeReader().decode(bitmap);
-      final text = result.text.trim();
+      // Разбор картинки — в `qr_import.dart`: тем же кодом пользуется мастер
+      // первого запуска, и две копии успели бы разойтись раньше, чем это
+      // кто-нибудь заметил.
+      final text = await QrImport.pickAndDecode();
+      // null — выбор файла закрыли, говорить нечего.
+      if (text == null) return;
       if (text.isEmpty) {
         _appendLog(t('log.qrNotFound'));
         return;
@@ -4397,10 +4371,29 @@ del "%~f0"
           // на наш. Без этого программы с зашитым DNS (а таких много) ходят
           // мимо туннеля, и разделение трафика для них не работает вовсе.
           if (_settings.dnsHijack) {"protocol": "dns", "action": "hijack-dns"},
-          {
-            "process_path": [_xrayPath],
-            "outbound": "direct",
-          },
+          // Вывод собственного моста Xray из туннеля — ТОЛЬКО на рабочем столе.
+          //
+          // Там мост это отдельный процесс `xray.exe`, и `auto_route`
+          // заворачивает в туннель трафик всех процессов машины, включая его.
+          // Его коннект до прокси-сервера уходил обратно в тот же туннель —
+          // замкнутый круг, наружу не выходило ничего.
+          //
+          // На Android правила быть не должно, и дело не в том, что путь к
+          // .exe там бессмыслен и просто никогда не совпадёт. Вред тоньше:
+          // САМО НАЛИЧИЕ правила по процессу заставляет роутер определять
+          // владельца КАЖДОГО соединения — то есть звать
+          // `findConnectionOwner` в нашей службе, который для неопознанных
+          // соединений честно бросает исключение. Туннель при этом поднят,
+          // а трафик не идёт.
+          //
+          // Петля здесь невозможна и без правила: мосты работают внутри
+          // нашего же процесса, а он исключён из туннеля целиком
+          // (`addDisallowedApplication` в openTun).
+          if (Env.coreRunsAsProcess)
+            {
+              "process_path": [_xrayPath],
+              "outbound": "direct",
+            },
           if (bypassCidrs.isNotEmpty) {"ip_cidr": bypassCidrs, "outbound": "direct"},
           ...splitRules(),
         ],
