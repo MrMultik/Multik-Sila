@@ -6698,7 +6698,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
     'about': Icons.info_outline,
   };
 
+  // Ключ обязателен. Меню разделов и содержимое открытого раздела — два
+  // ListView на ОДНОМ месте дерева (см. `body:` ниже). Без ключей Flutter
+  // считает их одним виджетом, переиспользует элемент и, главное, одну
+  // позицию прокрутки на двоих: вход в раздел обнулял её под новое
+  // содержимое, а возврат отдавал меню этот же ноль. Человек уходил в
+  // «О программе» из конца списка и возвращался в начало.
+  //
+  // Разные PageStorageKey дают, во-первых, отдельные элементы, во-вторых —
+  // сохранение и восстановление смещения средствами PageStorage.
   Widget _sectionMenu() => ListView(
+        key: const PageStorageKey<String>('settings-menu'),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         children: [
           ..._sectionIcons.entries.map((e) => ListTile(
@@ -6858,6 +6868,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
       body: _openSection == null
           ? _sectionMenu()
           : ListView(
+        // Ключ на КАЖДЫЙ раздел свой: иначе все разделы делили бы одну
+        // позицию, и, пролистав длинный «Маршрутизацию», человек открывал бы
+        // короткий «NTP» уже прокрученным неизвестно куда.
+        key: PageStorageKey<String>('settings-$_openSection'),
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         children: [
           if (_openSection == 'launch') ...[
