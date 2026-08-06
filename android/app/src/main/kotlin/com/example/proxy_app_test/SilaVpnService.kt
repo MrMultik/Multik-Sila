@@ -173,7 +173,26 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         // Причина та же: sing-box запекает порт socks-outbound'а в конфиг при
         // старте и не меняет его на лету, поэтому один общий порт с рестартом
         // при каждом переключении давал гонки и «connection refused».
+        //
+        // Старые гасим: набор серверов мог смениться вместе с профилем, а
+        // оставленный мост держал бы свой порт занятым.
+        closeBridges()
         bridges?.forEach { bridgeConfig -> startXrayBridge(bridgeConfig) }
+
+        // Служба УЖЕ работает — значит это смена сервера или профиля, и ядро
+        // надо перезагрузить, а не поднять второе. У библиотеки для этого
+        // отдельный метод, `startOrReloadService`, и название у него честное.
+        //
+        // Первая версия создавала здесь новый CommandServer безусловно. Второй
+        // экземпляр упирался в порты, занятые первым, и умирал — а снаружи
+        // это выглядело как «сменил сервер, и подключение пропало совсем».
+        val existing = commandServer
+        if (existing != null) {
+            existing.startOrReloadService(config, OverrideOptions())
+            running.set(true)
+            statusListener?.invoke(true, null)
+            return
+        }
 
         val server = CommandServer(this, this)
         server.start()
@@ -212,13 +231,7 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         // Мосты гасим ПОСЛЕ ядра: пока ядро живо, оно может держать через них
         // соединения, и обратный порядок дал бы шквал ошибок в лог на ровном
         // месте.
-        xrayBridges.values.forEach { bridge ->
-            try {
-                bridge.close()
-            } catch (_: Exception) {
-            }
-        }
-        xrayBridges.clear()
+        closeBridges()
 
         try {
             tunDescriptor?.close()
@@ -230,6 +243,16 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         statusListener?.invoke(false, null)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    private fun closeBridges() {
+        xrayBridges.values.forEach { bridge ->
+            try {
+                bridge.close()
+            } catch (_: Exception) {
+            }
+        }
+        xrayBridges.clear()
     }
 
     private fun startXrayBridge(bridgeConfig: String) {
@@ -361,8 +384,23 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
     override fun usePlatformAutoDetectInterfaceControl(): Boolean = true
 
     override fun autoDetectInterfaceControl(fd: Int) {
+        // Результат НЕ проверяем, и это не небрежность.
+        //
+        // `protect` возвращает false штатно: например, когда сокет создаётся
+        // раньше, чем система выдала интерфейс VPN, — а на старте ядро именно
+        // так и делает. Первая версия бросала здесь исключение, то есть
+        // обрывала соединение на ровном месте. Наружу это выглядело ровно как
+        // «подключился, щит залит, сервер пингуется, а не грузится ничего»:
+        // туннель поднят, и каждое исходящее соединение ядра умирает при
+        // рождении.
+        //
+        // Ошибку глотать всё же нельзя молча — но и валить из-за неё связь
+        // нельзя тем более: сокет, который не удалось вывести из туннеля,
+        // в худшем случае уйдёт в него и не соединится, а брошенное
+        // исключение гарантированно убивает соединение, которое могло бы
+        // работать.
         if (!protect(fd)) {
-            throw IllegalStateException("не удалось вывести сокет ядра из туннеля (fd=$fd)")
+            android.util.Log.w("MultikSila", "protect(fd=$fd) вернул false")
         }
     }
 

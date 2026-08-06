@@ -1756,6 +1756,18 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   final Map<String, Process> _xrayBridgeProcesses = {};
   static const int _xrayBridgeBasePort = 1338;
   String? _runningEngine; // 'singbox' | 'xray' | null — какое ядро сейчас реально держит порт 1337
+
+  /// Ядро живо и им можно управлять через Clash API.
+  ///
+  /// Раньше здесь везде стояло `_coreProcess != null`, и на Windows это верно.
+  /// На Android дочернего процесса нет никогда — ядро вкомпилировано в
+  /// приложение, — поэтому условие было ЛОЖНЫМ ВСЕГДА. Мгновенное
+  /// переключение сервера через Clash API не срабатывало ни разу, и код
+  /// уходил на полный перезапуск: поднимал туннель поверх уже работающего,
+  /// тот упирался в занятые порты и умирал. Наружу это выглядело как
+  /// «сменил сервер — и подключение пропало совсем».
+  bool get _coreIsLive =>
+      Env.coreRunsAsProcess ? _coreProcess != null : _runningEngine != null;
   String _log = "";
   String _statsText = "";
   Timer? _statsTimer;
@@ -4995,7 +5007,7 @@ del "%~f0"
       if (newServer.engine == 'xray') {
         await _ensureXrayBridge(newServer);
       }
-      if (_runningEngine == 'singbox' && _coreProcess != null) {
+      if (_runningEngine == 'singbox' && _coreIsLive) {
         final tag = newServer.outbound['tag'] as String;
         try {
           final resp = await http
@@ -5021,7 +5033,7 @@ del "%~f0"
     // мгновенное переключение через Clash API работает только когда уже
     // крутится sing-box и новый сервер тоже на sing-box — иначе (первый
     // запуск, переход между движками) нужен полный рестарт нужного ядра
-    if (_runningEngine == 'singbox' && newServer.engine == 'singbox' && _coreProcess != null) {
+    if (_runningEngine == 'singbox' && newServer.engine == 'singbox' && _coreIsLive) {
       final tag = newServer.outbound['tag'] as String;
       try {
         final resp = await http
