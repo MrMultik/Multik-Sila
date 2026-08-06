@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import "package:http/http.dart" as http;
 import "l10n.dart";
+import "platform_env.dart";
 
 class DiagCheck {
   final String name;
@@ -521,14 +522,21 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
       appBar: AppBar(
         title: Text(t('diag.title')),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.settings_ethernet),
-            tooltip: t('net.title'),
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const NetworkScreen()),
+          // Экран «Интерфейсы и маршруты» целиком построен на одном вызове
+          // PowerShell (`Get-NetRoute` + `Get-NetIPInterface`). На Android
+          // такого нет, и открытый экран показал бы пустоту с ошибкой. Сам
+          // вопрос, ради которого он заводился — «за маршрут по умолчанию
+          // борются несколько адаптеров» — там тоже не стоит: система
+          // разрешает ровно один активный VPN.
+          if (Env.hasWindowAndTray)
+            IconButton(
+              icon: const Icon(Icons.settings_ethernet),
+              tooltip: t('net.title'),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const NetworkScreen()),
+              ),
             ),
-          ),
           IconButton(
             icon: const Icon(Icons.data_object),
             tooltip: t('cfg.title'),
@@ -536,7 +544,11 @@ class _DiagnosticsScreenState extends State<DiagnosticsScreen> {
               context,
               MaterialPageRoute(
                 builder: (_) => ConfigViewScreen(
-                  appDir: File(Platform.resolvedExecutable).parent.path,
+                  // На Android рабочий каталог выдаёт система, и путь к
+                  // исполняемому файлу к нему отношения не имеет: конфиги
+                  // ядра лежат в песочнице приложения, а не рядом с ним.
+                  appDir: Env.workDirOverride ??
+                      File(Platform.resolvedExecutable).parent.path,
                 ),
               ),
             ),

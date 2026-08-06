@@ -1236,6 +1236,24 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Автоподключение после запуска...',
     'en': 'Connecting automatically after startup...',
   },
+  'log.latencyUdpSkipped': {
+    'ru': 'Серверов на UDP-протоколах пропущено: {n}. Их порт не принимает '
+        'TCP-подключений, а без работающего туннеля измерить их нечем — '
+        'подключитесь и повторите тест.',
+    'en': 'Skipped {n} UDP-protocol servers. Their port accepts no TCP '
+        'connections, and without a running tunnel there is nothing to measure '
+        'them with — connect and run the test again.',
+  },
+  'log.androidVpnDenied': {
+    'ru': 'Система не дала разрешение на VPN. Без него туннель не поднять — '
+        'нажмите щит ещё раз и подтвердите запрос.',
+    'en': 'The system did not grant VPN permission. The tunnel cannot start '
+        'without it — press the shield again and confirm the request.',
+  },
+  'log.androidBridges': {
+    'ru': 'Мостов Xray для xhttp-серверов: {n}',
+    'en': 'Xray bridges for xhttp servers: {n}',
+  },
   'log.healthFailed': {
     'ru': 'Проверка сервера «{name}» не прошла (подряд: {n})',
     'en': 'Health check failed for "{name}" (in a row: {n})',

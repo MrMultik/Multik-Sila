@@ -1,6 +1,23 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- Туннель обязан пережить сворачивание приложения: иначе «включил и
+         забыл» превращается в «работает, пока смотришь на экран». Отсюда
+         служба переднего плана и постоянное уведомление. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <!-- Android 13+ спрашивает разрешение на уведомления отдельно. Без него
+         служба переднего плана запустится, но человек не увидит ни состояния,
+         ни кнопки «Отключить». -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- Нужно для правил «эта программа — всегда мимо VPN». На Windows такие
+         правила задаются путём к .exe, здесь — именем пакета, а чтобы показать
+         человеку список установленных программ, их надо сначала увидеть:
+         с Android 11 видимость пакетов ограничена по умолчанию. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
+
     <application
-        android:label="proxy_app_test"
+        android:label="Multik Sila"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -25,6 +42,27 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Служба туннеля.
+             android:permission обязателен: Android соглашается отдавать
+             интерфейс VPN только той службе, которую может вызвать лишь сама
+             система. Без него VpnService.prepare() не найдёт наше приложение
+             в списке возможных клиентов VPN.
+             foregroundServiceType с Android 14 обязателен. Отдельного типа
+             «vpn» в списке нет, поэтому берём specialUse и объявляем подтип
+             свойством ниже — так делают все клиенты VPN. -->
+        <service
+            android:name=".SilaVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn"/>
+            <intent-filter>
+                <action android:name="android.net.VpnService"/>
+            </intent-filter>
+        </service>
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

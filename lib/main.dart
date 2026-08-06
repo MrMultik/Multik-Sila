@@ -11,9 +11,11 @@ import 'package:file_selector/file_selector.dart';
 import 'package:screen_retriever/screen_retriever.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:archive/archive.dart';
+import 'android_vpn.dart';
 import 'diagnostics.dart';
 import 'l10n.dart';
 import 'onboarding.dart';
+import 'platform_env.dart';
 import 'prefs_keys.dart';
 import 'system_proxy.dart';
 import 'package:http/http.dart' as http;
@@ -32,6 +34,7 @@ import 'package:window_manager/window_manager.dart';
 // в одном «Protected», в другом «Not protected».
 const int kSingleInstancePort = 17999;
 ServerSocket? _instanceLock;
+
 
 /// Команда, по которой приложение закрывается ШТАТНО — с остановкой ядра,
 /// возвратом системного прокси и снятием TUN-адаптера.
@@ -248,6 +251,23 @@ Future<void> releaseSingleInstanceLock() async {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Android уходит здесь и дальше в настольную часть не заглядывает.
+  //
+  // Всё, что ниже, — окно, его размеры и положение, замок «одна копия» —
+  // существует только на рабочем столе. На телефоне окно одно и его размером
+  // распоряжается система, а вторую копию приложения Android не запустит в
+  // принципе: замок на порту 17999 там решал бы несуществующую задачу и при
+  // этом занимал порт.
+  if (!Env.hasWindowAndTray) {
+    // Рабочий каталог узнаём ДО первого кадра: дальше он нужен синхронно —
+    // логу, конфигам, наборам правил, — а система отдаёт его только через
+    // ожидание.
+    Env.workDirOverride = await Env.androidWorkDir();
+    runApp(const MyApp());
+    return;
+  }
+
   await windowManager.ensureInitialized();
   if (!await _claimSingleInstance()) {
     // Окно уже показала работающая копия — тихо уходим.
@@ -1838,17 +1858,29 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
         flush: true,
       );
     } catch (_) {}
-    windowManager.addListener(this);
-    trayManager.addListener(this);
-    // Отдаём установщику способ закрыть нас по-человечески: с остановкой ядра,
-    // возвратом системного прокси и снятием TUN. Убить процесс он не может —
-    // в TUN-режиме мы работаем от администратора, а он от пользователя.
-    appQuitHandler = _quitApp;
+    // Окно, трей, реестр и подмена ядер — всё это настольное и на Android
+    // не просто бесполезно, а падает: плагинов там нет, и вызов уходит в
+    // MissingPluginException прямо на первом кадре.
+    if (Env.hasWindowAndTray) {
+      windowManager.addListener(this);
+      trayManager.addListener(this);
+      // Отдаём установщику способ закрыть нас по-человечески: с остановкой
+      // ядра, возвратом системного прокси и снятием TUN. Убить процесс он не
+      // может — в TUN-режиме мы работаем от администратора, а он от
+      // пользователя.
+      appQuitHandler = _quitApp;
+      _initTray();
+    }
+    if (Env.isAndroid) {
+      // Служба туннеля живёт дольше экрана: её могли не остановить при
+      // сворачивании, и при возврате в приложение состояние щита надо взять
+      // у неё, а не гадать.
+      _bindAndroidVpn();
+    }
     _loadTunPreference();
     _loadProfiles();
-    _initTray();
-    _recoverSystemProxyIfNeeded();
-    _checkCoreUpdates();
+    if (Env.needsSystemProxy) _recoverSystemProxyIfNeeded();
+    if (Env.coresUpdateSeparately) _checkCoreUpdates();
     // Намеренно без await: обновление наборов правил не должно задерживать
     // ни показ окна, ни автоподключение. Результат ляжет рядом как <файл>.new
     // и применится при следующем старте ядра.
@@ -1859,8 +1891,30 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     _checkAppUpdate();
     // Тоже без await и тоже с отложенным применением: качать 20 МБ на старте
     // и заставлять человека ждать этого ради подключения — ровно то, чего мы
-    // избегали с наборами правил.
-    _autoUpdateCores();
+    // избегали с наборами правил. На Android ядро вкомпилировано в APK и
+    // обновляется вместе с приложением — качать нечего.
+    if (Env.coresUpdateSeparately) _autoUpdateCores();
+  }
+
+  StreamSubscription<AndroidVpnStatus>? _androidVpnSub;
+
+  /// Подписка на состояние андроидной службы туннеля.
+  ///
+  /// Служба переживает закрытие экрана, поэтому источник правды о том,
+  /// поднят ли туннель, — она, а не наши поля. Без этого возврат в приложение
+  /// показывал бы выключенный щит при работающем VPN — та же ложь, что на
+  /// Windows однажды выдавал рассинхрон UI с реальностью.
+  void _bindAndroidVpn() {
+    _androidVpnSub = AndroidVpn.statusStream().listen((status) {
+      if (!mounted) return;
+      setState(() => _runningEngine = status.running ? 'singbox' : null);
+      final error = status.error;
+      if (error != null && error.isNotEmpty) _appendLog(error);
+      _rescheduleHealthCheck();
+    });
+    AndroidVpn.isRunning().then((running) {
+      if (mounted && running) setState(() => _runningEngine = 'singbox');
+    });
   }
 
   Future<void> _initTray() async {
@@ -2058,7 +2112,10 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       );
       _blockAds = savedBlockAds;
       _isAdmin = admin;
-      _tunMode = requested && admin;
+      // На Android туннель — единственный режим работы, и «включить TUN» там
+      // не выбор пользователя, а устройство системы: VpnService и есть TUN.
+      // Прав администратора он не требует, диалога о перезапуске тоже.
+      _tunMode = Env.isAndroid ? true : (requested && admin);
     });
     _appendLog(tp('log.adminState', {'admin': admin, 'tun': _tunMode}));
   }
@@ -2823,6 +2880,12 @@ del "%~f0"
   // изменение системы, и антивирусы к незаявленным записям в Run
   // относятся настороженно.
   Future<void> _maybeAskAutostart() async {
+    // На Android спрашивать нечего: автозапуск здесь — запись в реестр
+    // Windows, которого нет. Диалог «Запускать вместе с Windows?» на телефоне
+    // выглядел ровно так, как читается, — вопросом не про эту систему.
+    // Андроидный автозапуск (приёмник BOOT_COMPLETED) — отдельная задача,
+    // и до неё дело ещё не дошло.
+    if (!Env.hasWindowAndTray) return;
     if (!mounted || _servers.isEmpty || _settings.launchAtStartup) return;
     // Окно спрятано в трей — диалога никто не увидит. Флаг «уже спрашивали»
     // при этом НЕ ставим: спросим при следующем видимом запуске.
@@ -3490,6 +3553,13 @@ del "%~f0"
   /// %APPDATA%\Multik Sila, куда права есть всегда.
   static String? _workDirCache;
   String get _workDir {
+    // На Android каталог узнаётся у системы, а спросить её можно только
+    // асинхронно — поэтому значение кладётся сюда ещё в main(), до первого
+    // кадра. Геттер остаётся синхронным: он вызывается из десятков мест, и
+    // делать его Future значило бы переписать половину файла ради одной
+    // платформы.
+    final resolved = Env.workDirOverride;
+    if (resolved != null) return resolved;
     final cached = _workDirCache;
     if (cached != null) return cached;
     final exeDir = File(Platform.resolvedExecutable).parent.path;
@@ -3722,6 +3792,15 @@ del "%~f0"
 
   Future<bool> _coreSupportsGvisor() async {
     if (_coreHasGvisor != null) return _coreHasGvisor!;
+    // На Android спрашивать не у кого и незачем: ядро там не отдельный файл,
+    // а вкомпилированная в приложение библиотека, и собираем её мы сами —
+    // с тегом with_gvisor. Проверка ниже запускает `sing-box.exe version`,
+    // которого на Android нет; она честно падала в catch и писала в лог
+    // «ядро собрано без gVisor», то есть ровно наоборот.
+    if (!Env.coreRunsAsProcess) {
+      _coreHasGvisor = true;
+      return true;
+    }
     try {
       final r = await Process.run(_singBoxPath, ['version'])
           .timeout(const Duration(seconds: 5));
@@ -4635,6 +4714,11 @@ del "%~f0"
       'admin': _isAdmin,
     }));
 
+    if (Env.isAndroid) {
+      await _startAndroidTunnel();
+      return;
+    }
+
     if (!_tunMode && _selectedServer!.engine == 'xray') {
       // обычный режим: Xray сам держит локальный прокси на 1337, sing-box не нужен
       await _startXrayCore(_selectedServer!);
@@ -4649,6 +4733,47 @@ del "%~f0"
       await _ensureAllXrayBridgesRunning();
     }
     await _startSingboxCore();
+  }
+
+  /// Запуск туннеля на Android.
+  ///
+  /// Конфиги — те же самые. Их собирает `_writeConfig` и `_writeXrayConfig`,
+  /// общие с Windows-версией: генератор один, и разойтись поведению двух
+  /// платформ неоткуда. Отличие в том, куда эти конфиги едут: не в командную
+  /// строку дочернего процесса, а в службу через канал, потому что ядро здесь
+  /// вкомпилировано в приложение.
+  Future<void> _startAndroidTunnel() async {
+    // Разрешение спрашиваем перед КАЖДЫМ запуском, а не один раз при первом:
+    // Android отзывает его, стоит человеку включить другой клиент VPN —
+    // активным может быть только один.
+    if (!await AndroidVpn.prepare()) {
+      _appendLog(t('log.androidVpnDenied'));
+      return;
+    }
+
+    _resetLog(t('log.generatingConfig'));
+    await _writeConfig();
+    final config = await File(_configPath).readAsString();
+
+    // Мосты для xhttp-серверов. Порты берём той же функцией `_bridgePortFor`,
+    // которой пользовался `_writeConfig`, — иначе socks-outbound'ы в конфиге
+    // ядра указывали бы на порты, которых никто не слушает.
+    final bridges = <String>[];
+    for (final server in _servers.where((s) => s.engine == 'xray')) {
+      final tag = server.outbound['tag'] as String;
+      final path = '$_workDir${Platform.pathSeparator}xray_bridge_$tag.json';
+      await _writeXrayConfig(server,
+          port: _bridgePortFor(tag), isBridge: true, configPath: path);
+      bridges.add(await File(path).readAsString());
+    }
+    if (bridges.isNotEmpty) {
+      _appendLog(tp('log.androidBridges', {'n': bridges.length}));
+    }
+
+    await AndroidVpn.start(config: config, bridges: bridges);
+    // Состояние щита придёт от службы через поток — здесь его не трогаем,
+    // иначе на экране будет «подключено» раньше, чем ядро действительно
+    // поднялось.
   }
 
   Future<void> _startSingboxCore() async {
@@ -4839,6 +4964,16 @@ del "%~f0"
 
   Future<void> _stopCoreInner() async {
     _stopRequested = true;
+    if (Env.isAndroid) {
+      await AndroidVpn.stop();
+      _runningEngine = null;
+      _unhealthy.clear();
+      _rescheduleHealthCheck();
+      _statsTimer?.cancel();
+      _appendLog(t('log.coreStopped'));
+      if (mounted) setState(() => _statsText = "");
+      return;
+    }
     _coreProcess?.kill();
     _xrayProcess?.kill();
     _stopAllXrayBridges();
@@ -4969,7 +5104,9 @@ del "%~f0"
       }
     });
 
-    if (_settings.latencyMode == 'warm') {
+    if (!Env.canSpawnProbeCores) {
+      await _testLatenciesWithoutProbes();
+    } else if (_settings.latencyMode == 'warm') {
       await _testLatenciesWarm(_servers);
     } else if (_settings.latencyMode == 'connect') {
       // Hysteria2 работает поверх QUIC, то есть по UDP: его порт TCP-соединения
@@ -4998,6 +5135,60 @@ del "%~f0"
       return '${s.name}=${v != null ? tp('log.ms', {'v': v}) : t('log.unreachable')}';
     }).join(', ');
     _appendLog(tp('log.latencyDone', {'summary': summary}));
+  }
+
+  /// Замер задержки там, где нельзя запустить пробное ядро (Android).
+  ///
+  /// На Windows тест поднимает служебные процессы на портах 17390+ и меряет
+  /// сквозной путь, не трогая рабочее соединение. На Android чужие
+  /// исполняемые файлы запускать нельзя вовсе, а ядро там одно и оно занято
+  /// туннелем. Отсюда два пути, и выбор между ними не вопрос вкуса:
+  ///
+  /// 1. Туннель поднят — спрашиваем РАБОТАЮЩЕЕ ядро через Clash API. Это
+  ///    честный сквозной замер через сам протокол, тот же, что даёт режим
+  ///    `proxy` на Windows, и активное соединение он не рвёт.
+  /// 2. Туннеля нет — меряем время TCP-подключения до сервера. Ядро для
+  ///    этого не нужно совсем.
+  ///
+  /// Величины разные, и это надо понимать: первая включает работу протокола
+  /// и путь до проверочного сайта (сотни миллисекунд), вторая — только
+  /// сетевую доступность сервера (десятки). Сравнивать серверы между собой
+  /// можно и той, и другой — лишь бы в пределах одного прогона.
+  ///
+  /// Протоколы поверх UDP (Hysteria2, TUIC) вторым способом не измеряются
+  /// в принципе: их порт TCP-соединений не принимает. Без работающего ядра
+  /// они останутся без цифры — это честнее, чем показать заведомо
+  /// бессмысленное «недоступен».
+  Future<void> _testLatenciesWithoutProbes() async {
+    if (_runningEngine != null) {
+      final timeoutMs = _settings.latencyTimeoutMs;
+      final url = _settings.latencyUrl;
+      await Future.wait(_servers.map((s) async {
+        final tag = s.outbound['tag'] as String;
+        try {
+          final resp = await http
+              .get(Uri.parse('$_clashApiBase/proxies/$tag/delay'
+                  '?url=${Uri.encodeComponent(url)}&timeout=$timeoutMs'))
+              .timeout(Duration(milliseconds: timeoutMs + 1000));
+          if (resp.statusCode == 200) {
+            final data = jsonDecode(resp.body) as Map<String, dynamic>;
+            if (mounted) setState(() => _latencyMs[tag] = data['delay'] as int);
+          }
+        } catch (e) {
+          _appendLog(tp('log.latencyError', {'name': s.name, 'e': e}));
+        }
+      }));
+      return;
+    }
+
+    final tcpAble =
+        _servers.where((s) => !_udpOnlyProtocols.contains(s.protocol)).toList();
+    final udpOnly =
+        _servers.where((s) => _udpOnlyProtocols.contains(s.protocol)).toList();
+    if (tcpAble.isNotEmpty) await _testLatenciesByConnect(tcpAble);
+    if (udpOnly.isNotEmpty) {
+      _appendLog(tp('log.latencyUdpSkipped', {'n': udpOnly.length}));
+    }
   }
 
   // Хост и порт самого сервера. У sing-box-outbound лежат прямо в полях,
@@ -5761,6 +5952,14 @@ del "%~f0"
         // значило заставлять лезть туда каждый раз, когда нужен системный VPN.
         // Компактная строка, а не SwitchListTile: щиток стоит по центру, и
         // растянутый на всю ширину список рядом с ним смотрится чужеродно.
+        //
+        // На Android переключателя нет вовсе, и это не упрощение интерфейса.
+        // Там `VpnService` И ЕСТЬ TUN — другого способа увести трафик системы
+        // не существует, выключить его значило бы выключить приложение.
+        // Подпись про перезапуск от администратора тем более бессмысленна:
+        // администратора в Android нет как понятия. Переключатель, который
+        // ничего не переключает, — обещание возможности, которой нет.
+        if (Env.hasWindowAndTray)
         ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 360),
           child: Row(
@@ -5811,6 +6010,9 @@ del "%~f0"
     _coreProcess?.kill();
     _xrayProcess?.kill();
     _stopAllXrayBridges();
+    // Подписку на состояние службы снимаем обязательно: служба переживает
+    // экран, и оставленный слушатель дёргал бы setState у мёртвого виджета.
+    _androidVpnSub?.cancel();
     _statsTimer?.cancel();
     _autoSelectTimer?.cancel();
     _healthTimer?.cancel();
