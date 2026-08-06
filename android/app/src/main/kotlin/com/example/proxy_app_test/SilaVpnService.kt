@@ -109,6 +109,22 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         // Обе папки создаём сами: ядро на несуществующем пути молча деградирует.
         val working = File(filesDir, "core").apply { mkdirs() }
         val temp = File(cacheDir, "core").apply { mkdirs() }
+        // Лог ядра — в файл рядом с журналом приложения.
+        //
+        // На Windows вывод ядра идёт в наш лог, потому что там оно отдельный
+        // процесс и его stdout/stderr можно читать. Здесь ядро внутри
+        // приложения, и его собственный лог по умолчанию не виден НИГДЕ: ни в
+        // журнале приложения, ни в системном. Разбирать поломки в таком
+        // состоянии невозможно — видно только, что «не работает».
+        //
+        // Именно на это и напоролись: туннель поднимался, пакеты в него шли,
+        // наружу не выходило ничего, и ни одной строки о причине.
+        try {
+            Libbox.redirectStderr(File(filesDir, "core_log.txt").absolutePath)
+        } catch (e: Exception) {
+            android.util.Log.w("MultikSila", "не удалось перенаправить лог ядра: ${e.message}")
+        }
+
         Libbox.setup(SetupOptions().apply {
             basePath = filesDir.absolutePath
             workingPath = working.absolutePath
@@ -437,8 +453,32 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         return owner
     }
 
+    /// Монитор сети, по которому ядро выбирает канал наружу.
+    ///
+    /// Следим за сетью БЕЗ УЧЁТА VPN, и это принципиально.
+    ///
+    /// Первая версия подписывалась на сеть по умолчанию
+    /// (`registerDefaultNetworkCallback`). Но как только наш туннель поднят,
+    /// сетью по умолчанию для системы становится он сам — и ядро получало
+    /// в качестве канала наружу СОБСТВЕННЫЙ туннель. В его логе это выглядит
+    /// так:
+    ///
+    ///   INFO  network: updated default interface tun0
+    ///   ERROR connection: open connection to ... using outbound/vless[srv_0]:
+    ///         no available network interface
+    ///
+    /// Снаружи — «подключился, сервер пингуется, не грузится ничего». Причём
+    /// первые секунды работает: до подъёма туннеля по умолчанию ещё физическая
+    /// сеть, и замер задержки успевает пройти. Потом всё встаёт.
+    ///
+    /// `NET_CAPABILITY_NOT_VPN` есть у любой сети, кроме VPN, — запрос с ним
+    /// туннель не выберет никогда.
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
         interfaceListener = listener
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) = report(network)
             override fun onLinkPropertiesChanged(network: Network, props: LinkProperties) = report(network)
@@ -459,7 +499,7 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             }
         }
         networkCallback = callback
-        connectivity.registerDefaultNetworkCallback(callback)
+        connectivity.registerNetworkCallback(request, callback)
     }
 
     override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {

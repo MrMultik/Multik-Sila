@@ -3947,7 +3947,21 @@ del "%~f0"
     await _bakeServerIps(singboxServers);
 
     final Map<String, dynamic> config = {
-      "log": {"level": "info"},
+      "log": {
+        "level": "info",
+        // На Android лог ядра надо явно направить в файл.
+        //
+        // На Windows ядро — отдельный процесс, и его вывод читается из
+        // stdout/stderr прямо в наш журнал. Здесь ядро внутри приложения, и
+        // его лог по умолчанию не видно НИГДЕ: ни в журнале приложения, ни в
+        // системном, ни в stderr (туда попадают только паники Go).
+        //
+        // Цена этой слепоты уже заплачена: туннель поднимался, пакеты в него
+        // шли, наружу не выходило ничего, и ни одной строки о причине —
+        // разбирать было нечем.
+        if (!Env.coreRunsAsProcess)
+          "output": '$_workDir${Platform.pathSeparator}core_log.txt',
+      },
       "experimental": {
         "clash_api": {"external_controller": "127.0.0.1:${_settings.clashApiPort}"}
       },
