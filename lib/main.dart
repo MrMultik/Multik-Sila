@@ -6399,19 +6399,25 @@ del "%~f0"
                 }),
               ),
             ],
-            if (_tab == 2) SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(t('routing.tun')),
-              subtitle: Text(
-                _isAdmin
-                    ? t('routing.tunOn')
-                    : t('routing.tunNeedAdmin'),
-                style: const TextStyle(fontSize: 12),
+            // Переключателя TUN на Android нет, и это не упрощение экрана.
+            // Там другого режима не существует: локальный прокси на 1337
+            // никуда не подключить, весь трафик идёт через интерфейс, который
+            // выдаёт система. Тумблер был бы всегда включён и неотключаем, а
+            // подпись под ним обещала бы «перезапуск с правами администратора»
+            // — понятие, которого на телефоне нет вовсе.
+            if (_tab == 2 && Env.hasWindowAndTray) ...[
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(t('routing.tun')),
+                subtitle: Text(
+                  _isAdmin ? t('routing.tunOn') : t('routing.tunNeedAdmin'),
+                  style: const TextStyle(fontSize: 12),
+                ),
+                value: _tunMode,
+                onChanged: _toggleTunMode,
               ),
-              value: _tunMode,
-              onChanged: _toggleTunMode,
-            ),
-            if (_tab == 2) const Divider(height: 8),
+              const Divider(height: 8),
+            ],
             // Подпись НАД полем, а не слева: на узком окне длинное название
             // режима переносилось на вторую строку и налезало на подчёркивание.
             if (_tab == 2)
@@ -8722,7 +8728,6 @@ class _AppRulesScreenState extends State<AppRulesScreen> {
     if (!Env.appRulesUsePaths) {
       try {
         for (final app in await AndroidVpn.installedApps()) {
-          if (app.isSystem) continue;
           found[app.package] = app.name;
         }
       } catch (_) {}

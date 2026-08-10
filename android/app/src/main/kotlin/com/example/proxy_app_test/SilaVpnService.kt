@@ -475,6 +475,27 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         return owner
     }
 
+    /// Сети-кандидаты, которые сейчас видны.
+    ///
+    /// Список, а не одна «последняя пришедшая»: на телефоне одновременно живут
+    /// и Wi-Fi, и мобильная сеть, `onAvailable` приходит по обеим, и та, что
+    /// пришла второй, затирала первую. Ядро получало каналом наружу сеть,
+    /// которой система на самом деле не пользуется, — часть соединений уходила
+    /// в никуда, пока уже установленные продолжали работать. Снаружи это и
+    /// выглядит как «подключился, но часть сайтов и приложений не открывается».
+    private val candidateNetworks = linkedSetOf<Network>()
+
+    /// Свой поток для событий сети.
+    ///
+    /// Не главный: `updateDefaultInterface` — синхронный вызов В ЯДРО, и оно в
+    /// ответ спрашивает у нас весь список интерфейсов (`getInterfaces`). Держать
+    /// этим интерфейсный поток значит однажды получить ANR на ровном месте —
+    /// при переключении Wi-Fi на мобильную сеть, то есть когда человек идёт по
+    /// улице. До появления этого поля события приходили на внутренний поток
+    /// ConnectivityManager, что верно; главный сюда попал бы только моей
+    /// правкой, вместе с `registerBestMatchingNetworkCallback`.
+    private var networkThread: android.os.HandlerThread? = null
+
     /// Монитор сети, по которому ядро выбирает канал наружу.
     ///
     /// Следим за сетью БЕЗ УЧЁТА VPN, и это принципиально.
@@ -495,20 +516,9 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
     ///
     /// `NET_CAPABILITY_NOT_VPN` есть у любой сети, кроме VPN, — запрос с ним
     /// туннель не выберет никогда.
-    /// Сети-кандидаты, которые сейчас видны. Ключ — сама сеть.
-    ///
-    /// Список, а не одна «последняя пришедшая»: на телефоне одновременно живут
-    /// и Wi-Fi, и мобильная сеть, `onAvailable` приходит по обеим, и та, что
-    /// пришла второй, затирала первую. Ядро получало канал наружу, которым
-    /// система на самом деле не пользуется, — и часть соединений уходила в
-    /// никуда, пока остальные (уже установленные) продолжали работать. Снаружи
-    /// это и выглядит как «подключился, но часть сайтов и приложений не
-    /// открывается».
-    private val candidateNetworks = linkedSetOf<Network>()
-
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
         interfaceListener = listener
-        candidateNetworks.clear()
+        synchronized(candidateNetworks) { candidateNetworks.clear() }
         val request = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
@@ -540,13 +550,20 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             }
         }
         networkCallback = callback
+        val thread = android.os.HandlerThread("sila-network").apply { start() }
+        networkThread = thread
+        val handler = android.os.Handler(thread.looper)
         // registerBestMatchingNetworkCallback сам держит ЛУЧШУЮ подходящую сеть
         // и присылает смену — ровно то, что нужно, но появился только в
         // Android 12. Ниже — свой выбор из списка кандидатов.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            connectivity.registerBestMatchingNetworkCallback(
-                request, callback, android.os.Handler(android.os.Looper.getMainLooper()))
+            connectivity.registerBestMatchingNetworkCallback(request, callback, handler)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            connectivity.registerNetworkCallback(request, callback, handler)
         } else {
+            // До Android 8 подписки со своим обработчиком нет вовсе — события
+            // приезжают на внутренний поток ConnectivityManager. Это тоже не
+            // главный поток, так что цель достигнута.
             connectivity.registerNetworkCallback(request, callback)
         }
     }
@@ -610,6 +627,10 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         networkCallback = null
         interfaceListener = null
         synchronized(candidateNetworks) { candidateNetworks.clear() }
+        // Поток гасим ПОСЛЕ отписки: иначе последнее событие приедет на
+        // остановленный looper и молча пропадёт вместе с исключением.
+        networkThread?.quitSafely()
+        networkThread = null
     }
 
     override fun getInterfaces(): NetworkInterfaceIterator {
