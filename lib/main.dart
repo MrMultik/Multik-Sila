@@ -1921,10 +1921,35 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       final error = status.error;
       if (error != null && error.isNotEmpty) _appendLog(error);
       _rescheduleHealthCheck();
+      _rescheduleStats();
     });
     AndroidVpn.isRunning().then((running) {
-      if (mounted && running) setState(() => _runningEngine = 'singbox');
+      if (mounted && running) {
+        setState(() => _runningEngine = 'singbox');
+        _rescheduleStats();
+      }
     });
+  }
+
+  /// Опрос Clash API под состояние ядра.
+  ///
+  /// На Windows таймер заводится прямо в `_startSingboxCore`/`_startXrayCore` —
+  /// там момент старта ядра известен точно. На Android ядро поднимает служба, и
+  /// «поднялось» приезжает отдельным событием ПОЗЖЕ возврата из `_startCore`.
+  /// Таймер там не заводился вообще, и панель статистики навсегда оставалась с
+  /// подписью «Нет данных» при полностью рабочем туннеле: цифры есть, спросить
+  /// их некому.
+  void _rescheduleStats() {
+    _statsTimer?.cancel();
+    _statsTimer = null;
+    if (_runningEngine == null) {
+      if (mounted && _statsText.isNotEmpty) setState(() => _statsText = '');
+      return;
+    }
+    _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) => _fetchStats());
+    // Первый опрос сразу: иначе первые две секунды после подключения на экране
+    // висит «Нет данных», хотя ядро уже отвечает.
+    _fetchStats();
   }
 
   Future<void> _initTray() async {
@@ -4093,17 +4118,45 @@ del "%~f0"
       if (action == 'default' || path.trim().isEmpty) return;
       appsByAction.putIfAbsent(action, () => []).add(path);
     });
+    // Ключ правила зависит от платформы: на рабочем столе программа опознаётся
+    // путём к .exe, на Android — именем пакета. Разные поля, а не разные
+    // значения одного: `process_path` с именем пакета не совпадёт НИКОГДА, то
+    // есть все правила пользователя молча не работали бы, а он видел бы их
+    // список на экране и считал настроенными. Проверено по исходникам ядра:
+    // на Android оно ищет владельца соединения в любом случае
+    // (`C.IsAndroid && platformInterface != nil` -> `needFindProcess = true`),
+    // так что цена правила здесь только в самом сравнении.
+    final appRuleKey = Env.appRulesUsePaths ? "process_path" : "package_name";
     final appRules = <Map<String, dynamic>>[
       if (appsByAction['block'] != null)
-        {"process_path": appsByAction['block'], "action": "reject"},
+        {appRuleKey: appsByAction['block'], "action": "reject"},
       if (appsByAction['direct'] != null)
-        {"process_path": appsByAction['direct'], "outbound": "direct"},
+        {appRuleKey: appsByAction['direct'], "outbound": "direct"},
       if (appsByAction['proxy'] != null)
-        {"process_path": appsByAction['proxy'], "outbound": "proxy"},
+        {appRuleKey: appsByAction['proxy'], "outbound": "proxy"},
     ];
+
+    // «Только IPv4» обязано означать «IPv6 не пробовать», а не «не спрашивать
+    // AAAA у DNS».
+    //
+    // Разница вылезает на телефоне. У TUN-адаптера есть IPv6-адрес (так и
+    // задумано — иначе IPv6-трафик уходит мимо туннеля), поэтому система
+    // сообщает приложениям, что IPv6 в наличии. Приложениям с зашитыми
+    // IPv6-адресами (Telegram — ровно такое) наш DNS не указ: они идут по
+    // IPv6 напрямую, соединение уходит в туннель, а на выходе у большинства
+    // прокси-серверов IPv6 нет вовсе. Пакет уходит в тишину, и приложение ждёт
+    // таймаута вместо того, чтобы за миллисекунды откатиться на IPv4.
+    // Снаружи: «интернет есть, а Telegram пишет нет соединения», при этом
+    // обычные сайты открываются.
+    //
+    // `reject` отвечает отказом сразу, и Happy Eyeballs честно переключается на
+    // IPv4. Правило действует ТОЛЬКО в режиме «Только IPv4»: человек уже сказал,
+    // что IPv6 ему не нужен, — а в остальных режимах трогать его нельзя.
+    final rejectIpv6 = _settings.dnsStrategy == 'ipv4_only';
 
     List<Map<String, dynamic>> splitRules() => [
           {"ip_is_private": true, "outbound": "direct"},
+          if (rejectIpv6) {"ip_version": 6, "action": "reject"},
           // Выше всего остального: «эта программа — всегда так» — самое
           // конкретное указание, какое пользователь может дать, и спорить
           // с ним доменным правилам незачем.
@@ -4905,6 +4958,15 @@ del "%~f0"
   // поднимает только свой собственный процесс по хендлу, не по имени.
   // Возвращается только когда порт моста реально готов принимать соединения.
   Future<void> _ensureXrayBridge(ParsedServer server) async {
+    // На Android мостов-процессов не существует: Xray там вкомпилирован в
+    // приложение, и мосты поднимает служба туннеля разом при старте.
+    // `Process.start` здесь не «ничего не делает», а БРОСАЕТ ProcessException —
+    // запуск сторонних исполняемых файлов там запрещён. Ловить исключение
+    // некому: `_switchServer` зовёт эту функцию первой строкой, и переключение
+    // на xhttp-сервер обрывалось целиком, не дойдя до Clash API. Тем же путём
+    // ходит автопереключение по проверке связи — то есть после первой же
+    // заминки сети приложение могло остаться на мёртвом сервере.
+    if (!Env.coreRunsAsProcess) return;
     final tag = server.outbound['tag'] as String;
     final port = _bridgePortFor(tag);
     final existing = _xrayBridgeProcesses[tag];
@@ -8651,6 +8713,26 @@ class _AppRulesScreenState extends State<AppRulesScreen> {
   Future<void> _loadRunning() async {
     setState(() => _loading = true);
     final found = <String, String>{};
+    // На Android программу опознают по имени пакета, и список даёт система, а
+    // не перечисление процессов. Без этой ветки экран на телефоне был мёртвым:
+    // кнопка звала PowerShell, которого там нет, список молча оставался пустым,
+    // и добавить правило было НЕЧЕМ — второй способ, «выбрать файл», ищет .exe.
+    // Показываем только пользовательские программы: системных пакетов под сотню,
+    // и человек ищет в этом списке свой мессенджер, а не службы Android.
+    if (!Env.appRulesUsePaths) {
+      try {
+        for (final app in await AndroidVpn.installedApps()) {
+          if (app.isSystem) continue;
+          found[app.package] = app.name;
+        }
+      } catch (_) {}
+      if (!mounted) return;
+      setState(() {
+        _running = found;
+        _loading = false;
+      });
+      return;
+    }
     try {
       final result = await Process.run('powershell', [
         '-NoProfile',
@@ -8739,14 +8821,19 @@ class _AppRulesScreenState extends State<AppRulesScreen> {
       body: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         children: [
-          Text(t('app.intro'), style: const TextStyle(fontSize: 12, height: 1.35)),
-          const SizedBox(height: 8),
-          Text(t('app.versionedPathNote'),
-              style: TextStyle(
-                fontSize: 11,
-                height: 1.35,
-                color: Theme.of(context).colorScheme.onSurfaceVariant,
-              )),
+          Text(t(Env.appRulesUsePaths ? 'app.intro' : 'app.introAndroid'),
+              style: const TextStyle(fontSize: 12, height: 1.35)),
+          // Предупреждение про путь с номером версии осмысленно только там, где
+          // правило и есть путь.
+          if (Env.appRulesUsePaths) ...[
+            const SizedBox(height: 8),
+            Text(t('app.versionedPathNote'),
+                style: TextStyle(
+                  fontSize: 11,
+                  height: 1.35,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                )),
+          ],
           const SizedBox(height: 12),
           Row(
             children: [
@@ -8756,18 +8843,23 @@ class _AppRulesScreenState extends State<AppRulesScreen> {
                       ? const SizedBox(
                           width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
                       : const Icon(Icons.memory, size: 18),
-                  label: Text(t('app.listRunning')),
+                  label: Text(
+                      t(Env.appRulesUsePaths ? 'app.listRunning' : 'app.listInstalled')),
                   onPressed: _loading ? null : _loadRunning,
                 ),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: OutlinedButton.icon(
-                  icon: const Icon(Icons.folder_open, size: 18),
-                  label: Text(t('app.addByFile')),
-                  onPressed: _addByFile,
+              // Выбор файла — только на рабочем столе: на Android приложения
+              // задаются именем пакета, файлового пути у них нет вовсе.
+              if (Env.appRulesUsePaths) ...[
+                const SizedBox(width: 8),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.folder_open, size: 18),
+                    label: Text(t('app.addByFile')),
+                    onPressed: _addByFile,
+                  ),
                 ),
-              ),
+              ],
             ],
           ),
           const Divider(height: 24),
@@ -8787,7 +8879,8 @@ class _AppRulesScreenState extends State<AppRulesScreen> {
               )),
           if (running.isNotEmpty) ...[
             const Divider(height: 24),
-            Text(t('app.running'), style: const TextStyle(fontWeight: FontWeight.w600)),
+            Text(t(Env.appRulesUsePaths ? 'app.running' : 'app.installed'),
+                style: const TextStyle(fontWeight: FontWeight.w600)),
             ...running.map((e) => ListTile(
                   dense: true,
                   contentPadding: EdgeInsets.zero,

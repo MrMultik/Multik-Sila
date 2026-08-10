@@ -119,8 +119,16 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         //
         // Именно на это и напоролись: туннель поднимался, пакеты в него шли,
         // наружу не выходило ничего, и ни одной строки о причине.
+        //
+        // Файл ОТДЕЛЬНЫЙ от `core_log.txt`. Туда пишет сам sing-box по ключу
+        // `log.output` в конфиге, а путь к рабочему каталогу на Android — это и
+        // есть `filesDir` (`getApplicationSupportDirectory` возвращает именно
+        // его). Два независимых дескриптора на один файл пишут каждый со своим
+        // смещением и затирают друг друга: журнал ядра получался рваным ровно
+        // тогда, когда по нему надо было разбирать поломку. Сюда идут только
+        // паники Go — то, чего в обычном логе не бывает вовсе.
         try {
-            Libbox.redirectStderr(File(filesDir, "core_log.txt").absolutePath)
+            Libbox.redirectStderr(File(filesDir, "core_panic.txt").absolutePath)
         } catch (e: Exception) {
             android.util.Log.w("MultikSila", "не удалось перенаправить лог ядра: ${e.message}")
         }
@@ -299,15 +307,19 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             .setSession("Multik Sila")
             .setMtu(options.mtu)
 
+        var hasInet4 = false
+        var hasInet6 = false
         var iterator = options.inet4Address
         while (iterator.hasNext()) {
             val prefix = iterator.next()
             builder.addAddress(prefix.address(), prefix.prefix())
+            hasInet4 = true
         }
         iterator = options.inet6Address
         while (iterator.hasNext()) {
             val prefix = iterator.next()
             builder.addAddress(prefix.address(), prefix.prefix())
+            hasInet6 = true
         }
 
         if (options.autoRoute) {
@@ -324,17 +336,27 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
                     val prefix = routes.next()
                     builder.addRoute(prefix.address(), prefix.prefix())
                 }
-            } else {
+            } else if (hasInet4) {
                 builder.addRoute("0.0.0.0", 0)
             }
 
+            // Маршрут по семейству адресов добавляем, ТОЛЬКО если у туннеля в
+            // этом семействе есть адрес.
+            //
+            // Иначе получалась чёрная дыра: с выключенным перехватом IPv6 у
+            // адаптера IPv6-адреса нет, а маршрут `::/0` в туннель мы всё равно
+            // прописывали. Пакеты приложений уходили в интерфейс, которому
+            // отвечать нечем, — и вместо мгновенного отказа (по которому Happy
+            // Eyeballs за миллисекунды откатывается на IPv4) приложение ждало
+            // таймаута. Снаружи: часть сайтов и приложений «не открывается»,
+            // хотя туннель исправен.
             routes = options.inet6RouteAddress
             if (routes.hasNext()) {
                 while (routes.hasNext()) {
                     val prefix = routes.next()
                     builder.addRoute(prefix.address(), prefix.prefix())
                 }
-            } else {
+            } else if (hasInet6) {
                 builder.addRoute("::", 0)
             }
 
@@ -473,33 +495,110 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
     ///
     /// `NET_CAPABILITY_NOT_VPN` есть у любой сети, кроме VPN, — запрос с ним
     /// туннель не выберет никогда.
+    /// Сети-кандидаты, которые сейчас видны. Ключ — сама сеть.
+    ///
+    /// Список, а не одна «последняя пришедшая»: на телефоне одновременно живут
+    /// и Wi-Fi, и мобильная сеть, `onAvailable` приходит по обеим, и та, что
+    /// пришла второй, затирала первую. Ядро получало канал наружу, которым
+    /// система на самом деле не пользуется, — и часть соединений уходила в
+    /// никуда, пока остальные (уже установленные) продолжали работать. Снаружи
+    /// это и выглядит как «подключился, но часть сайтов и приложений не
+    /// открывается».
+    private val candidateNetworks = linkedSetOf<Network>()
+
     override fun startDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
         interfaceListener = listener
+        candidateNetworks.clear()
         val request = NetworkRequest.Builder()
             .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             .build()
         val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = report(network)
-            override fun onLinkPropertiesChanged(network: Network, props: LinkProperties) = report(network)
+            override fun onAvailable(network: Network) {
+                synchronized(candidateNetworks) { candidateNetworks.add(network) }
+                reportBest()
+            }
 
-            private fun report(network: Network) {
-                val caps = connectivity.getNetworkCapabilities(network) ?: return
-                val props = connectivity.getLinkProperties(network) ?: return
-                val name = props.interfaceName ?: return
-                val index = runCatching {
-                    java.net.NetworkInterface.getByName(name)?.index ?: 0
-                }.getOrDefault(0)
-                listener.updateDefaultInterface(
-                    name,
-                    index,
-                    !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
-                    false,
-                )
+            override fun onLinkPropertiesChanged(network: Network, props: LinkProperties) {
+                synchronized(candidateNetworks) { candidateNetworks.add(network) }
+                reportBest()
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+                synchronized(candidateNetworks) { candidateNetworks.add(network) }
+                reportBest()
+            }
+
+            // Обязательно. Раньше обработчика не было вовсе: при уходе Wi-Fi
+            // ядро продолжало считать каналом наружу исчезнувший интерфейс, и
+            // новые соединения умирали молча, пока приложение показывало
+            // «подключено». Переход Wi-Fi <-> мобильная сеть на телефоне
+            // происходит по нескольку раз в день, так что это не край.
+            override fun onLost(network: Network) {
+                synchronized(candidateNetworks) { candidateNetworks.remove(network) }
+                reportBest()
             }
         }
         networkCallback = callback
-        connectivity.registerNetworkCallback(request, callback)
+        // registerBestMatchingNetworkCallback сам держит ЛУЧШУЮ подходящую сеть
+        // и присылает смену — ровно то, что нужно, но появился только в
+        // Android 12. Ниже — свой выбор из списка кандидатов.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            connectivity.registerBestMatchingNetworkCallback(
+                request, callback, android.os.Handler(android.os.Looper.getMainLooper()))
+        } else {
+            connectivity.registerNetworkCallback(request, callback)
+        }
+    }
+
+    /**
+     * Сообщает ядру ту сеть, которой система пользуется на самом деле.
+     *
+     * Порядок предпочтения повторяет системный: Ethernet, потом Wi-Fi, потом
+     * мобильная. Внутри одного вида — та, что пришла позже (переподключение к
+     * другой точке доступа).
+     */
+    private fun reportBest() {
+        val listener = interfaceListener ?: return
+        val candidates = synchronized(candidateNetworks) { candidateNetworks.toList() }
+        var bestRank = -1
+        var bestName: String? = null
+        var bestIndex = 0
+        var bestExpensive = false
+        for (network in candidates) {
+            val caps = connectivity.getNetworkCapabilities(network) ?: continue
+            val name = connectivity.getLinkProperties(network)?.interfaceName ?: continue
+            // Индекс интерфейса — то, по чему ядро его и находит
+            // (`InterfaceFinder().ByIndex`). Нуля среди настоящих индексов не
+            // бывает, и раньше он подставлялся как «не смогли определить»:
+            // ядро писало `find updated interface` в лог, который на Android
+            // никто не видел, и оставалось со СТАРЫМ интерфейсом. Лучше не
+            // сообщать ничего, чем сообщить заведомо ненаходимое.
+            val index = runCatching {
+                java.net.NetworkInterface.getByName(name)?.index ?: 0
+            }.getOrDefault(0)
+            if (index <= 0) continue
+            val rank = when {
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> 3
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> 2
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> 1
+                else -> 0
+            }
+            if (rank >= bestRank) {
+                bestRank = rank
+                bestName = name
+                bestIndex = index
+                bestExpensive = !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+            }
+        }
+        if (bestName == null) {
+            // Индекс -1 — это «канала наружу нет», ядро понимает его отдельно и
+            // сбрасывает выбранный интерфейс. Без такого сообщения оно держится
+            // за последний известный и пытается ходить через него.
+            listener.updateDefaultInterface("", -1, false, false)
+            return
+        }
+        listener.updateDefaultInterface(bestName, bestIndex, bestExpensive, false)
     }
 
     override fun closeDefaultInterfaceMonitor(listener: InterfaceUpdateListener) {
@@ -510,6 +609,7 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         networkCallback?.let { runCatching { connectivity.unregisterNetworkCallback(it) } }
         networkCallback = null
         interfaceListener = null
+        synchronized(candidateNetworks) { candidateNetworks.clear() }
     }
 
     override fun getInterfaces(): NetworkInterfaceIterator {

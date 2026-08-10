@@ -49,8 +49,17 @@ class _ConfigViewScreenState extends State<ConfigViewScreen> {
       for (final e in dir.listSync()) {
         if (e is! File) continue;
         final name = e.path.split(Platform.pathSeparator).last;
+        // Журнал самого ядра — здесь же, рядом с конфигами.
+        //
+        // На Windows вывод ядра идёт в общий лог приложения: ядро там отдельный
+        // процесс, его stdout/stderr можно читать. На Android оно вкомпилировано
+        // в приложение, и его лог не виден НИГДЕ — только этим файлом. Ровно на
+        // этом уже сгорел разбор: туннель поднят, пакеты в него идут, наружу не
+        // выходит ничего, и ни одной строки о причине.
         if (name == 'config.json' ||
             name == 'xray_config.json' ||
+            name == 'core_log.txt' ||
+            name == 'core_panic.txt' ||
             name.startsWith('xray_bridge_')) {
           found.add(e);
         }
@@ -65,9 +74,25 @@ class _ConfigViewScreenState extends State<ConfigViewScreen> {
     if (found.isNotEmpty) await _open(found.first);
   }
 
+  // Журнал ядра растёт неограниченно, а нужен всегда конец. Читать целиком —
+  // значит однажды положить экран на многомегабайтном файле.
+  static const int _tailBytes = 256 * 1024;
+
   Future<void> _open(File f) async {
     try {
-      final text = await f.readAsString();
+      final length = await f.length();
+      final text = length > _tailBytes
+          // allowMalformed: срез начат с произвольного байта, и на границе
+          // многобайтного символа декодер иначе бросит исключение.
+          ? utf8
+              .decode(
+                  await f.openRead(length - _tailBytes).expand((c) => c).toList(),
+                  allowMalformed: true)
+              .split('\n')
+              // Первая строка почти наверняка обрезана посередине.
+              .skip(1)
+              .join('\n')
+          : await f.readAsString();
       if (!mounted) return;
       setState(() {
         _selected = f;

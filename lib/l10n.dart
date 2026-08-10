@@ -911,6 +911,18 @@ const Map<String, Map<String, String>> _strings = {
         'or no network at all. The rule is bound to the file path, not the process '
         'name — different programs can share a name. These rules override all others.',
   },
+  // Тот же экран на Android: программа опознаётся именем пакета, а список
+  // даёт система целиком — «запущенные» там ни при чём.
+  'app.introAndroid': {
+    'ru': 'Отдельное правило для приложения: всегда через VPN, всегда напрямую '
+        'или совсем без сети. Правило привязано к имени пакета. Эти правила '
+        'сильнее всех остальных.',
+    'en': 'A dedicated rule for an app: always through the VPN, always direct, or '
+        'no network at all. The rule is bound to the package name. These rules '
+        'override all others.',
+  },
+  'app.listInstalled': {'ru': 'Показать приложения', 'en': 'Show apps'},
+  'app.installed': {'ru': 'Установленные', 'en': 'Installed'},
   'app.exeFiles': {'ru': 'Программы', 'en': 'Programs'},
   'app.listRunning': {'ru': 'Показать запущенные', 'en': 'Show running'},
   'app.addByFile': {'ru': 'Выбрать .exe', 'en': 'Pick an .exe'},
