@@ -327,6 +327,11 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'Core versions, paths, updates',
   },
   'about.app': {'ru': 'Приложение', 'en': 'Application'},
+  'about.build': {'ru': 'Сборка', 'en': 'Build'},
+  'stats.apiStatus': {
+    'ru': 'Ядро отвечает отказом на запрос статистики: HTTP {code}',
+    'en': 'The core refuses the statistics request: HTTP {code}',
+  },
   'about.folder': {'ru': 'Папка', 'en': 'Folder'},
   'about.logFile': {'ru': 'Файл лога', 'en': 'Log file'},
   'about.checkCores': {
@@ -1052,8 +1057,8 @@ const Map<String, Map<String, String>> _strings = {
   'addp.linkSub': {'ru': 'Ссылка от провайдера', 'en': 'A link from your provider'},
   'addp.paste': {'ru': 'Импорт из буфера обмена', 'en': 'Import from the clipboard'},
   'addp.pasteSub': {
-    'ru': 'Вставить ссылки серверов текстом',
-    'en': 'Paste server links as text',
+    'ru': 'Ссылка подписки или ссылки серверов',
+    'en': 'A subscription link or server links',
   },
   'addp.file': {'ru': 'Импорт файла конфигурации', 'en': 'Import a config file'},
   'addp.fileSub': {'ru': 'txt, yaml, json, conf', 'en': 'txt, yaml, json, conf'},
@@ -1073,12 +1078,31 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'The backup contains your subscription links — keep the file as safe '
         'as the links themselves.',
   },
-  'addp.qr': {'ru': 'Импорт из QR-кода', 'en': 'Import from a QR code'},
+  'addp.qr': {'ru': 'QR-код из картинки', 'en': 'QR code from an image'},
   'addp.qrSub': {
-    'ru': 'Картинка с кодом: скриншот или фото',
-    'en': 'An image with the code: screenshot or photo',
+    'ru': 'Скриншот или фото с кодом',
+    'en': 'A screenshot or photo with the code',
+  },
+  'addp.scan': {'ru': 'Сканировать QR-код', 'en': 'Scan a QR code'},
+  'addp.scanSub': {
+    'ru': 'Навести камеру на код',
+    'en': 'Point the camera at the code',
   },
   'dlg.fileImages': {'ru': 'Картинки', 'en': 'Images'},
+
+  // --- Сканер QR камерой ---
+  'qr.scanTitle': {'ru': 'Сканирование кода', 'en': 'Scanning a code'},
+  'qr.torch': {'ru': 'Подсветка', 'en': 'Torch'},
+  'qr.scanHint': {
+    'ru': 'Наведите камеру на QR-код — он распознается сам',
+    'en': 'Point the camera at the QR code — it is recognised on its own',
+  },
+  'qr.cameraFailed': {
+    'ru': 'Камера недоступна. Проверьте, что вы разрешили приложению её '
+        'использовать и что её не занимает другая программа.',
+    'en': 'The camera is unavailable. Check that you allowed the app to use it '
+        'and that no other program is holding it.',
+  },
 
   // --- Содержимое лога ---
   // Подстановки в фигурных скобках, вставляются через tp().
@@ -1269,7 +1293,20 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Если вы только что скопировали ссылку',
     'en': 'If you have just copied the link',
   },
-  'onb.fromQr': {'ru': 'Из QR-кода', 'en': 'From a QR code'},
+  'servers.hideDead': {
+    'ru': 'Скрывать серверы, не прошедшие проверку',
+    'en': 'Hide servers that failed the check',
+  },
+  'servers.hideDeadCount': {
+    'ru': 'Скрывать не прошедшие проверку — скрыто: {n}',
+    'en': 'Hide servers that failed the check — hidden: {n}',
+  },
+  'onb.scanQr': {'ru': 'Сканировать QR-код', 'en': 'Scan a QR code'},
+  'onb.scanQrHint': {
+    'ru': 'Код показан на другом экране или на бумаге',
+    'en': 'The code is on another screen or on paper',
+  },
+  'onb.fromQr': {'ru': 'QR-код из картинки', 'en': 'QR code from an image'},
   'onb.fromQrHint': {
     'ru': 'Картинка с кодом: скриншот, фотография, сохранённое изображение',
     'en': 'An image with the code: screenshot, photo, saved picture',

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'l10n.dart';
+import 'platform_env.dart';
 import 'prefs_keys.dart';
 import 'qr_import.dart';
 
@@ -238,9 +239,20 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                   hint: t('onb.fromClipboardHint'),
                   onTap: _pasteFromClipboard,
                 ),
+                // Сканирование камерой — выше импорта картинки и только там,
+                // где камера есть. На первом запуске это самый частый случай:
+                // код показан на другом экране или на бумаге.
+                if (Env.hasCameraScanner)
+                  _chooserTile(
+                    scheme,
+                    icon: Icons.qr_code_scanner_rounded,
+                    title: t('onb.scanQr'),
+                    hint: t('onb.scanQrHint'),
+                    onTap: _scanQr,
+                  ),
                 _chooserTile(
                   scheme,
-                  icon: Icons.qr_code_scanner_rounded,
+                  icon: Icons.image_outlined,
                   title: t('onb.fromQr'),
                   hint: t('onb.fromQrHint'),
                   onTap: _pickFromQr,
@@ -323,6 +335,17 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       setState(() => _error = t('onb.clipboardEmpty'));
       return;
     }
+    setState(() {
+      _error = null;
+      _url.text = text;
+      _showForm = true;
+    });
+  }
+
+  Future<void> _scanQr() async {
+    final text = await QrImport.scanWithCamera(context);
+    // null — экран сканера закрыли. Не ошибка, говорить нечего.
+    if (text == null || text.isEmpty || !mounted) return;
     setState(() {
       _error = null;
       _url.text = text;

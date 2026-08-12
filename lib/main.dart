@@ -480,6 +480,18 @@ class AppSettings {
   String autoSelectFilter;
   int autoSelectLimit;
   bool autoSelectFavFirst;
+
+  /// Прятать из списка серверы, которые тест признал нерабочими.
+  ///
+  /// В подписках по полтора десятка серверов, и часть из них не работает
+  /// всегда: порт закрыт у провайдера, транспорт не проходит. Листать их
+  /// каждый раз, чтобы вспомнить, какие именно не отвечают, — работа, которую
+  /// приложение уже сделало за человека при тесте задержки.
+  ///
+  /// Непроверенные НЕ прячутся: про них ничего не известно, и спрятать их
+  /// значило бы соврать.
+  bool hideUnavailable;
+
   // Перед подключением прогнать тест и взять самый быстрый сервер.
   bool autoSelectOnConnect;
   // В обычном режиме без этого приложение бесполезно: поднимает прокси на
@@ -707,6 +719,7 @@ class AppSettings {
     this.autoSelectFilter = '',
     this.autoSelectLimit = 0,
     this.autoSelectFavFirst = false,
+    this.hideUnavailable = true,
     this.autoSelectOnConnect = true,
     this.tlsFragment = false,
     this.tlsRecordFragment = false,
@@ -969,6 +982,7 @@ class AppSettings {
         'autoSelectFilter': autoSelectFilter,
         'autoSelectLimit': autoSelectLimit,
         'autoSelectFavFirst': autoSelectFavFirst,
+        'hideUnavailable': hideUnavailable,
         'autoSelectOnConnect': autoSelectOnConnect,
         'autoSetSystemProxy': autoSetSystemProxy,
         'autoUpdateSubscription': autoUpdateSubscription,
@@ -1085,6 +1099,7 @@ class AppSettings {
       autoSelectFilter: j['autoSelectFilter'] as String? ?? d.autoSelectFilter,
       autoSelectLimit: j['autoSelectLimit'] as int? ?? d.autoSelectLimit,
       autoSelectFavFirst: j['autoSelectFavFirst'] as bool? ?? d.autoSelectFavFirst,
+      hideUnavailable: j['hideUnavailable'] as bool? ?? d.hideUnavailable,
       autoSelectOnConnect: j['autoSelectOnConnect'] as bool? ?? d.autoSelectOnConnect,
       autoSetSystemProxy: j['autoSetSystemProxy'] as bool? ?? d.autoSetSystemProxy,
       autoUpdateSubscription: j['autoUpdateSubscription'] as bool? ?? d.autoUpdateSubscription,
@@ -1755,7 +1770,22 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // с "connection refused"/"forcibly closed" при попытке шарить один порт).
   final Map<String, Process> _xrayBridgeProcesses = {};
   static const int _xrayBridgeBasePort = 1338;
-  String? _runningEngine; // 'singbox' | 'xray' | null — какое ядро сейчас реально держит порт 1337
+  // 'singbox' | 'xray' | null — какое ядро сейчас реально держит порт 1337.
+  //
+  // Через сеттер, а не голым полем: опрос статистики обязан жить ровно столько,
+  // сколько живёт ядро, и связывать их вручную в каждом месте присваивания —
+  // способ однажды забыть. Уже забыли: на Android ядро поднимает служба, а
+  // таймер заводился только в windows-ветке старта, и панель навсегда
+  // оставалась с надписью «Нет данных» при рабочем туннеле. Теперь место
+  // присваивания одно, и завести таймер мимо него нельзя.
+  String? get _runningEngine => _runningEngineValue;
+  set _runningEngine(String? value) {
+    if (_runningEngineValue == value) return;
+    _runningEngineValue = value;
+    _rescheduleStats();
+  }
+
+  String? _runningEngineValue;
 
   /// Ядро живо и им можно управлять через Clash API.
   ///
@@ -1771,6 +1801,11 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   String _log = "";
   String _statsText = "";
   Timer? _statsTimer;
+
+  // Сколько опросов подряд не удались. Один промах — заминка (ядро только
+  // стартовало и ещё не слушает), и писать о нём на экран значит показать
+  // ошибку там, где через две секунды всё в порядке.
+  int _statsFails = 0;
 
   // TUN (системный VPN) вместо локального прокси на 1337. Требует прав
   // администратора — вместо elevation отдельного дочернего процесса (что
@@ -1917,16 +1952,15 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   void _bindAndroidVpn() {
     _androidVpnSub = AndroidVpn.statusStream().listen((status) {
       if (!mounted) return;
+      // Опрос статистики заводится и гасится сеттером `_runningEngine`.
       setState(() => _runningEngine = status.running ? 'singbox' : null);
       final error = status.error;
       if (error != null && error.isNotEmpty) _appendLog(error);
       _rescheduleHealthCheck();
-      _rescheduleStats();
     });
     AndroidVpn.isRunning().then((running) {
       if (mounted && running) {
         setState(() => _runningEngine = 'singbox');
-        _rescheduleStats();
       }
     });
   }
@@ -1942,14 +1976,22 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   void _rescheduleStats() {
     _statsTimer?.cancel();
     _statsTimer = null;
-    if (_runningEngine == null) {
-      if (mounted && _statsText.isNotEmpty) setState(() => _statsText = '');
-      return;
+    _statsFails = 0;
+    // У Xray нет Clash API вообще, спрашивать не у кого. Подпись об этом ставит
+    // сам `_startXrayCore`, и затирать её ошибкой опроса — врать про поломку
+    // там, где просто нечего опрашивать.
+    if (_runningEngineValue == 'xray') return;
+    if (_runningEngineValue != null) {
+      _statsTimer =
+          Timer.periodic(const Duration(seconds: 2), (_) => _fetchStats());
     }
-    _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) => _fetchStats());
-    // Первый опрос сразу: иначе первые две секунды после подключения на экране
-    // висит «Нет данных», хотя ядро уже отвечает.
-    _fetchStats();
+    // Через микрозадачу, а не прямым вызовом: сеттер `_runningEngine` часто
+    // стоит ВНУТРИ setState, а `_fetchStats` вызывает setState сам. Вложенный
+    // setState — способ получить перестроение посреди перестроения. Задержка
+    // тут исчезающая, а первый опрос всё равно происходит сразу, не дожидаясь
+    // первого тика таймера: без него первые две секунды после подключения на
+    // экране висело бы «Нет данных» при уже отвечающем ядре.
+    Future.microtask(_fetchStats);
   }
 
   Future<void> _initTray() async {
@@ -2214,11 +2256,54 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // Список серверов для показа: поиск по имени, сортировка, избранное наверх.
   // Недоступные (задержка null после теста) всегда уезжают в конец — иначе при
   // сортировке по задержке они бы заняли первые места как "нулевые".
+  /// Сколько серверов спрятано как недоступные. Для подписи под списком:
+  /// молча исчезнувшие строки выглядят как потерянная подписка.
+  int _hiddenUnavailable = 0;
+
+  /// Сервер ПРОВЕРЕН и не работает.
+  ///
+  /// Не «нет задержки»: у непроверенного её тоже нет, и прятать его нельзя —
+  /// про него просто ничего не известно. Прячем только те, по которым тест
+  /// отработал и вернул пусто.
+  ///
+  /// Что именно проверяет тест, тут важно: в режиме `proxy` он идёт СКВОЗЬ
+  /// сервер до проверочного адреса, то есть ловит не только «порт не
+  /// отвечает», но и «сервер жив, а наружу через него не выходит» — ровно тот
+  /// случай, ради которого это и заведено.
+  bool _isKnownDead(ParsedServer s) {
+    final tag = s.outbound['tag'];
+    return _latencyMs.containsKey(tag) && _latencyMs[tag] == null;
+  }
+
   List<ParsedServer> _visibleServers() {
     final query = _serverSearch.trim().toLowerCase();
-    final list = query.isEmpty
+    var list = query.isEmpty
         ? List<ParsedServer>.from(_servers)
         : _servers.where((s) => s.name.toLowerCase().contains(query)).toList();
+
+    _hiddenUnavailable = 0;
+    if (_settings.hideUnavailable) {
+      final alive = list.where((s) => !_isKnownDead(s)).toList();
+      // Если живых не осталось ни одного — показываем всё.
+      //
+      // Причина такого обвала почти всегда общая (пропал интернет, отвалилась
+      // подписка), а не «все серверы разом умерли». Пустой список в этот момент
+      // — худшее, что можно показать: выбрать нечего, а понять почему нельзя.
+      // Всегда оставляем видимым и текущий сервер: человек смотрит на экран,
+      // где написано, что подключён именно к нему.
+      if (alive.isNotEmpty) {
+        _hiddenUnavailable = list.length - alive.length;
+        list = alive;
+        final selected = _selectedServer;
+        if (selected != null &&
+            _isKnownDead(selected) &&
+            !list.contains(selected) &&
+            (query.isEmpty || selected.name.toLowerCase().contains(query))) {
+          list.insert(0, selected);
+          _hiddenUnavailable--;
+        }
+      }
+    }
 
     int byLatency(ParsedServer a, ParsedServer b) {
       final x = _latencyMs[a.outbound['tag']];
@@ -3205,6 +3290,31 @@ del "%~f0"
 
   // Профиль по обычной ссылке подписки. Вынесено из диалога, потому что
   // тем же путём заводится профиль из QR-кода.
+  /// Заводит профиль по тому, ЧТО именно принесли: ссылку подписки или сами
+  /// серверы.
+  ///
+  /// Одно место на все три способа ввода — вставка из буфера, QR-картинка,
+  /// сканирование камерой. Раньше различал только QR, а вставка из буфера
+  /// всегда звала `_createLocalProfile`: вставленная туда ссылка подписки
+  /// ложилась на диск как «содержимое профиля», парсер честно не находил в ней
+  /// ни одного сервера, и на экране появлялось нечто, не имеющее отношения к
+  /// подписке. Пункт при этом называется «Импорт из буфера обмена» — то есть
+  /// ровно то, что человек в него и вставляет.
+  ///
+  /// Ссылкой считаем содержимое из ОДНОЙ строки со схемой http(s). Список
+  /// серверов — тоже строки со схемами (`vless://`, `vmess://`), поэтому
+  /// проверять надо и схему, и то, что строка одна.
+  Future<void> _createProfileFromContent(String name, String content) async {
+    final trimmed = content.trim();
+    final singleLine = !trimmed.contains('\n') && !trimmed.contains(RegExp(r'\s'));
+    if (singleLine &&
+        (trimmed.startsWith('http://') || trimmed.startsWith('https://'))) {
+      await _createProfileFromUrl(name, trimmed);
+      return;
+    }
+    await _createLocalProfile(name, content);
+  }
+
   Future<void> _createProfileFromUrl(String name, String url) async {
     final unique = _uniqueProfileName(name);
     final profile = SubscriptionProfile(
@@ -3358,7 +3468,13 @@ del "%~f0"
           onLink: () => _showProfileDialog(),
           onFile: _importProfileFromFile,
           onText: _importProfileFromText,
-          onQr: _importProfileFromQr,
+          onQr: () => _importProfileFromQr(),
+          // Пункта «сканировать» на рабочем столе нет вовсе, а не выключенный:
+          // строка, которая никогда не нажмётся, только занимает место и
+          // заставляет гадать, чего не хватает системе.
+          onScan: Env.hasCameraScanner
+              ? () => _importProfileFromQr(camera: true)
+              : null,
           onExport: _exportBackup,
           onImport: _importBackup,
         ),
@@ -3384,16 +3500,16 @@ del "%~f0"
     }
   }
 
-  // Импорт из QR-кода. На Windows камеры у приложения нет (и плагина под неё
-  // тоже), зато картинка с кодом есть всегда: скриншот с телефона, фото,
-  // сохранённая картинка из чата. Декодируем её сами через zxing2.
-  Future<void> _importProfileFromQr() async {
+  // Импорт из QR-кода: камерой (телефон) или из картинки (везде).
+  // Разбор — в `qr_import.dart`: тем же кодом пользуется мастер первого
+  // запуска, и две копии успели бы разойтись раньше, чем это кто-нибудь
+  // заметил.
+  Future<void> _importProfileFromQr({bool camera = false}) async {
     try {
-      // Разбор картинки — в `qr_import.dart`: тем же кодом пользуется мастер
-      // первого запуска, и две копии успели бы разойтись раньше, чем это
-      // кто-нибудь заметил.
-      final text = await QrImport.pickAndDecode();
-      // null — выбор файла закрыли, говорить нечего.
+      final text = camera
+          ? await QrImport.scanWithCamera(context)
+          : await QrImport.pickAndDecode();
+      // null — экран сканера или выбор файла закрыли, говорить нечего.
       if (text == null) return;
       if (text.isEmpty) {
         _appendLog(t('log.qrNotFound'));
@@ -3401,12 +3517,9 @@ del "%~f0"
       }
       _appendLog(tp('log.qrDecoded', {'n': text.length}));
       // В QR может лежать и ссылка на подписку, и сами ссылки серверов —
-      // различаем по схеме и заводим либо обычный профиль, либо локальный.
-      if (text.startsWith('http://') || text.startsWith('https://')) {
-        await _createProfileFromUrl(t('qr.importedName'), text);
-      } else {
-        await _createLocalProfile(t('qr.importedName'), text);
-      }
+      // разбирается с этим `_createProfileFromContent`, общий для всех
+      // способов ввода.
+      await _createProfileFromContent(t('qr.importedName'), text);
     } catch (e) {
       // NotFoundException от zxing2 при отсутствии кода — самый частый случай,
       // отдельного сообщения он не заслуживает, но и молчать нельзя.
@@ -3422,6 +3535,19 @@ del "%~f0"
   Future<void> _importProfileFromText() async {
     final nameController = TextEditingController(text: t('dlg.pastedProfile'));
     final contentController = TextEditingController();
+    // Пункт называется «Импорт из буфера обмена», значит буфер надо прочитать,
+    // а не просить вставить руками. Молча подставляем содержимое: поле остаётся
+    // редактируемым, и если там оказалось не то, человек это видит до нажатия
+    // «Добавить», а не после.
+    try {
+      final clip = await Clipboard.getData(Clipboard.kTextPlain);
+      final text = clip?.text?.trim() ?? '';
+      if (text.isNotEmpty) contentController.text = text;
+    } catch (_) {
+      // Буфер недоступен — поле просто останется пустым. Ронять из-за этого
+      // импорт нельзя: вставить руками по-прежнему можно.
+    }
+    if (!mounted) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -3456,7 +3582,8 @@ del "%~f0"
       ),
     );
     if (ok == true) {
-      await _createLocalProfile(nameController.text.trim(), contentController.text);
+      await _createProfileFromContent(
+          nameController.text.trim(), contentController.text);
     }
   }
 
@@ -4896,9 +5023,9 @@ del "%~f0"
     process.stderr.transform(SystemEncoding().decoder).listen((data) {
       _appendLog('[stderr] $data');
     });
-
-    _statsTimer?.cancel();
-    _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) => _fetchStats());
+    // Таймер статистики здесь НЕ заводится: его завёл сеттер `_runningEngine`
+    // выше. Второе место завода — это ровно то, чего мы избавились: одно из
+    // них однажды и забыли.
   }
 
   Future<void> _startXrayCore(ParsedServer server) async {
@@ -4932,7 +5059,8 @@ del "%~f0"
       _appendLog('[stderr] $data');
     });
 
-    _statsTimer?.cancel();
+    // Опрос уже выключен сеттером `_runningEngine` (у Xray Clash API нет),
+    // остаётся только сказать об этом на экране.
     setState(() => _statsText = tp('stats.xrayNoApi', {'name': server.name}));
   }
 
@@ -5047,10 +5175,10 @@ del "%~f0"
     _stopRequested = true;
     if (Env.isAndroid) {
       await AndroidVpn.stop();
+      // Опрос статистики гасит сеттер `_runningEngine`.
       _runningEngine = null;
       _unhealthy.clear();
       _rescheduleHealthCheck();
-      _statsTimer?.cancel();
       _appendLog(t('log.coreStopped'));
       if (mounted) setState(() => _statsText = "");
       return;
@@ -5064,7 +5192,6 @@ del "%~f0"
     _unhealthy.clear();
     _rescheduleHealthCheck();
     _refreshTrayMenu();
-    _statsTimer?.cancel();
     await _restoreSystemProxy();
     _appendLog(t('log.coreStopped'));
     if (mounted) setState(() => _statsText = "");
@@ -5139,6 +5266,7 @@ del "%~f0"
     // ошибке там, где ошибки нет, только сбивает с толку.
     if (_runningEngine == null) {
       _statsTimer?.cancel();
+      _statsTimer = null;
       if (mounted && _statsText.isNotEmpty) setState(() => _statsText = '');
       return;
     }
@@ -5146,11 +5274,28 @@ del "%~f0"
       final versionResp = await http.get(Uri.parse('$_clashApiBase/version')).timeout(const Duration(seconds: 2));
       final connectionsResp = await http.get(Uri.parse('$_clashApiBase/connections')).timeout(const Duration(seconds: 2));
 
-      if (versionResp.statusCode == 200 && connectionsResp.statusCode == 200) {
+      // Ответ есть, но не 200 — это НЕ повод молчать.
+      //
+      // Раньше здесь стоял голый `if` без ветки else: ядро отвечает отказом, а
+      // панель остаётся пустой, то есть показывает «Нет данных» — ровно то же,
+      // что и при неподнятом опросе. Два разных состояния выглядели одинаково,
+      // и разобрать по экрану, что именно сломалось, было нельзя.
+      if (versionResp.statusCode != 200 || connectionsResp.statusCode != 200) {
+        final code = versionResp.statusCode != 200
+            ? versionResp.statusCode
+            : connectionsResp.statusCode;
+        if (mounted) {
+          setState(() => _statsText = tp('stats.apiStatus', {'code': code}));
+        }
+        return;
+      }
+      {
         final connectionsJson = jsonDecode(connectionsResp.body);
         final downloadTotal = connectionsJson['downloadTotal'] ?? 0;
         final uploadTotal = connectionsJson['uploadTotal'] ?? 0;
         final activeConnections = (connectionsJson['connections'] as List?)?.length ?? 0;
+        _statsFails = 0;
+        if (!mounted) return;
 
         setState(() {
           // Одной строкой, а не четырьмя: имя сервера уже написано под щитом,
@@ -5161,6 +5306,12 @@ del "%~f0"
         });
       }
     } catch (e) {
+      // Первый промах молчим: опрос заводится в тот же миг, когда ядро
+      // объявлено запущенным, а слушать порт оно начинает чуть позже — и на
+      // экране успевала мигнуть ошибка там, где через две секунды всё в
+      // порядке. Со второго промаха подряд это уже состояние, а не заминка.
+      _statsFails++;
+      if (_statsFails < 2 || !mounted) return;
       setState(() => _statsText = tp('stats.apiDown', {'e': e}));
     }
   }
@@ -6323,6 +6474,33 @@ del "%~f0"
                   ),
                 ],
               ),
+              // Отдельной строкой, а не значком в ряду сортировки: настройка
+              // убирает строки с экрана, и человек должен видеть, что она
+              // включена, не наводя ни на что курсор.
+              Row(
+                children: [
+                  SizedBox(
+                    width: 32,
+                    child: Checkbox(
+                      value: _settings.hideUnavailable,
+                      visualDensity: VisualDensity.compact,
+                      onChanged: (v) async {
+                        final updated = AppSettings.fromJson(_settings.toJson())
+                          ..hideUnavailable = v ?? false;
+                        await _saveSettings(updated);
+                      },
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      _hiddenUnavailable > 0
+                          ? tp('servers.hideDeadCount', {'n': _hiddenUnavailable})
+                          : t('servers.hideDead'),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
               const SizedBox(height: 8),
               // Список — главное содержимое экрана, поэтому Expanded, а не
               // фиксированная высота: при низком окне фиксированная как раз и
@@ -6565,6 +6743,20 @@ del "%~f0"
 // `version:` в pubspec.yaml — они не связаны автоматически.
 const String kAppVersion = '1.0.0';
 
+/// Когда собрана ЭТА сборка.
+///
+/// Между релизами версия не меняется — она поднимается решением человека, — и
+/// две сборки одного номера отличить было нечем. Это уже стоило раунда
+/// вслепую: пользователь сообщил о поломке, исправленной днём раньше, и
+/// выяснить, стоит ли у него правка, оказалось невозможно ни по одному экрану.
+/// Спрашивать «а посмотрите, есть ли там такой-то тумблер» — не диагностика.
+///
+/// Значение подставляется при сборке:
+///   flutter build apk --dart-define=BUILD_STAMP=2026-08-10T16:20
+/// Без ключа остаётся пусто, и строка просто не показывается — заставлять
+/// собирать через один-единственный правильный набор ключей нельзя.
+const String kBuildStamp = String.fromEnvironment('BUILD_STAMP');
+
 // Блок «О программе»: версии приложения и обоих ядер, ручная проверка
 // обновлений и пути, которые спрашивают первыми, когда что-то не работает.
 // Версии ядер спрашиваем у самих бинарников — единственный честный источник
@@ -6637,6 +6829,7 @@ class _AboutBlockState extends State<_AboutBlock> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _row(t('about.app'), 'Multik Sila $kAppVersion'),
+        if (kBuildStamp.isNotEmpty) _row(t('about.build'), kBuildStamp),
         _row('sing-box', _loading ? '…' : (_singBox ?? unknown)),
         _row('Xray', _loading ? '…' : (_xray ?? unknown)),
         // Ядро без версии автообновление не трогает — сравнивать не с чем.
@@ -9062,6 +9255,10 @@ class AddProfileScreen extends StatelessWidget {
   final VoidCallback onFile;
   final VoidCallback onText;
   final VoidCallback onQr;
+
+  /// Сканирование камерой. `null` там, где камеры нет, — тогда пункта
+  /// в списке не будет вовсе.
+  final VoidCallback? onScan;
   final VoidCallback onExport;
   final VoidCallback onImport;
 
@@ -9071,6 +9268,7 @@ class AddProfileScreen extends StatelessWidget {
     required this.onFile,
     required this.onText,
     required this.onQr,
+    this.onScan,
     required this.onExport,
     required this.onImport,
   });
@@ -9099,7 +9297,11 @@ class AddProfileScreen extends StatelessWidget {
           row(Icons.link, t('addp.link'), t('addp.linkSub'), onLink),
           row(Icons.content_paste, t('addp.paste'), t('addp.pasteSub'), onText),
           row(Icons.insert_drive_file_outlined, t('addp.file'), t('addp.fileSub'), onFile),
-          row(Icons.qr_code_scanner, t('addp.qr'), t('addp.qrSub'), onQr),
+          // Сканирование выше импорта картинки: если камера есть, это и есть
+          // обычный способ, а картинка — запасной.
+          if (onScan != null)
+            row(Icons.qr_code_scanner, t('addp.scan'), t('addp.scanSub'), onScan),
+          row(Icons.image_outlined, t('addp.qr'), t('addp.qrSub'), onQr),
           const Divider(height: 24),
           row(Icons.save_alt, t('addp.export'), t('addp.exportSub'), onExport),
           row(Icons.settings_backup_restore, t('addp.import'), t('addp.importSub'), onImport),

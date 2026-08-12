@@ -55,6 +55,7 @@ dependencies:
   # такого пути нет в принципе: приложению выделяется песочница, и узнать её
   # можно только у системы.
   path_provider: ^2.1.5
+  mobile_scanner: ^7.4.0
 
 dev_dependencies:
   flutter_test:
