@@ -2831,33 +2831,83 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   Future<void> _applyAppUpdateAndRestart() async {
     final exe = Platform.resolvedExecutable;
     final batPath = '$_workDir${Platform.pathSeparator}apply_update.bat';
-    final backup = '$_workDir${Platform.pathSeparator}backup_$kAppVersion';
+    // Резерв — РЯДОМ с папкой приложения, а не внутри неё: копировать папку в
+    // собственную подпапку значит просить xcopy о цикле, на котором он
+    // останавливается с «Cannot perform a cyclic copy», и до подмены дело уже
+    // не доходит. Записывается относительным путём от `%~dp0`, чтобы в тексте
+    // скрипта не появилось ни одного не-ASCII символа (см. ниже).
+    const backupName = r'%APP%..\MultikSila_backup';
     // pid — из dart:io, идентификатор текущего процесса: .bat должен ждать
     // именно нас, а не любой процесс с тем же именем.
     final ownPid = pid;
 
-    // Кавычки вокруг каждого пути: у пользователя приложение вполне может
-    // лежать в каталоге с пробелами, и без них команда развалится.
+    // ТЕЛО СКРИПТА — ТОЛЬКО ASCII. Все пути приходят аргументами.
+    //
+    // Это не вкусовщина, а единственная причина, по которой обновление
+    // вообще работает. Раньше пути подставлялись в текст .bat, файл писался
+    // в UTF-8, и у пользователя с кириллицей в имени папки профиля
+    // (`C:\Users\<Имя Фамилия>\...`) cmd разъезжался по смещениям: он читает
+    // .bat побайтово в кодировке консоли, а каждая кириллическая буква в
+    // UTF-8 занимает два байта. После этого разбор шёл с середины слова.
+    // Симптом, снятый на стенде дословно:
+    //
+    //   'ut' is not recognized as an internal or external command
+    //
+    // — это распиленное пополам `timeout`. Наружу выходило так: обновление
+    // скачано и распаковано, приложение честно закрылось «для установки», а
+    // подмена не произошла: update_staging остался лежать, версия прежняя,
+    // приложение не вернулось. Аргументы же приходят из командной строки,
+    // которую Windows передаёт в Unicode, и никакой перекодировки не требуют.
+    //
+    // `ping` вместо `timeout`: у отсоединённого процесса нет консольного
+    // ввода, а `timeout` в этом случае отказывается работать вовсе
+    // («Input redirection is not supported»).
+    //
+    // Резерв кладётся ВНЕ папки приложения. Копировать папку в собственную
+    // подпапку — цикл, xcopy на нём останавливается с «Cannot perform a
+    // cyclic copy», и до самой подмены дело уже не доходило.
+    // Пути скрипт берёт от СВОЕГО расположения (`%~dp0`), а не получает
+    // текстом и не получает аргументами.
+    //
+    // Аргументы — вторая ловушка, проверенная на стенде: `cmd /c` разбирает
+    // хвост команды по своим правилам, и путь с пробелом («Multik Sila»)
+    // разваливается пополам:
+    //
+    //   "C:\Users\Абилова " не является внутренней или внешней командой
+    //
+    // `%~dp0` берётся из того, что cmd и так знает о запущенном файле, минуя
+    // и разбор кавычек, и перекодировку. Единственное, что осталось внутри
+    // текста, — номер процесса и имя .exe: и то и другое ASCII по определению
+    // (имя исполняемого файла менять нельзя, см. CLAUDE.md). Комментариев
+    // внутри скрипта нет и быть не должно по той же причине: `rem` по-русски
+    // возвращает в файл ровно те байты, из-за которых всё и ломалось.
+    //
+    // ТОЧКА в конце пути назначения (`"%APP%."`) тоже обязательна: `%~dp0`
+    // кончается обратной косой, а в записи `"%APP%"` эта косая экранирует
+    // закрывающую кавычку — аргумент разъезжается, и xcopy молча ничего не
+    // копирует. Стенд показывал это так: скрипт доходит до конца, резерв
+    // создан, staging удалён, а версия прежняя.
+    final exeName = File(exe).uri.pathSegments.last;
     final bat = '''
 @echo off
-chcp 65001 >nul
 :wait
 tasklist /FI "PID eq $ownPid" 2>nul | find "$ownPid" >nul
 if not errorlevel 1 (
-  timeout /t 1 /nobreak >nul
+  ping -n 2 127.0.0.1 >nul
   goto wait
 )
-if not exist "$backup" mkdir "$backup"
-xcopy "$_appDir\\*" "$backup\\" /E /Y /I /Q >nul
-xcopy "$_stagingDir\\*" "$_appDir\\" /E /Y /I /Q >nul
-rmdir /S /Q "$_stagingDir"
-start "" "$exe"
+set "APP=%~dp0"
+if not exist "$backupName" mkdir "$backupName"
+xcopy "%APP%*" "$backupName\\." /E /Y /I /Q >nul
+xcopy "%APP%update_staging\\*" "%APP%." /E /Y /I /Q >nul
+rmdir /S /Q "%APP%update_staging"
+start "" "%APP%$exeName"
 del "%~f0"
 ''';
     await File(batPath).writeAsString(bat, flush: true);
     _appendLog(t('log.appApplying'));
     await Process.start('cmd', ['/c', batPath],
-        mode: ProcessStartMode.detached, runInShell: true);
+        mode: ProcessStartMode.detached);
     await _quitApp();
   }
 
