@@ -53,7 +53,11 @@ Get-ChildItem $rel -Filter "*_probe.json" -ErrorAction SilentlyContinue | Remove
 Get-ChildItem $rel -Filter "rulesets" -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
 
 Write-Host "building"
-& flutter build windows --release | Select-Object -Last 1
+# The build stamp is what tells two builds of the same version apart on the
+# About screen. Without it a published build and a local one look identical,
+# and asking someone which of the two they are running is not diagnosis.
+$stamp = Get-Date -Format "yyyy-MM-dd HH:mm"
+& flutter build windows --release "--dart-define=BUILD_STAMP=$stamp" | Select-Object -Last 1
 
 Write-Host "compiling installer"
 Get-ChildItem "installer\output" -Filter *.exe -ErrorAction SilentlyContinue | Remove-Item -Force
