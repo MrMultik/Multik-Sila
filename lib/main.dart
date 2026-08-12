@@ -3308,6 +3308,45 @@ del "%~f0"
 
   // Профиль по обычной ссылке подписки. Вынесено из диалога, потому что
   // тем же путём заводится профиль из QR-кода.
+  /// Имя профиля по его содержимому.
+  ///
+  /// Для ссылки берём АДРЕС САЙТА, а не первые символы строки: любая подписка
+  /// начинается с `https`, и по такому имени профили не отличить друг от друга
+  /// вообще — а именно ради различения имя и нужно. Из адреса выбрасываем
+  /// `www.` и служебные поддомены вроде `sub.`: `sub.example.com` -> `example`.
+  ///
+  /// Для всего остального (вставили сами ссылки серверов) — первые символы,
+  /// потому что осмысленного имени там просто нет.
+  ///
+  /// Имя в любом случае предложение, а не приговор: поле в диалоге открыто на
+  /// правку, а занятость проверит `_uniqueProfileName`.
+  String _suggestProfileName(String content) {
+    final trimmed = content.trim();
+    final firstLine = trimmed.split('\n').first.trim();
+    final uri = Uri.tryParse(firstLine);
+    if (uri != null &&
+        (uri.scheme == 'http' || uri.scheme == 'https') &&
+        uri.host.isNotEmpty) {
+      var host = uri.host.toLowerCase();
+      for (final prefix in const ['www.', 'sub.', 'subscribe.', 'api.']) {
+        if (host.startsWith(prefix)) host = host.substring(prefix.length);
+      }
+      // У голого адреса резать нечего: `1.2.3.4` по первой точке превращается
+      // в «1». Проверено прогоном — на этом и попались.
+      final isIpLiteral =
+          RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(host) || host.contains(':');
+      if (isIpLiteral) return host;
+      // Домен верхнего уровня в имени не нужен: `example.com` и `example.net`
+      // от одной панели человек всё равно назовёт по-своему, а лишний хвост
+      // только удлиняет строку в списке.
+      final label = host.split('.').first;
+      if (label.isNotEmpty) return label;
+    }
+    final compact = trimmed.replaceAll(RegExp(r'\s+'), '');
+    if (compact.isEmpty) return t('dlg.pastedProfile');
+    return compact.substring(0, compact.length < 5 ? compact.length : 5);
+  }
+
   /// Заводит профиль по тому, ЧТО именно принесли: ссылку подписки или сами
   /// серверы.
   ///
@@ -3551,16 +3590,20 @@ del "%~f0"
   }
 
   Future<void> _importProfileFromText() async {
-    final nameController = TextEditingController(text: t('dlg.pastedProfile'));
+    final nameController = TextEditingController();
     final contentController = TextEditingController();
     // Пункт называется «Импорт из буфера обмена», значит буфер надо прочитать,
     // а не просить вставить руками. Молча подставляем содержимое: поле остаётся
     // редактируемым, и если там оказалось не то, человек это видит до нажатия
     // «Добавить», а не после.
+    var suggestedName = t('dlg.pastedProfile');
     try {
       final clip = await Clipboard.getData(Clipboard.kTextPlain);
       final text = clip?.text?.trim() ?? '';
-      if (text.isNotEmpty) contentController.text = text;
+      if (text.isNotEmpty) {
+        contentController.text = text;
+        suggestedName = _suggestProfileName(text);
+      }
     } catch (_) {
       // Буфер недоступен — поле просто останется пустым. Ронять из-за этого
       // импорт нельзя: вставить руками по-прежнему можно.
@@ -3575,9 +3618,19 @@ del "%~f0"
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // Предложенное имя стоит ПОДСКАЗКОЙ, а не текстом в поле.
+              //
+              // Текстом оно заставляет сначала стереть чужое и только потом
+              // писать своё — на каждый профиль лишнее действие, и первое, что
+              // человек делает, открыв диалог, это уборка за приложением.
+              // Подсказка решает обе задачи разом: поле пустое, печатать можно
+              // сразу, а если ничего не напечатали — берётся предложенное.
               TextField(
                 controller: nameController,
-                decoration: InputDecoration(labelText: t('dlg.name')),
+                decoration: InputDecoration(
+                  labelText: t('dlg.name'),
+                  hintText: suggestedName,
+                ),
               ),
               const SizedBox(height: 12),
               TextField(
@@ -3600,8 +3653,11 @@ del "%~f0"
       ),
     );
     if (ok == true) {
+      // Пустое поле — значит человек согласился с подсказкой, а не оставил
+      // профиль без имени.
+      final typed = nameController.text.trim();
       await _createProfileFromContent(
-          nameController.text.trim(), contentController.text);
+          typed.isEmpty ? suggestedName : typed, contentController.text);
     }
   }
 
@@ -5352,6 +5408,42 @@ del "%~f0"
   // поэтому режим «до сервера» к ним неприменим.
   static const Set<String> _udpOnlyProtocols = {'hysteria2', 'hysteria', 'tuic'};
 
+  /// Сколько проверок держим одновременно.
+  ///
+  /// Раньше тест запускался по всем серверам разом (`Future.wait` по всему
+  /// списку). На подписке из десятка это незаметно, а на подписке из двух сотен
+  /// — двести одновременных соединений через одно пробное ядро: они мешают друг
+  /// другу, половина упирается в таймаут, и живые серверы объявляются
+  /// недоступными. Само по себе это было «неточно», а вместе со скрытием
+  /// непрошедших проверку становится прямым враньём: рабочий сервер исчезает
+  /// из списка.
+  ///
+  /// Двенадцать — компромисс: 200 серверов при таймауте по умолчанию
+  /// проверяются заметно быстрее, чем по одному, и при этом не толкаются.
+  static const int _latencyConcurrency = 12;
+
+  /// `Future.wait` с ограничением на число одновременных задач.
+  Future<void> _runLimited<T>(
+      Iterable<T> items, Future<void> Function(T) body) async {
+    final queue = items.toList();
+    var next = 0;
+    Future<void> worker() async {
+      while (true) {
+        final index = next++;
+        if (index >= queue.length) return;
+        await body(queue[index]);
+      }
+    }
+
+    final workers = <Future<void>>[];
+    final count =
+        queue.length < _latencyConcurrency ? queue.length : _latencyConcurrency;
+    for (var i = 0; i < count; i++) {
+      workers.add(worker());
+    }
+    await Future.wait(workers);
+  }
+
   Future<void> _testAllLatencies() async {
     if (_servers.isEmpty || _testingLatency) return;
 
@@ -5423,7 +5515,7 @@ del "%~f0"
     if (_runningEngine != null) {
       final timeoutMs = _settings.latencyTimeoutMs;
       final url = _settings.latencyUrl;
-      await Future.wait(_servers.map((s) async {
+      await _runLimited(_servers, (s) async {
         final tag = s.outbound['tag'] as String;
         try {
           final resp = await http
@@ -5437,7 +5529,7 @@ del "%~f0"
         } catch (e) {
           _appendLog(tp('log.latencyError', {'name': s.name, 'e': e}));
         }
-      }));
+      });
       return;
     }
 
@@ -5477,7 +5569,7 @@ del "%~f0"
   // Режим "как в Karing": время TCP-рукопожатия до сервера. Не поднимает ни
   // одного процесса, поэтому тест всех серверов занимает доли секунды.
   Future<void> _testLatenciesByConnect(List<ParsedServer> servers) async {
-    await Future.wait(servers.map((s) async {
+    await _runLimited(servers, (s) async {
       final tag = s.outbound['tag'] as String;
       final endpoint = _serverEndpoint(s);
       if (endpoint == null) return;
@@ -5494,7 +5586,7 @@ del "%~f0"
       } catch (e) {
         _appendLog(tp('log.latencyError', {'name': s.name, 'e': e}));
       }
-    }));
+    });
   }
 
   // Режим «как в Karing»: соединение устанавливается ВНЕ замера, секундомер
@@ -5612,7 +5704,7 @@ del "%~f0"
       final httpTimeout = Duration(milliseconds: timeoutMs + 1000);
       Uri delayUri(String tag) => Uri.parse(
           'http://127.0.0.1:$probeApiPort/proxies/$tag/delay?url=${Uri.encodeComponent(testUrl)}&timeout=$timeoutMs');
-      await Future.wait(tags.map((tag) async {
+      await _runLimited(tags, (tag) async {
         try {
           // Clash-эндпоинт /delay на каждый вызов открывает новое соединение,
           // так что "прогревать" тут почти нечего — прогон помогает разве что
@@ -5628,7 +5720,7 @@ del "%~f0"
         } catch (e) {
           _appendLog(tp('log.latencyError', {'name': tag, 'e': e}));
         }
-      }));
+      });
     } catch (_) {
       // пробное ядро не поднялось — все теги этой группы останутся null
     } finally {
@@ -5751,9 +5843,9 @@ del "%~f0"
       // с таймаутом 5 с на порт вернуло бы ту же арифметику, от которой
       // мы здесь и уходим.
       final ready = <ParsedServer>[];
-      await Future.wait(servers.map((s) async {
+      await _runLimited(servers, (s) async {
         if (await _waitForPort(ports[s.outbound['tag']]!)) ready.add(s);
-      }));
+      });
 
       // Ни один вход не поднялся — почти наверняка ядро вообще не стартовало
       // (одного нерабочего outbound хватает, чтобы Xray отказался читать весь
@@ -5775,13 +5867,13 @@ del "%~f0"
         }
       }
 
-      await Future.wait(ready.map((s) async {
+      await _runLimited(ready, (s) async {
         final tag = s.outbound['tag'] as String;
         final elapsed = await _measureViaHttpProxy(ports[tag]!, s.name);
         if (elapsed != null && mounted) {
           setState(() => _latencyMs[tag] = elapsed);
         }
-      }));
+      });
     } catch (e) {
       _appendLog(tp('log.latencyError', {'name': 'xray', 'e': e}));
     } finally {
