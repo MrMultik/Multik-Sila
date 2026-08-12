@@ -1293,6 +1293,17 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Если вы только что скопировали ссылку',
     'en': 'If you have just copied the link',
   },
+  'sub.notAUrl': {
+    'ru': 'В профиле не ссылка подписки. Она начинается с http:// или https:// '
+        'и содержит адрес сайта — проверьте, что скопировалась вся строка '
+        'целиком. Если у вас на руках сами серверы (vless://, vmess://), '
+        'заводите профиль через «Импорт из буфера обмена».',
+    'en': 'This profile does not hold a subscription link. A link starts with '
+        'http:// or https:// and contains a site address — check that the whole '
+        'string was copied. If what you have is the servers themselves '
+        '(vless://, vmess://), add the profile through "Import from the '
+        'clipboard" instead.',
+  },
   'servers.hideDead': {
     'ru': 'Скрывать серверы, не прошедшие проверку',
     'en': 'Hide servers that failed the check',

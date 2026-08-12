@@ -3141,8 +3141,26 @@ del "%~f0"
       return;
     }
 
+    // Проверяем, что это вообще адрес, ДО запроса.
+    //
+    // Иначе `http.get` падает с дартовым «Invalid argument(s): No host
+    // specified in URI», и эта строка уезжает человеку на экран как есть. Она
+    // не врёт, но и не помогает: по ней не понять, что в профиль попала не
+    // ссылка, а, например, её обрывок или просто набранное имя. Проверяем и
+    // схему, и наличие хоста — `Uri.parse('test1')` разбирается без единой
+    // жалобы, просто оба поля выходят пустыми.
+    final uri = Uri.tryParse(profile.url.trim());
+    if (uri == null ||
+        (uri.scheme != 'http' && uri.scheme != 'https') ||
+        uri.host.isEmpty) {
+      if (_activeProfile?.id == profile.id) {
+        setState(() => _subStatus = t('sub.notAUrl'));
+      }
+      return;
+    }
+
     try {
-      final resp = await http.get(Uri.parse(profile.url)).timeout(const Duration(seconds: 10));
+      final resp = await http.get(uri).timeout(const Duration(seconds: 10));
 
       if (resp.statusCode != 200) {
         if (_activeProfile?.id == profile.id) {
@@ -3618,7 +3636,17 @@ del "%~f0"
 
     if (saved != true || urlController.text.trim().isEmpty) return;
 
-    final url = urlController.text.trim();
+    var url = urlController.text.trim();
+    // Ссылку без схемы дополняем сами.
+    //
+    // Панели дают адрес и в виде `sub.example.com/link/abc`, и такую строку
+    // человек вставляет ровно так же. Без схемы `Uri.parse` разбирает её как
+    // путь, хост выходит пустым, и профиль заводится заведомо нерабочим.
+    // Дополнять до `https://`, а не до `http://`: подписки живут по TLS, а
+    // ошибиться в эту сторону безопаснее.
+    if (!url.contains('://') && !url.startsWith('file:')) {
+      url = 'https://$url';
+    }
     // Пустое поле отдаём помощнику как есть: имя по умолчанию он строит сам
     // и там же проверяет, не занято ли оно.
     final name = _uniqueProfileName(nameController.text, exceptId: editing?.id);
