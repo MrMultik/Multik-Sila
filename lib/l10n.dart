@@ -1305,6 +1305,11 @@ const Map<String, Map<String, String>> _strings = {
         '(vless://, vmess://), add the profile through "Import from the '
         'clipboard" instead.',
   },
+  'servers.testStop': {'ru': 'Остановить тест', 'en': 'Stop the test'},
+  'log.latencyCancelled': {
+    'ru': 'Тест задержки остановлен',
+    'en': 'Latency test stopped',
+  },
   'log.startCancelled': {
     'ru': 'Подключение отменено',
     'en': 'Connection cancelled',

@@ -5056,6 +5056,17 @@ del "%~f0"
     _appendLog(t('log.startCancelled'));
   }
 
+  /// Прервать тест задержки, запущенный кнопкой (без подключения).
+  ///
+  /// Отдельно от `_cancelStart`: тот завязан на `_busy`, а он поднимается
+  /// только на время подключения. Тест, запущенный вручную, идёт при `_busy`
+  /// == false, и отменять его было нечем.
+  void _cancelLatencyTest() {
+    if (!_testingLatency) return;
+    _cancelLatency = true;
+    _appendLog(t('log.latencyCancelled'));
+  }
+
   Future<void> _startCore({bool isAutoRestart = false}) async {
     // Защита от повторных нажатий. С включённым автовыбором старт сначала
     // гоняет тест по всем серверам — это несколько секунд, в течение которых
@@ -5105,6 +5116,17 @@ del "%~f0"
         }
       }
       if (_stopRequested) return;
+    }
+    // Последняя проверка перед тем, как что-то поднимать.
+    //
+    // Отмена, нажатая во время автовыбора, до сих пор помогала только если
+    // успевала попасть между шагами теста. Дальше по пути проверок не было, и
+    // ядро всё равно стартовало — то есть «отменил», а через секунду видишь
+    // «подключено». Здесь проходит граница: выше — только измерения, ниже
+    // начинается запуск.
+    if (_stopRequested) {
+      _appendLog(t('log.startCancelled'));
+      return;
     }
     _selectedServer ??= _servers.first;
     _appendLog(tp('log.startSummary', {
@@ -6991,14 +7013,24 @@ del "%~f0"
               ),
             if (_tab == 1) Row(
               children: [
+                // Идущий тест той же кнопкой и останавливается.
+                //
+                // Раньше она на время прогона просто гасла: начатый тест на
+                // подписке в две сотни серверов идёт минуту с лишним, и всё это
+                // время остановить его было нечем — оставалось ждать конца того,
+                // что тебе уже не нужно. Кнопка, которая умеет только начать, но
+                // не прекратить, — это не защита от повторного нажатия, а
+                // отсутствие выхода.
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: _servers.isEmpty || _testingLatency ? null : _testAllLatencies,
+                    onPressed: _servers.isEmpty
+                        ? null
+                        : (_testingLatency ? _cancelLatencyTest : _testAllLatencies),
                     icon: _testingLatency
-                        ? const SizedBox(
-                            width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                        ? const Icon(Icons.stop, size: 18)
                         : const Icon(Icons.speed, size: 18),
-                    label: Text(_testingLatency ? t('servers.testing') : t('servers.test')),
+                    label: Text(
+                        _testingLatency ? t('servers.testStop') : t('servers.test')),
                   ),
                 ),
                 const SizedBox(width: 8),
