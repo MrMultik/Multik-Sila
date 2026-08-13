@@ -5969,8 +5969,13 @@ del "%~f0"
       "inbounds": [
         {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": probePort}
       ],
-      "outbounds": [...servers.map((s) => s.outbound), selector],
-      "route": {"final": "probe"},
+      "outbounds": [
+        ...servers.map((s) => s.outbound),
+        selector,
+        // direct нужен резолверу: без него `dns-direct` не к чему привязать.
+        {"type": "direct", "tag": "direct"},
+      ],
+      ..._probeDnsAndRoute(),
     };
     await File(probeConfigPath).writeAsString(const JsonEncoder.withIndent('  ').convert(config));
 
