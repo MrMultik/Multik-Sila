@@ -1794,6 +1794,46 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     if (_runningEngineValue == value) return;
     _runningEngineValue = value;
     _rescheduleStats();
+    _verifyConnection();
+  }
+
+  /// Что показала проверка соединения. Пусто — не проверяли.
+  String _connectionCheck = '';
+
+  /// Прошла ли последняя проверка. Нужно только для цвета подписи.
+  bool _connectionOk = false;
+
+  /// Проверяет, что через поднятое соединение действительно что-то ходит.
+  ///
+  /// «Подключено» до сих пор означало «ядро запустилось» — и только. Ядро
+  /// стартует за сотые доли секунды даже к мёртвому серверу: щит зеленеет,
+  /// а соединений ноль, скачано ноль, задержка «— мс». Человек при этом
+  /// уверен, что защищён, и узнаёт правду от первого не открывшегося сайта.
+  ///
+  /// Запрос идёт СКВОЗЬ выбранный сервер (тем же путём, что и проверка связи),
+  /// то есть проверяет не «порт открыт», а «наружу выходит».
+  ///
+  /// Результат только показывается. Переключать сервер самостоятельно здесь
+  /// нельзя: человек нажал «Подключить» к КОНКРЕТНОМУ серверу, и подменять
+  /// его выбор без спроса — ровно то поведение, на которое он уже жаловался.
+  Future<void> _verifyConnection() async {
+    if (_runningEngineValue == null) {
+      if (mounted) setState(() => _connectionCheck = '');
+      return;
+    }
+    if (mounted) {
+      setState(() {
+        _connectionCheck = t('check.running');
+        _connectionOk = false;
+      });
+    }
+    final ok = await _probeActiveServer();
+    if (!mounted || _runningEngineValue == null) return;
+    setState(() {
+      _connectionOk = ok;
+      _connectionCheck = ok ? t('check.ok') : t('check.failed');
+    });
+    _appendLog(ok ? t('check.ok') : t('check.failed'));
   }
 
   String? _runningEngineValue;
@@ -6490,6 +6530,25 @@ del "%~f0"
             color: running ? scheme.primary : scheme.onSurfaceVariant,
           ),
         ),
+        // Итог проверки — сразу под словом «Подключено», а не в логе.
+        //
+        // Именно здесь человек читает, в каком он состоянии, и именно здесь
+        // раньше стояло обещание, которого никто не проверял.
+        if (running && _connectionCheck.isNotEmpty) ...[
+          SizedBox(height: tight ? 2 : 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Text(
+              _connectionCheck,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.3,
+                color: _connectionOk ? scheme.primary : scheme.error,
+              ),
+            ),
+          ),
+        ],
         SizedBox(height: tight ? 2 : 6),
         if (server != null)
           Text(

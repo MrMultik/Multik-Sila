@@ -1305,6 +1305,20 @@ const Map<String, Map<String, String>> _strings = {
         '(vless://, vmess://), add the profile through "Import from the '
         'clipboard" instead.',
   },
+  'check.running': {
+    'ru': 'Проверяю, выходит ли трафик наружу…',
+    'en': 'Checking whether traffic gets out…',
+  },
+  'check.ok': {
+    'ru': 'Проверено: через сервер выходит',
+    'en': 'Checked: traffic gets through',
+  },
+  'check.failed': {
+    'ru': 'Соединение поднято, но наружу через него не выходит — выберите '
+        'другой сервер',
+    'en': 'The connection is up but nothing gets out through it — pick another '
+        'server',
+  },
   'servers.testStop': {'ru': 'Остановить тест', 'en': 'Stop the test'},
   'log.latencyCancelled': {
     'ru': 'Тест задержки остановлен',
