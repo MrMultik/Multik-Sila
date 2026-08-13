@@ -1304,6 +1304,10 @@ const Map<String, Map<String, String>> _strings = {
         '(vless://, vmess://), add the profile through "Import from the '
         'clipboard" instead.',
   },
+  'log.startCancelled': {
+    'ru': 'Подключение отменено',
+    'en': 'Connection cancelled',
+  },
   'servers.hideDead': {
     'ru': 'Скрывать серверы, не прошедшие проверку',
     'en': 'Hide servers that failed the check',
@@ -1360,6 +1364,10 @@ const Map<String, Map<String, String>> _strings = {
   'log.healthFailed': {
     'ru': 'Проверка сервера «{name}» не прошла (подряд: {n})',
     'en': 'Health check failed for "{name}" (in a row: {n})',
+  },
+  'log.healthRestart': {
+    'ru': 'Связи нет несколько проверок подряд — перезапускаю ядро',
+    'en': 'No connectivity for several checks in a row — restarting the core',
   },
   'log.healthRecovered': {
     'ru': 'Проверка сервера снова проходит',

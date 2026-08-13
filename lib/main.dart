@@ -675,10 +675,21 @@ class AppSettings {
     this.tunMtu = 4064,
     this.strictRoute = true,
     this.launchAtStartup = false,
-    // Приложение запускают ради того, чтобы оно работало, а не чтобы каждый
-    // раз нажимать «Запустить». Без профиля и серверов ничего не произойдёт —
-    // _applyLaunchBehaviour проверяет, что список серверов непустой.
-    this.autoConnectAfterLaunch = true,
+    // ВЫКЛЮЧЕНО по умолчанию, и это исправление, а не смена вкуса.
+    //
+    // Рассуждение было такое: приложение запускают ради того, чтобы оно
+    // работало, а не чтобы каждый раз нажимать «Запустить». На практике вышло
+    // иначе — человек сидит за компьютером, а VPN у него включается сам, и не
+    // по одному разу: при запуске, при возврате из трея, после восстановления
+    // упавшего ядра. Включение VPN само по себе рвёт живые соединения
+    // (браузер, мессенджеры переустанавливают их), то есть незваное
+    // подключение это не «удобство», а вмешательство в то, что человек делает
+    // прямо сейчас.
+    //
+    // Восстановление после ОБРЫВА этим не отменяется и не должно: там человек
+    // уже нажал «Запустить», и вернуть упавшее — продолжение его решения, а не
+    // самостоятельное. Разница ровно в том, было ли соединение до этого.
+    this.autoConnectAfterLaunch = false,
     this.hideAfterLaunch = false,
     this.closeToTray = true,
     this.disconnectWhenQuit = true,
@@ -1806,6 +1817,14 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // стартовало и ещё не слушает), и писать о нём на экран значит показать
   // ошибку там, где через две секунды всё в порядке.
   int _statsFails = 0;
+
+  /// Тест задержки просят прекратить.
+  ///
+  /// Нужен отмене подключения: с включённым автовыбором старт начинается с
+  /// прогона по всем серверам, и на подписке из двух сотен это заметные
+  /// секунды. Без этого флага «отмена» гасила бы только то, что после теста, а
+  /// сам тест продолжал бы идти — со стороны кнопка выглядела бы сломанной.
+  bool _cancelLatency = false;
 
   // TUN (системный VPN) вместо локального прокси на 1337. Требует прав
   // администратора — вместо elevation отдельного дочернего процесса (что
@@ -4988,6 +5007,21 @@ del "%~f0"
     });
   }
 
+  /// Прервать идущее подключение.
+  ///
+  /// Флаг `_stopRequested` уже проверяется по всему пути старта (он появился,
+  /// чтобы запоздавший старт не включил системный прокси после остановки) —
+  /// здесь мы им пользуемся по прямому назначению. Плюс гасим тест задержки:
+  /// при включённом автовыборе подключение начинается именно с него, и без
+  /// этого «отмена» выглядела бы как ничего не делающая кнопка ещё секунд
+  /// десять.
+  void _cancelStart() {
+    if (!_busy) return;
+    _stopRequested = true;
+    _cancelLatency = true;
+    _appendLog(t('log.startCancelled'));
+  }
+
   Future<void> _startCore({bool isAutoRestart = false}) async {
     // Защита от повторных нажатий. С включённым автовыбором старт сначала
     // гоняет тест по всем серверам — это несколько секунд, в течение которых
@@ -5479,6 +5513,11 @@ del "%~f0"
     var next = 0;
     Future<void> worker() async {
       while (true) {
+        // Отмену проверяем ЗДЕСЬ, между задачами, а не внутри каждой проверки:
+        // уже начатая доигрывается до своего таймаута (оборвать её на середине
+        // нечем), а очередь дальше не разбирается. На двух сотнях серверов это
+        // разница между «отменилось сразу» и «отменится через минуту».
+        if (_cancelLatency) return;
         final index = next++;
         if (index >= queue.length) return;
         await body(queue[index]);
@@ -5497,6 +5536,10 @@ del "%~f0"
   Future<void> _testAllLatencies() async {
     if (_servers.isEmpty || _testingLatency) return;
 
+    // Флаг снимаем на входе, а не на выходе: прошлый прогон мог завершиться
+    // отменой, и оставленный флаг погасил бы следующий тест на первой же
+    // задаче — кнопка «Тест задержки» переставала бы работать вовсе.
+    _cancelLatency = false;
     _appendLog(tp('log.latencyStart', {'n': _servers.length}));
 
     setState(() {
@@ -6070,11 +6113,43 @@ del "%~f0"
       'name': _selectedServer?.name ?? '-',
       'n': _healthFails,
     }));
+    // Долгий провал лечится ПЕРЕЗАПУСКОМ ядра, а не сменой сервера.
+    //
+    // Случай, ради которого это заведено: машина надолго осталась без сети
+    // (спящий режим, отключённый кабель, уехавший Wi-Fi). Ядро при этом живо,
+    // порт слушает, UI показывает «подключено» — но его сокеты умерли вместе с
+    // прежним каналом, и когда сеть возвращается, оно не поднимается само.
+    // Смена сервера тут не помогает: ходить некуда ни через один, и
+    // `_switchAwayFromUnhealthy` честно перебирает весь список, помечает все
+    // плохими, снимает метки и остаётся на месте — то есть крутится вхолостую,
+    // пока человек не нажмёт «Остановить» и «Запустить» руками.
+    //
+    // Порог выше, чем у смены сервера, и намеренно: сначала пробуем дешёвое
+    // (другой сервер), и только если и это не помогло — дорогое.
+    if (_healthFails >= 4) {
+      final now = DateTime.now();
+      final last = _lastHealthRestart;
+      // Не чаще раза в две минуты. Без ограничителя приложение при
+      // по-настоящему отсутствующей сети перезапускало бы ядро на каждой
+      // проверке — то есть непрерывно рвало бы то, что и так не работает,
+      // и не дало бы соединению подняться, когда сеть наконец вернётся.
+      if (last == null || now.difference(last) > const Duration(minutes: 2)) {
+        _lastHealthRestart = now;
+        _healthFails = 0;
+        _appendLog(t('log.healthRestart'));
+        await _startCore();
+        return;
+      }
+    }
+
     // Один промах — это заминка сети, а не приговор серверу. Дёргать
     // соединение под человеком из-за одного неудачного запроса нельзя.
     if (_healthFails < 2 || !_settings.healthCheckAutoSwitch) return;
     await _switchAwayFromUnhealthy();
   }
+
+  /// Когда в последний раз перезапускали ядро по проверке связи.
+  DateTime? _lastHealthRestart;
 
   /// Настоящий запрос через ТЕКУЩЕЕ соединение. `true` — сервер живой.
   Future<bool> _probeActiveServer() async {
@@ -6273,7 +6348,19 @@ del "%~f0"
           active: running,
           height: shield,
           busy: _busy,
-          onTap: _busy ? () {} : () => running ? _stopCore() : _startCore(),
+          // Нажатие во время подключения ПРЕРЫВАЕТ его.
+          //
+          // Раньше клик на занятом щите просто проглатывался — защита от
+          // повторных нажатий, из-за которых когда-то запускались два ядра
+          // разом. Но у неё оказалась обратная сторона: подключение с
+          // автовыбором идёт секундами, и всё это время передумать было
+          // нельзя вообще никак — оставалось ждать конца того, что тебе уже
+          // не нужно. Отмена — это не повторный запуск, двух ядер она не
+          // создаёт: `_stopRequested` останавливает начатый старт на
+          // ближайшей же проверке.
+          onTap: _busy
+              ? _cancelStart
+              : () => running ? _stopCore() : _startCore(),
         ),
         SizedBox(height: tight ? 6 : 12),
         Text(
@@ -6538,19 +6625,45 @@ del "%~f0"
           children: [
             if (_tab == 1) Row(
               children: [
+                // Меню профилей открывается ПОД строкой, а не поверх неё.
+                //
+                // Штатный DropdownButton выкладывает список так, чтобы
+                // выбранный пункт оказался ровно на месте кнопки, — то есть
+                // накрывает собой всё, что ниже: у нас это «Тест задержки» и
+                // «Авто-выбор». Смотрится как наложение двух экранов, и
+                // непонятно, на что ты сейчас нажмёшь.
                 Expanded(
-                  child: DropdownButton<SubscriptionProfile>(
-                    value: _activeProfile,
-                    isExpanded: true,
-                    hint: Text(t('home.noProfiles')),
-                    items: _profiles.map((p) {
-                      return DropdownMenuItem(value: p, child: Text(p.name));
-                    }).toList(),
-                    onChanged: (profile) {
-                      if (profile != null && profile.id != _activeProfile?.id) {
-                        _switchProfile(profile);
-                      }
+                  child: PopupMenuButton<SubscriptionProfile>(
+                    position: PopupMenuPosition.under,
+                    tooltip: '',
+                    initialValue: _activeProfile,
+                    itemBuilder: (_) => _profiles
+                        .map((p) => PopupMenuItem(
+                              value: p,
+                              child: Text(p.name, overflow: TextOverflow.ellipsis),
+                            ))
+                        .toList(),
+                    onSelected: (profile) {
+                      if (profile.id != _activeProfile?.id) _switchProfile(profile);
                     },
+                    child: InputDecorator(
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        border: UnderlineInputBorder(),
+                        contentPadding: EdgeInsets.symmetric(vertical: 8),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              _activeProfile?.name ?? t('home.noProfiles'),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const Icon(Icons.arrow_drop_down),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
                 IconButton(
