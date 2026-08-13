@@ -175,6 +175,7 @@ const Map<String, Map<String, String>> _strings = {
   'servers.auto': {'ru': 'Авто-выбор', 'en': 'Auto-select'},
 
   // --- Профили ---
+  'profile.choose': {'ru': 'Выберите профиль', 'en': 'Choose a profile'},
   'profile.add': {'ru': 'Добавить профиль', 'en': 'Add profile'},
   'profile.edit': {'ru': 'Изменить профиль', 'en': 'Edit profile'},
   'profile.refresh': {'ru': 'Обновить подписку', 'en': 'Refresh subscription'},

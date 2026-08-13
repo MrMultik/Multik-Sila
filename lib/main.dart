@@ -3730,6 +3730,40 @@ del "%~f0"
     }
   }
 
+  /// Окно выбора профиля. Ничего не меняет, если выбрали тот же самый.
+  Future<void> _chooseProfile() async {
+    final picked = await showDialog<SubscriptionProfile>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text(t('profile.choose')),
+        children: _profiles.map((p) {
+          final active = p.id == _activeProfile?.id;
+          return SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, p),
+            child: Row(
+              children: [
+                Icon(active ? Icons.radio_button_checked : Icons.radio_button_off,
+                    size: 18,
+                    color: active ? Theme.of(ctx).colorScheme.primary : null),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(p.name,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontWeight:
+                              active ? FontWeight.w600 : FontWeight.normal)),
+                ),
+              ],
+            ),
+          );
+        }).toList(),
+      ),
+    );
+    if (picked != null && picked.id != _activeProfile?.id) {
+      await _switchProfile(picked);
+    }
+  }
+
   Future<void> _showProfileDialog({SubscriptionProfile? editing}) async {
     final nameController = TextEditingController(text: editing?.name ?? '');
     final urlController = TextEditingController(text: editing?.url ?? '');
@@ -6625,27 +6659,22 @@ del "%~f0"
           children: [
             if (_tab == 1) Row(
               children: [
-                // Меню профилей открывается ПОД строкой, а не поверх неё.
+                // Выбор профиля — ОТДЕЛЬНОЕ окно, а не выпадающий список.
                 //
-                // Штатный DropdownButton выкладывает список так, чтобы
-                // выбранный пункт оказался ровно на месте кнопки, — то есть
-                // накрывает собой всё, что ниже: у нас это «Тест задержки» и
-                // «Авто-выбор». Смотрится как наложение двух экранов, и
-                // непонятно, на что ты сейчас нажмёшь.
+                // Любое меню, открытое от строки, ложится на то, что под ней, —
+                // а под ней «Тест задержки» и «Авто-выбор». Сначала я поменял
+                // `DropdownButton` (тот вдобавок ставит список так, чтобы
+                // выбранный пункт оказался ровно на кнопке) на меню «строго
+                // вниз», и стало ровнее, но суть осталась: список всё равно
+                // накрывает кнопки, и непонятно, на что ты сейчас нажмёшь.
+                //
+                // Диалог этой двусмысленности не оставляет: он явно поверх
+                // всего, с заголовком и своим фоном, а список внутри
+                // прокручивается — на подписках, где профилей десяток, это
+                // ещё и удобнее выпадашки на пол-экрана.
                 Expanded(
-                  child: PopupMenuButton<SubscriptionProfile>(
-                    position: PopupMenuPosition.under,
-                    tooltip: '',
-                    initialValue: _activeProfile,
-                    itemBuilder: (_) => _profiles
-                        .map((p) => PopupMenuItem(
-                              value: p,
-                              child: Text(p.name, overflow: TextOverflow.ellipsis),
-                            ))
-                        .toList(),
-                    onSelected: (profile) {
-                      if (profile.id != _activeProfile?.id) _switchProfile(profile);
-                    },
+                  child: InkWell(
+                    onTap: _profiles.isEmpty ? null : _chooseProfile,
                     child: InputDecorator(
                       decoration: const InputDecoration(
                         isDense: true,
