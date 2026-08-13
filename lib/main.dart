@@ -5087,15 +5087,33 @@ del "%~f0"
     _appendLog(t('log.startCancelled'));
   }
 
+  /// Пробные ядра текущего прогона. Нужны, чтобы отмена была мгновенной.
+  final List<Process> _probeProcesses = [];
+
   /// Прервать тест задержки, запущенный кнопкой (без подключения).
   ///
   /// Отдельно от `_cancelStart`: тот завязан на `_busy`, а он поднимается
   /// только на время подключения. Тест, запущенный вручную, идёт при `_busy`
   /// == false, и отменять его было нечем.
+  ///
+  /// Одного флага НЕ ХВАТАЕТ, и это была моя ошибка в прошлой правке. Флаг
+  /// останавливает разбор очереди, но уже начатые проверки продолжают ждать
+  /// свой таймаут — по умолчанию шесть секунд, и до двенадцати штук разом.
+  /// Человек жмёт «Остановить», а тест идёт дальше: снаружи кнопка выглядит
+  /// сломанной. Поэтому здесь же гасим пробные ядра — висящие на них запросы
+  /// падают сразу, а не по таймауту, — и СРАЗУ перерисовываем экран, не
+  /// дожидаясь, пока догорят хвосты.
   void _cancelLatencyTest() {
     if (!_testingLatency) return;
     _cancelLatency = true;
+    for (final probe in _probeProcesses) {
+      try {
+        probe.kill();
+      } catch (_) {}
+    }
+    _probeProcesses.clear();
     _appendLog(t('log.latencyCancelled'));
+    if (mounted) setState(() => _testingLatency = false);
   }
 
   Future<void> _startCore({bool isAutoRestart = false}) async {
@@ -5808,6 +5826,7 @@ del "%~f0"
     Process? probe;
     try {
       probe = await Process.start(_singBoxPath, ['run', '-c', probeConfigPath]);
+      _probeProcesses.add(probe);
       if (!await _waitForPort(probeApiPort)) {
         _appendLog(tp('log.probePortBusy', {'port': probeApiPort}));
         return;
@@ -5843,6 +5862,8 @@ del "%~f0"
       _appendLog(tp('log.probeFailed', {'e': e}));
     } finally {
       probe?.kill();
+
+      if (probe != null) _probeProcesses.remove(probe);
     }
   }
 
@@ -5874,6 +5895,7 @@ del "%~f0"
     Process? probe;
     try {
       probe = await Process.start(_singBoxPath, ['run', '-c', probeConfigPath]);
+      _probeProcesses.add(probe);
       if (!await _waitForPort(probeApiPort)) {
         _appendLog(tp('log.probeSingboxPortBusy', {'port': probeApiPort}));
         return;
@@ -5905,6 +5927,8 @@ del "%~f0"
       // пробное ядро не поднялось — все теги этой группы останутся null
     } finally {
       probe?.kill();
+
+      if (probe != null) _probeProcesses.remove(probe);
     }
   }
 
@@ -6018,6 +6042,7 @@ del "%~f0"
     Process? probe;
     try {
       probe = await Process.start(_xrayPath, ['run', '-c', probeConfigPath]);
+      _probeProcesses.add(probe);
 
       // Ждём входы параллельно, а не по очереди: последовательное ожидание
       // с таймаутом 5 с на порт вернуло бы ту же арифметику, от которой
@@ -6058,6 +6083,8 @@ del "%~f0"
       _appendLog(tp('log.latencyError', {'name': 'xray', 'e': e}));
     } finally {
       probe?.kill();
+
+      if (probe != null) _probeProcesses.remove(probe);
     }
   }
 
@@ -6083,6 +6110,7 @@ del "%~f0"
       Process? probe;
       try {
         probe = await Process.start(_xrayPath, ['run', '-c', probeConfigPath]);
+      _probeProcesses.add(probe);
         if (!await _waitForPort(probePort)) {
           _appendLog(tp('log.probeXrayPortBusy',
               {'name': server.name, 'port': probePort}));
@@ -6096,6 +6124,8 @@ del "%~f0"
         _appendLog(tp('log.latencyError', {'name': server.name, 'e': e}));
       } finally {
         probe?.kill();
+
+        if (probe != null) _probeProcesses.remove(probe);
         // Xray у xhttp иногда чуть задерживает освобождение сокета — даём
         // порту остыть перед следующим прогоном.
         await Future.delayed(const Duration(milliseconds: 300));
