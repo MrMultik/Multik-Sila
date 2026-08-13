@@ -2910,12 +2910,19 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   Future<void> _applyAppUpdateAndRestart() async {
     final exe = Platform.resolvedExecutable;
     final batPath = '$_workDir${Platform.pathSeparator}apply_update.bat';
-    // Резерв — РЯДОМ с папкой приложения, а не внутри неё: копировать папку в
-    // собственную подпапку значит просить xcopy о цикле, на котором он
-    // останавливается с «Cannot perform a cyclic copy», и до подмены дело уже
-    // не доходит. Записывается относительным путём от `%~dp0`, чтобы в тексте
-    // скрипта не появилось ни одного не-ASCII символа (см. ниже).
-    const backupName = r'%APP%..\MultikSila_backup';
+    // Резервной копии больше НЕТ, и это исправление, а не экономия.
+    //
+    // Шаг «скопировать папку приложения рядом» я добавил как страховку, а он
+    // стал главной поломкой: копировалось всё содержимое, включая сам
+    // распакованный update_staging на тридцать мегабайт, и делалось это в
+    // отсоединённой консоли без ввода — xcopy там некому ответить, если он
+    // спросит. Скрипт вставал на этом шаге навсегда. Наружу выходило так:
+    // человек жмёт «Обновить», приложение закрывается, ничего не происходит,
+    // а на экране копятся открытые окна консоли — по одному на каждую попытку.
+    //
+    // Страховка при этом мнимая: у обновления и так есть откат — установщик и
+    // прежний релиз лежат на GitHub. Платить за неё зависанием единственного
+    // пути обновления нельзя.
     // pid — из dart:io, идентификатор текущего процесса: .bat должен ждать
     // именно нас, а не любой процесс с тем же именем.
     final ownPid = pid;
@@ -2969,15 +2976,17 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     final exeName = File(exe).uri.pathSegments.last;
     final bat = '''
 @echo off
+set /a TRIES=0
 :wait
+set /a TRIES+=1
+if %TRIES% GTR 60 goto apply
 tasklist /FI "PID eq $ownPid" 2>nul | find "$ownPid" >nul
 if not errorlevel 1 (
   ping -n 2 127.0.0.1 >nul
   goto wait
 )
+:apply
 set "APP=%~dp0"
-if not exist "$backupName" mkdir "$backupName"
-xcopy "%APP%*" "$backupName\\." /E /Y /I /Q >nul
 xcopy "%APP%update_staging\\*" "%APP%." /E /Y /I /Q >nul
 rmdir /S /Q "%APP%update_staging"
 start "" "%APP%$exeName"
