@@ -5566,6 +5566,22 @@ del "%~f0"
 
   Future<void> _switchServer(ParsedServer newServer) async {
     setState(() => _selectedServer = newServer);
+
+    // Выбор в списке — это ВЫБОР, а не команда подключиться.
+    //
+    // Раньше нажатие на сервер при выключенном щите доходило до `_startCore()`
+    // и поднимало соединение. Человек листает список, чтобы посмотреть или
+    // отметить сервер на будущее, — а приложение молча включает VPN, рвя
+    // живые соединения браузера и мессенджеров. Подключение начинается по
+    // нажатию на щит, и ни от чего другого.
+    //
+    // Когда ядро УЖЕ работает, смысл нажатия обратный: человек просит
+    // перевести текущее соединение на другой сервер, и это ниже.
+    if (_runningEngine == null) {
+      _appendLog(tp('log.serverPicked', {'name': newServer.name}));
+      return;
+    }
+
     _appendLog(tp('log.switching', {'name': newServer.name}));
 
     if (_tunMode) {
@@ -7062,8 +7078,23 @@ del "%~f0"
               // Список — главное содержимое экрана, поэтому Expanded, а не
               // фиксированная высота: при низком окне фиксированная как раз и
               // давала перелив снизу.
+              //
+              // Рамка вокруг него — не украшение. Прокрутка режет крайнюю
+              // строку, и голый обрезок текста вплотную к кнопке читается как
+              // «список наползает сверху»: об этом сообщали трижды, причём
+              // дважды я двигал не то. Наложения нет и не было — есть край
+              // области прокрутки, который нечем опознать. В рамке с
+              // собственным фоном обрезанная строка читается как «список
+              // продолжается», потому что видно, где он кончается.
               Expanded(
-                child: Builder(builder: (context) {
+                child: Container(
+                  clipBehavior: Clip.antiAlias,
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                        color: Theme.of(context).dividerColor, width: 1),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Builder(builder: (context) {
                   final visible = _visibleServers();
                   if (visible.isEmpty) {
                     return Center(child: Text(t('common.notFound')));
@@ -7145,7 +7176,8 @@ del "%~f0"
                       );
                     },
                   );
-                }),
+                  }),
+                ),
               ),
             ],
             // Переключателя TUN на Android нет, и это не упрощение экрана.

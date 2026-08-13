@@ -1598,6 +1598,10 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'Shutdown is taking too long — exiting, leftovers will be cleaned on next start',
   },
   'log.switching': {'ru': 'Переключаюсь на {name}...', 'en': 'Switching to {name}...'},
+  'log.serverPicked': {
+    'ru': 'Выбран сервер {name} — нажмите щит, чтобы подключиться',
+    'en': 'Server {name} selected — press the shield to connect',
+  },
   'log.active': {'ru': 'Активен: {name}', 'en': 'Active: {name}'},
   'log.clashApiStatus': {
     'ru': 'Clash API вернул {code}, перезапускаю ядро',
