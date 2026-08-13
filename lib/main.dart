@@ -5130,6 +5130,27 @@ del "%~f0"
   /// Пробные ядра текущего прогона. Нужны, чтобы отмена была мгновенной.
   final List<Process> _probeProcesses = [];
 
+  /// Тащит из вывода пробного ядра ТОЛЬКО строки об ошибках.
+  ///
+  /// Пробное ядро — единственный, кто знает настоящую причину неудачи. Дартовой
+  /// стороне достаётся общее «не удалось соединиться», и по нему нельзя
+  /// отличить «сервер выключен» от «ключ REALITY больше не тот».
+  void _watchProbeErrors(Process probe, String label) {
+    void handle(String data) {
+      for (final line in data.split('\n')) {
+        final text = line.trim();
+        if (text.isEmpty) continue;
+        // Предупреждения о депрекейтах ядро печатает при каждом старте, и в
+        // журнале от них один шум.
+        if (!text.contains('[Error]') && !text.contains('ERROR')) continue;
+        _appendLog('[$label] $text');
+      }
+    }
+
+    probe.stdout.transform(const SystemEncoding().decoder).listen(handle);
+    probe.stderr.transform(const SystemEncoding().decoder).listen(handle);
+  }
+
   /// DNS и маршрутизация для ПРОБНОГО ядра.
   ///
   /// Пробный конфиг обязан разрешать имена так же, как рабочий. Раньше он не
@@ -5909,6 +5930,7 @@ del "%~f0"
     try {
       probe = await Process.start(_singBoxPath, ['run', '-c', probeConfigPath]);
       _probeProcesses.add(probe);
+      _watchProbeErrors(probe, 'sing-box');
       if (!await _waitForPort(probeApiPort)) {
         _appendLog(tp('log.probePortBusy', {'port': probeApiPort}));
         return;
@@ -5983,6 +6005,7 @@ del "%~f0"
     try {
       probe = await Process.start(_singBoxPath, ['run', '-c', probeConfigPath]);
       _probeProcesses.add(probe);
+      _watchProbeErrors(probe, 'sing-box');
       if (!await _waitForPort(probeApiPort)) {
         _appendLog(tp('log.probeSingboxPortBusy', {'port': probeApiPort}));
         return;
@@ -6137,6 +6160,22 @@ del "%~f0"
     try {
       probe = await Process.start(_xrayPath, ['run', '-c', probeConfigPath]);
       _probeProcesses.add(probe);
+      // Ошибки пробного ядра — В ЖУРНАЛ, а не в /dev/null.
+      //
+      // Дартовая сторона видит только `HandshakeException: Connection
+      // terminated during handshake` — то есть «не получилось», без единого
+      // слова о причине. А ядро в этот самый момент печатает у себя точную
+      // формулировку:
+      //
+      //   [Error] transport/internet/reality: REALITY: received real
+      //   certificate (potential MITM or redirection)
+      //
+      // На выяснение этой строки ушёл отдельный разбор с запуском ядра
+      // вручную — при том что приложение держало её в руках и выбрасывало.
+      // Берём только строки с ошибками: Xray на старте пишет несколько
+      // предупреждений про устаревшие VMess/Trojan, и тащить их в журнал
+      // при каждом тесте незачем.
+      _watchProbeErrors(probe, 'xray');
 
       // Ждём входы параллельно, а не по очереди: последовательное ожидание
       // с таймаутом 5 с на порт вернуло бы ту же арифметику, от которой
