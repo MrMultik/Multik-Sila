@@ -260,6 +260,10 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Проверить обновление приложения',
     'en': 'Check for an app update',
   },
+  'app.updateFailed': {
+    'ru': 'Обновиться не удалось — скачайте установщик со страницы релизов',
+    'en': 'The update failed — download the installer from the releases page',
+  },
   'app.noFeed': {
     'ru': 'Ссылка на обновления не задана — настройки, раздел «Обновления»',
     'en': 'No update feed set — see Settings, “Updates”',

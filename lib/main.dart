@@ -2839,12 +2839,35 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
         version = '${j['tag_name']}'.trim();
         if (version.startsWith('v')) version = version.substring(1);
         final assets = (j['assets'] as List?) ?? const [];
-        final zip = assets.cast<Map<String, dynamic>>().where((a) {
-          final name = '${a['name'] ?? ''}'.toLowerCase();
-          return name.endsWith('.zip');
-        }).toList();
-        if (zip.isEmpty) return null;
-        url = '${zip.first['browser_download_url'] ?? ''}'.trim();
+        // Берём УСТАНОВЩИК, а не zip.
+        //
+        // Обновление через zip требовало своими руками сделать то, что
+        // установщик умеет: дождаться выхода приложения, подменить файлы,
+        // запустить заново. Самодельный .bat для этого переписывался трижды —
+        // кириллица в пути ломала разбор по смещениям, `cmd /c` разваливал
+        // путь с пробелом, шаг с резервной копией вешал всё намертво, — и на
+        // машине автора он в итоге всё равно молча стоял, не делая ничего,
+        // хотя тот же файл, запущенный руками, проходит все шаги за секунду.
+        //
+        // Установщик Inno Setup делает ровно это и делает надёжно: он сам
+        // закрывает работающее приложение, сам заменяет файлы, сам ставит
+        // ярлыки и регистрирует деинсталлятор. Он же — то, чем приложение
+        // ставят изначально, то есть путь обновления перестаёт быть отдельным
+        // механизмом со своими собственными поломками.
+        final assetList = assets.cast<Map<String, dynamic>>();
+        Map<String, dynamic>? pick(bool Function(String) match) {
+          for (final a in assetList) {
+            if (match('${a['name'] ?? ''}'.toLowerCase())) return a;
+          }
+          return null;
+        }
+
+        final chosen = pick((n) => n.endsWith('setup.exe')) ??
+            // zip оставлен запасным путём: если в релизе почему-то нет
+            // установщика, обновиться всё же лучше, чем не обновиться.
+            pick((n) => n.endsWith('.zip'));
+        if (chosen == null) return null;
+        url = '${chosen['browser_download_url'] ?? ''}'.trim();
       } else {
         version = '${j['version'] ?? ''}'.trim();
         url = '${j['url'] ?? ''}'.trim();
@@ -2898,6 +2921,38 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
         return false;
       }
       _appendLog(tp('log.appStaged', {'v': version}));
+      return true;
+    } catch (e) {
+      _appendLog(tp('log.appUpdateFailed', {'e': e}));
+      return false;
+    }
+  }
+
+  /// Качает установщик и отдаёт ему работу.
+  ///
+  /// Установщик кладётся во ВРЕМЕННУЮ папку, а не рядом с приложением: он
+  /// будет заменять файлы именно там, и класть его в зону работ незачем.
+  /// Запускается тихо (`/VERYSILENT`), закрытие работающего приложения он берёт
+  /// на себя сам, поэтому мы просто выходим следом.
+  Future<bool> _runInstallerUpdate(String version, String url) async {
+    try {
+      _appendLog(tp('log.appDownloading', {'v': version}));
+      final resp = await http.get(Uri.parse(url)).timeout(const Duration(minutes: 10));
+      if (resp.statusCode != 200 || resp.bodyBytes.length < 1024 * 1024) {
+        _appendLog(tp('log.appUpdateFailed', {'e': 'HTTP ${resp.statusCode}'}));
+        return false;
+      }
+      final path =
+          '${Directory.systemTemp.path}${Platform.pathSeparator}MultikSila-$version-setup.exe';
+      await File(path).writeAsBytes(resp.bodyBytes, flush: true);
+      _appendLog(tp('log.appStaged', {'v': version}));
+      await Process.start(
+        path,
+        ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'],
+        mode: ProcessStartMode.detached,
+      );
+      _appendLog(t('log.appApplying'));
+      await _quitApp();
       return true;
     } catch (e) {
       _appendLog(tp('log.appUpdateFailed', {'e': e}));
@@ -3032,6 +3087,19 @@ del "%~f0"
       ),
     );
     if (agreed != true) return;
+    // Установщик — обычный путь, zip — запасной.
+    if (url.toLowerCase().endsWith('.exe')) {
+      if (await _runInstallerUpdate(version, url)) return;
+      // Не получилось скачать или запустить — говорим об этом и НЕ пытаемся
+      // тихо подсунуть zip: два разных пути обновления, отработавших наполовину
+      // каждый, это худшее из состояний.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t('app.updateFailed'))),
+        );
+      }
+      return;
+    }
     if (await _stageAppUpdate(version, url)) {
       await _applyAppUpdateAndRestart();
     } else if (mounted) {
