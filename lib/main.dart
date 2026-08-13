@@ -6372,15 +6372,45 @@ del "%~f0"
   // через него настоящий запрос к настоящему сайту: сервер с прекрасным
   // пингом может не открывать YouTube — упирается в лимит, режет направление
   // или отваливается на первом же полноценном TLS.
+  /// Как часто проверять, пока связи НЕТ.
+  ///
+  /// Ноутбук закрыли, унесли, открыли — сеть вернулась, а соединение нет. При
+  /// обычном интервале в минуту и пороге в четыре неудачи подряд человек ждал
+  /// бы восстановления до четырёх минут, глядя на «подключено» без интернета.
+  /// Он за это время успевает решить, что приложение не работает, и всё
+  /// перезапустить руками — то есть автоматика опаздывает ровно настолько,
+  /// чтобы стать бесполезной.
+  ///
+  /// Пока всё хорошо, частить незачем: раз в минуту, как и было. Как только
+  /// проверка провалилась — переходим на короткий шаг, и возвращение сети
+  /// замечается за десяток секунд.
+  static const Duration _healthRetryInterval = Duration(seconds: 10);
+
   void _rescheduleHealthCheck() {
     _healthTimer?.cancel();
     _healthTimer = null;
     _healthFails = 0;
     if (!_settings.healthCheckEnabled || _runningEngine == null) return;
+    if (_settings.healthCheckIntervalSec <= 0) return;
+    _armHealthTimer();
+  }
+
+  /// Ставит следующую проверку. Шаг зависит от того, есть ли связь сейчас.
+  void _armHealthTimer() {
+    _healthTimer?.cancel();
+    if (!_settings.healthCheckEnabled || _runningEngine == null) return;
     final secs = _settings.healthCheckIntervalSec;
     if (secs <= 0) return;
-    _healthTimer =
-        Timer.periodic(Duration(seconds: secs), (_) => _runHealthCheck());
+    final delay = _healthFails > 0
+        ? _healthRetryInterval
+        : Duration(seconds: secs);
+    // Одноразовый таймер, а не periodic: интервал меняется по ходу дела, и
+    // periodic пришлось бы пересоздавать на каждом изменении — то есть делать
+    // то же самое, но в двух местах.
+    _healthTimer = Timer(delay, () async {
+      await _runHealthCheck();
+      _armHealthTimer();
+    });
   }
 
   Future<void> _runHealthCheck() async {
@@ -6415,11 +6445,15 @@ del "%~f0"
     if (_healthFails >= 4) {
       final now = DateTime.now();
       final last = _lastHealthRestart;
-      // Не чаще раза в две минуты. Без ограничителя приложение при
-      // по-настоящему отсутствующей сети перезапускало бы ядро на каждой
-      // проверке — то есть непрерывно рвало бы то, что и так не работает,
-      // и не дало бы соединению подняться, когда сеть наконец вернётся.
-      if (last == null || now.difference(last) > const Duration(minutes: 2)) {
+      // Не чаще раза в минуту. Без ограничителя приложение при по-настоящему
+      // отсутствующей сети перезапускало бы ядро на каждой проверке — то есть
+      // непрерывно рвало бы то, что и так не работает, и не дало бы соединению
+      // подняться, когда сеть наконец вернётся.
+      //
+      // Минута, а не две: короткий шаг проверок (см. `_healthRetryInterval`)
+      // доводит до перезапуска примерно за сорок секунд, и ограничитель в две
+      // минуты стал бы главной задержкой вместо страховки.
+      if (last == null || now.difference(last) > const Duration(minutes: 1)) {
         _lastHealthRestart = now;
         _healthFails = 0;
         _appendLog(t('log.healthRestart'));
