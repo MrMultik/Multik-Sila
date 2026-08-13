@@ -5130,6 +5130,39 @@ del "%~f0"
   /// Пробные ядра текущего прогона. Нужны, чтобы отмена была мгновенной.
   final List<Process> _probeProcesses = [];
 
+  /// DNS и маршрутизация для ПРОБНОГО ядра.
+  ///
+  /// Пробный конфиг обязан разрешать имена так же, как рабочий. Раньше он не
+  /// разрешал их вообще: секции `dns` не было, `default_domain_resolver` тоже,
+  /// а `route` состоял из одного `final`. Сравнение файлов с диска показало,
+  /// что сами outbound'ы в обоих конфигах побайтово одинаковы — расходится
+  /// только это окружение.
+  ///
+  /// Наружу это выходило как ложь про серверы: те, чей адрес в рабочем конфиге
+  /// уже запечён как IP (`_bakeServerIps`), мерились нормально, а те, у кого в
+  /// поле осталось имя, пробному ядру резолвить было нечем — и они показывались
+  /// недоступными, прекрасно работая при подключении. Пять серверов из
+  /// четырнадцати у пользователя, три прогона подряд, один и тот же набор.
+  ///
+  /// Значения берём из настроек, а не прибиваем: замер должен отвечать на
+  /// вопрос «как будет работать», а не «как работало бы при других настройках».
+  Map<String, Object> _probeDnsAndRoute() => {
+        "dns": {
+          "servers": [
+            {"type": "udp", "tag": "dns-direct", "server": _settings.dnsDirect},
+          ],
+          "final": "dns-direct",
+          "strategy": _settings.dnsStrategy,
+        },
+        "route": {
+          "final": "probe",
+          "auto_detect_interface": true,
+          // Без этого ключа свежие ядра вообще отказываются стартовать, а с
+          // ним — знают, чем разрешать адреса серверов подключения.
+          "default_domain_resolver": "dns-direct",
+        },
+      };
+
   /// Прервать тест задержки, запущенный кнопкой (без подключения).
   ///
   /// Отдельно от `_cancelStart`: тот завязан на `_busy`, а он поднимается
@@ -5763,6 +5796,13 @@ del "%~f0"
           if (resp.statusCode == 200) {
             final data = jsonDecode(resp.body) as Map<String, dynamic>;
             if (mounted) setState(() => _latencyMs[tag] = data['delay'] as int);
+          } else {
+            // Неуспех Clash API раньше не писал в лог НИЧЕГО: исключения
+            // ловились, а честный отказ ядра проходил молча. Три сервера из
+            // пяти падали без единой строки, и на поиск причины ушёл лишний
+            // круг — при том что ядро прямо в ответе объясняет, что не так.
+            _appendLog(tp('log.latencyError',
+                {'name': tag, 'e': 'HTTP ${resp.statusCode} ${resp.body.trim()}'}));
           }
         } catch (e) {
           _appendLog(tp('log.latencyError', {'name': s.name, 'e': e}));
@@ -5858,8 +5898,10 @@ del "%~f0"
       "outbounds": [
         ...singbox.map((s) => s.outbound),
         {"type": "selector", "tag": "probe", "outbounds": tags, "default": tags.first},
+        // direct нужен резолверу: без него `dns-direct` не к чему привязать.
+        {"type": "direct", "tag": "direct"},
       ],
-      "route": {"final": "probe"},
+      ..._probeDnsAndRoute(),
     };
     await File(probeConfigPath).writeAsString(const JsonEncoder.withIndent('  ').convert(config));
 
@@ -5958,6 +6000,13 @@ del "%~f0"
           if (resp.statusCode == 200) {
             final data = jsonDecode(resp.body) as Map<String, dynamic>;
             if (mounted) setState(() => _latencyMs[tag] = data['delay'] as int);
+          } else {
+            // Неуспех Clash API раньше не писал в лог НИЧЕГО: исключения
+            // ловились, а честный отказ ядра проходил молча. Три сервера из
+            // пяти падали без единой строки, и на поиск причины ушёл лишний
+            // круг — при том что ядро прямо в ответе объясняет, что не так.
+            _appendLog(tp('log.latencyError',
+                {'name': tag, 'e': 'HTTP ${resp.statusCode} ${resp.body.trim()}'}));
           }
         } catch (e) {
           _appendLog(tp('log.latencyError', {'name': tag, 'e': e}));
