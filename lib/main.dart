@@ -3730,6 +3730,37 @@ del "%~f0"
     }
   }
 
+  /// Кнопки «Тест задержки» и «Авто-выбор».
+  ///
+  /// Идущий тест останавливается ТОЙ ЖЕ кнопкой. Раньше она на время прогона
+  /// просто гасла: на подписке в две сотни серверов это больше минуты без
+  /// выхода — оставалось ждать конца того, что уже не нужно. Кнопка, которая
+  /// умеет начать, но не прекратить, — не защита от повторного нажатия, а
+  /// отсутствие выхода.
+  Widget _serverActionButtons() => Row(
+        children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _servers.isEmpty
+                  ? null
+                  : (_testingLatency ? _cancelLatencyTest : _testAllLatencies),
+              icon: Icon(_testingLatency ? Icons.stop : Icons.speed, size: 18),
+              label: Text(
+                  _testingLatency ? t('servers.testStop') : t('servers.test')),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed:
+                  _servers.isEmpty || _testingLatency ? null : _autoSelectBest,
+              icon: const Icon(Icons.auto_awesome, size: 18),
+              label: Text(t('servers.auto')),
+            ),
+          ),
+        ],
+      );
+
   /// Окно выбора профиля. Ничего не меняет, если выбрали тот же самый.
   Future<void> _chooseProfile() async {
     final picked = await showDialog<SubscriptionProfile>(
@@ -6836,6 +6867,16 @@ del "%~f0"
                 ],
               ),
               const SizedBox(height: 8),
+              // Кнопки НАД списком, а не под ним.
+              //
+              // Под списком они выглядели так, будто список на них наползает:
+              // прокрутка режет последнюю строку ровно по их верхнему краю, и
+              // обрезанная строка сервера читается как наложение. Никакого
+              // наложения там не было — только край области прокрутки, — но
+              // выглядело именно так, и трижды было доложено как ошибка.
+              // Над списком резать нечего: он идёт до самого низа окна.
+              _serverActionButtons(),
+              const SizedBox(height: 8),
               // Список — главное содержимое экрана, поэтому Expanded, а не
               // фиксированная высота: при низком окне фиксированная как раз и
               // давала перелив снизу.
@@ -7011,38 +7052,6 @@ del "%~f0"
                   if (updated != null) await _saveSettings(updated);
                 },
               ),
-            if (_tab == 1) Row(
-              children: [
-                // Идущий тест той же кнопкой и останавливается.
-                //
-                // Раньше она на время прогона просто гасла: начатый тест на
-                // подписке в две сотни серверов идёт минуту с лишним, и всё это
-                // время остановить его было нечем — оставалось ждать конца того,
-                // что тебе уже не нужно. Кнопка, которая умеет только начать, но
-                // не прекратить, — это не защита от повторного нажатия, а
-                // отсутствие выхода.
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _servers.isEmpty
-                        ? null
-                        : (_testingLatency ? _cancelLatencyTest : _testAllLatencies),
-                    icon: _testingLatency
-                        ? const Icon(Icons.stop, size: 18)
-                        : const Icon(Icons.speed, size: 18),
-                    label: Text(
-                        _testingLatency ? t('servers.testStop') : t('servers.test')),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _servers.isEmpty || _testingLatency ? null : _autoSelectBest,
-                    icon: const Icon(Icons.auto_awesome, size: 18),
-                    label: Text(t('servers.auto')),
-                  ),
-                ),
-              ],
-            ),
             if (_tab == 0) const SizedBox(height: 8),
             // Карточка вместо чёрного прямоугольника с зелёным моноширинным
             // текстом: на светлой теме тот выглядел инородно, да и «терминал
