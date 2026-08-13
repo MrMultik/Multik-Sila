@@ -426,7 +426,10 @@ const Map<String, Map<String, String>> _strings = {
         'the request itself. This is how Karing measures — the numbers are much smaller '
         'and directly comparable with it.',
   },
-  'set.latencyConnect': {'ru': 'TCP — только до сервера', 'en': 'TCP — to the server only'},
+  'set.latencyConnect': {
+    'ru': 'До сервера — как в v2rayN и Karing',
+    'en': 'To the server — as in v2rayN and Karing',
+  },
   'set.latencyUrl': {'ru': 'URL проверки', 'en': 'Check URL'},
   'set.latencyTimeout': {'ru': 'Таймаут, мс', 'en': 'Timeout, ms'},
   'set.latencyWarmup': {'ru': 'Прогревочный запрос', 'en': 'Warm-up request'},
@@ -851,12 +854,16 @@ const Map<String, Map<String, String>> _strings = {
 
   // --- Пояснения к тесту задержки ---
   'hint.latencyConnect': {
-    'ru': 'Быстро, цифры маленькие (10–40 мс). Но успех означает только что сервер '
-        'доступен по сети: сломанный прокси такой тест не поймает. Если все серверы '
-        'подписки на одном хосте, цифры у них совпадут — выбирать будет не из чего.',
-    'en': 'Fast, small numbers (10–40 ms). But success only means the server is reachable '
-        'over the network: a broken proxy will not be caught. If all subscription servers '
-        'share one host, their numbers will be identical — nothing to choose from.',
+    'ru': 'Путь до самого сервера, без выхода наружу — 25–40 мс, те же цифры, '
+        'что показывают v2rayN и Karing. Успех означает, что порт принимает '
+        'соединения: сломанный прокси так не поймать, поэтому работоспособность '
+        'проверяется отдельно, в момент подключения. Если все серверы подписки '
+        'на одном хосте, цифры у них совпадут — тогда выбирайте сквозной режим.',
+    'en': 'The path to the server itself, without going out — 25–40 ms, the same '
+        'numbers v2rayN and Karing show. Success means the port accepts '
+        'connections: a broken proxy is not caught this way, so whether it works '
+        'is checked separately, on connect. If every server of the subscription '
+        'shares one host their numbers will match — then pick the full-path mode.',
   },
   'hint.latencyProxy': {
     'ru': 'Медленнее, цифры больше (100–200 мс) — это реальное время до сайта и обратно. '
