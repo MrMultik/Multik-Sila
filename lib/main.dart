@@ -7009,11 +7009,25 @@ del "%~f0"
                         selected: selected,
                         selectedTileColor:
                             Theme.of(context).colorScheme.primary.withValues(alpha: 0.15),
-                        leading: IconButton(
-                          icon: Icon(favorite ? Icons.star : Icons.star_border,
-                              size: 20, color: favorite ? Colors.amber : null),
-                          tooltip: favorite ? t('servers.favRemove') : t('servers.favAdd'),
-                          onPressed: () => _toggleFavorite(s.name),
+                        // Подсказка рисуется НАД кнопкой (`preferBelow: false`).
+                        //
+                        // По умолчанию она уходит вниз, а строки списка стоят
+                        // до самого нижнего края окна — у последних подсказку
+                        // обрезает краем, и от неё остаётся серый огрызок с
+                        // обрубленным текстом. Выглядит как мусор на экране, и
+                        // именно так и было доложено. Своего `preferBelow` у
+                        // IconButton нет, поэтому подсказка задаётся обёрткой,
+                        // а не его собственным параметром.
+                        leading: Tooltip(
+                          message: favorite
+                              ? t('servers.favRemove')
+                              : t('servers.favAdd'),
+                          preferBelow: false,
+                          child: IconButton(
+                            icon: Icon(favorite ? Icons.star : Icons.star_border,
+                                size: 20, color: favorite ? Colors.amber : null),
+                            onPressed: () => _toggleFavorite(s.name),
+                          ),
                         ),
                         title: Text(s.name,
                             style: TextStyle(
