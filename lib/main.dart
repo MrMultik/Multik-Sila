@@ -2299,15 +2299,48 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     // порт, решит, что приложение уже работает, и выйдет — а мы следом
     // закроемся сами, и на экране не останется ничего.
     await releaseSingleInstanceLock();
-    final result = await Process.run(
-      'powershell',
-      ['-NoProfile', '-Command', "Start-Process -FilePath '$exePath' -Verb RunAs"],
-    );
-    if (result.exitCode == 0) {
-      exit(0);
-    } else {
-      _appendLog(t('log.elevationCancelled'));
+
+    // Запуск ТОЛЬКО detached. Раньше здесь стоял `Process.run`, и он не
+    // возвращался никогда: `run` дочитывает stdout/stderr до закрытия труб, а
+    // элевированная копия наследует их и держит открытыми, пока живёт, — то
+    // есть всё время. Наружу это выходило так: человек жмёт «Перезапустить»,
+    // в лог ложится «перезапуск запрошен», и дальше НИЧЕГО — ни новой копии,
+    // ни сообщения об отмене, потому что до обеих веток дело не доходило.
+    // Замерено: 60 секунд без ответа на том же вызове (в логе пользователя
+    // от 09:51 — шесть нажатий подряд, шесть записей и ни одного перезапуска).
+    // `detached` труб не создаёт вовсе, поэтому висеть не на чем.
+    try {
+      await Process.start(
+        'powershell',
+        [
+          '-NoProfile',
+          '-WindowStyle',
+          'Hidden',
+          '-Command',
+          "Start-Process -FilePath '$exePath' -Verb RunAs"
+        ],
+        mode: ProcessStartMode.detached,
+      );
+    } catch (e) {
+      // Замок уже отпущен, а новой копии не будет — забираем обратно, иначе
+      // следующий запуск сочтёт, что приложение не работает, и поднимет вторую.
+      _appendLog(tp('log.elevationFailed', {'e': e}));
+      await _claimSingleInstance();
+      return;
     }
+
+    // У detached-запуска кода возврата нет, и «согласились ли на UAC» можно
+    // узнать только по факту: новая копия занимает замок на 17999. Ждём
+    // появления, а не гадаем по коду, которого нет.
+    if (await _waitForPort(kSingleInstancePort,
+        timeout: const Duration(seconds: 45))) {
+      exit(0);
+    }
+
+    // Не дождались: запрос UAC закрыли или отклонили. Остаёмся жить и
+    // обязательно возвращаем себе замок.
+    _appendLog(t('log.elevationCancelled'));
+    await _claimSingleInstance();
   }
 
   Future<void> _toggleTunMode(bool value) async {

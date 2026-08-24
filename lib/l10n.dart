@@ -1147,8 +1147,12 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'Administrator rights: {admin}. TUN enabled at start: {tun}',
   },
   'log.elevationCancelled': {
-    'ru': 'Запуск с правами администратора отменён',
-    'en': 'Elevated start cancelled',
+    'ru': 'Запуск с правами администратора отменён — остаёмся без TUN',
+    'en': 'Elevated start cancelled — staying without TUN',
+  },
+  'log.elevationFailed': {
+    'ru': 'Не удалось запросить права администратора: {e}',
+    'en': 'Could not request administrator rights: {e}',
   },
   'log.elevationRequested': {
     'ru': 'Запрошен перезапуск с правами администратора для TUN-режима',
