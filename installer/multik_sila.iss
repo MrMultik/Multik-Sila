@@ -9,7 +9,7 @@
 ; автоматически, и разъехавшиеся номера сломают самообновление приложения.
 
 #define AppName "Multik Sila"
-#define AppVersion "1.0.4"
+#define AppVersion "1.0.5"
 #define AppExeName "proxy_app_test.exe"
 #define BuildDir "..\build\windows\x64\runner\Release"
 
@@ -88,7 +88,19 @@ Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+; БЕЗ `skipifsilent` — иначе самообновление оставляет человека без приложения.
+;
+; Оно запускает этот установщик с `/VERYSILENT` и сразу выходит (см.
+; _runInstallerUpdate в main.dart), рассчитывая, что закрытие и подмену файлов
+; установщик берёт на себя. Так и есть — но со `skipifsilent` пропускался и
+; ЗАПУСК ОБРАТНО, а другого режима самообновление не использует. Наружу это
+; выходило так: приложение молча закрылось, файлы обновились, и на экране не
+; осталось ничего — ни окна, ни трея. Если при этом работал TUN, машина просто
+; оставалась без VPN, ничего об этом не сказав.
+;
+; Права наследуются от установщика: обновление элевированного приложения
+; вернёт его элевированным, и TUN поднимется сам.
+Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall
 
 [UninstallDelete]
 ; Рабочие файлы, которые приложение создаёт РЯДОМ С СОБОЙ уже после установки.
