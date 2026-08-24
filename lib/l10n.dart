@@ -1696,6 +1696,10 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Автообновление подписки "{name}" (раз в {hours} ч)',
     'en': 'Auto-updating subscription "{name}" (every {hours} h)',
   },
+  'log.autoSelectSkipBad': {
+    'ru': 'Автовыбор: пропущено серверов без связи — {n}',
+    'en': 'Auto-select: {n} unreachable server(s) skipped',
+  },
   'log.subFormat': {
     'ru': 'Подписка разобрана как {format}: серверов {count}, пропущено {skipped}',
     'en': 'Subscription parsed as {format}: {count} servers, {skipped} skipped',
