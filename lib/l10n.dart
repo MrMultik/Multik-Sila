@@ -1024,6 +1024,15 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'до {date} (осталось {days} дн.)',
     'en': 'until {date} ({days} days left)',
   },
+  'sub.revoked': {
+    'ru': 'Доступ по этой подписке отозван ({reason})',
+    'en': 'This subscription has been revoked ({reason})',
+  },
+  'sub.revokedStillUp': {
+    'ru': 'соединение пока работает на прежних кредах',
+    'en': 'the tunnel still works on the old credentials',
+  },
+  'sub.revokedBadge': {'ru': 'отозвана', 'en': 'revoked'},
   // Единицы. Отдельными ключами, а не внутри фраз: используются в десятке
   // мест форматирования, и дублировать перевод в каждом было бы хуже.
   'unit.b': {'ru': 'Б', 'en': 'B'},
@@ -1675,5 +1684,15 @@ const Map<String, Map<String, String>> _strings = {
   'log.subAutoUpdate': {
     'ru': 'Автообновление подписки "{name}" (раз в {hours} ч)',
     'en': 'Auto-updating subscription "{name}" (every {hours} h)',
+  },
+  'log.subRevoked': {
+    'ru': 'Подписка "{name}": доступ отозван ({reason})',
+    'en': 'Subscription "{name}": access revoked ({reason})',
+  },
+  'log.subRevokedStillUp': {
+    'ru': 'Соединение при этом живо — ссылку сменили, а креды сервера прежние. '
+        'Ядро не глушим, но профиль помечен: обновите ссылку подписки.',
+    'en': 'The tunnel is still up — the link changed but the server credentials '
+        'did not. Keeping the core running; update the subscription link.',
   },
 };

@@ -1521,6 +1521,12 @@ ParsedServer? parseHysteria2(String line) {
   }
 }
 
+/// Коды, которыми панель говорит «этого доступа больше нет», а не «зайди
+/// попозже». 401/403 — клиента не узнают, 404 — ссылки не существует,
+/// 410 — существовала и удалена. Всё остальное (500, 502, таймаут) — повод
+/// промолчать и попробовать в следующий раз, но не выбрасывать серверы.
+const Set<int> kRevokedCodes = {401, 403, 404, 410};
+
 class SubscriptionProfile {
   final String id;
   String name;
@@ -1538,6 +1544,11 @@ class SubscriptionProfile {
   int updateIntervalHours; // Profile-Update-Interval, подсказка сервера
   int lastUpdated; // unix-время последнего успешного обновления
 
+  /// Панель ответила «доступа нет» (401/403/404/410), а не «сервер моргнул».
+  /// Хранится вместе с профилем: отзыв не должен забываться при перезапуске,
+  /// иначе приложение каждый раз стартует с видом, будто всё в порядке.
+  bool revoked;
+
   SubscriptionProfile({
     required this.id,
     required this.name,
@@ -1548,6 +1559,7 @@ class SubscriptionProfile {
     this.expire = 0,
     this.updateIntervalHours = 0,
     this.lastUpdated = 0,
+    this.revoked = false,
   });
 
   bool get hasQuota => total > 0;
@@ -1565,6 +1577,7 @@ class SubscriptionProfile {
         'expire': expire,
         'updateIntervalHours': updateIntervalHours,
         'lastUpdated': lastUpdated,
+        'revoked': revoked,
       };
 
   factory SubscriptionProfile.fromJson(Map<String, dynamic> json) => SubscriptionProfile(
@@ -1577,6 +1590,7 @@ class SubscriptionProfile {
         expire: json['expire'] as int? ?? 0,
         updateIntervalHours: json['updateIntervalHours'] as int? ?? 0,
         lastUpdated: json['lastUpdated'] as int? ?? 0,
+        revoked: json['revoked'] as bool? ?? false,
       );
 
   // "upload=123; download=456; total=0; expire=0" — порядок и набор полей
@@ -3369,29 +3383,109 @@ del "%~f0"
       final resp = await http.get(uri).timeout(const Duration(seconds: 10));
 
       if (resp.statusCode != 200) {
+        // «Ссылку отозвали» и «панель моргнула» — разные вещи, а раньше они
+        // сваливались в одну строку статуса, после которой не менялось РОВНО
+        // НИЧЕГО: список серверов оставался прежним, соединение жило дальше.
+        // Со стороны это выглядело как работающая подписка, которой больше
+        // нет, и понять, что доступа лишили, было неоткуда.
+        if (kRevokedCodes.contains(resp.statusCode)) {
+          // Одиночный 403 — обычное дело для панели за Cloudflare, а 404 —
+          // для панели, которую перезапускают. Приговор выносим только после
+          // подтверждения вторым запросом.
+          await Future.delayed(const Duration(seconds: 3));
+          final confirm = await http.get(uri).timeout(const Duration(seconds: 10));
+          if (kRevokedCodes.contains(confirm.statusCode)) {
+            await _handleSubscriptionRevoked(profile, 'HTTP ${confirm.statusCode}');
+            return;
+          }
+          if (confirm.statusCode == 200) {
+            await _applySubscriptionResponse(profile, confirm);
+            return;
+          }
+        }
         if (_activeProfile?.id == profile.id) {
           setState(() => _subStatus = "${t('sub.httpError')} ${resp.statusCode}");
         }
         return;
       }
 
-      // Заголовки с квотой и сроком панели отдают в разном регистре —
-      // http-пакет приводит их к нижнему, но подстрахуемся поиском по обоим.
-      profile.applyUserInfo(
-          resp.headers['subscription-userinfo'] ?? resp.headers['Subscription-Userinfo']);
-      final intervalHeader =
-          resp.headers['profile-update-interval'] ?? resp.headers['Profile-Update-Interval'];
-      final interval = int.tryParse(intervalHeader?.trim() ?? '');
-      if (interval != null && interval > 0) profile.updateIntervalHours = interval;
-      profile.lastUpdated = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      await _saveProfiles();
-
-      _applySubscriptionContent(profile, resp.body);
+      await _applySubscriptionResponse(profile, resp);
     } catch (e) {
       if (_activeProfile?.id == profile.id) {
         setState(() => _subStatus = "${t('sub.error')}: $e");
       }
     }
+  }
+
+  /// Успешный ответ подписки: заголовки, отметки времени, разбор содержимого.
+  /// Вынесено из `_loadSubscription` отдельно, потому что успех может прийти
+  /// и со второго, подтверждающего запроса.
+  Future<void> _applySubscriptionResponse(
+      SubscriptionProfile profile, http.Response resp) async {
+    // Заголовки с квотой и сроком панели отдают в разном регистре —
+    // http-пакет приводит их к нижнему, но подстрахуемся поиском по обоим.
+    profile.applyUserInfo(
+        resp.headers['subscription-userinfo'] ?? resp.headers['Subscription-Userinfo']);
+    final intervalHeader =
+        resp.headers['profile-update-interval'] ?? resp.headers['Profile-Update-Interval'];
+    final interval = int.tryParse(intervalHeader?.trim() ?? '');
+    if (interval != null && interval > 0) profile.updateIntervalHours = interval;
+    profile.lastUpdated = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    // Ссылка снова отвечает — снимаем отметку отзыва: панель могла просто
+    // лежать, а живой профиль не должен вечно носить старый приговор.
+    profile.revoked = false;
+    await _saveProfiles();
+
+    // Кэш «имя -> IP» живёт весь сеанс (см. _bakeServerIps), и после смены
+    // адреса сервера в панели мы бы до перезапуска ходили на старый IP —
+    // ещё один способ незаметно работать на устаревших данных. Свежая выдача
+    // подписки — ровно тот момент, когда его пора сбросить.
+    _hostIpCache.clear();
+
+    _applySubscriptionContent(profile, resp.body);
+  }
+
+  /// Панель отозвала ссылку. Дальше есть ровно два случая, и они требуют
+  /// разного.
+  ///
+  /// Креды из последней выдачи могут быть уже мёртвыми — тогда надо честно
+  /// отключиться и выбросить серверы. А могут ещё работать: так бывает, когда
+  /// в панели сменили только саму ссылку (в 3x-ui — `subId`), а UUID клиента
+  /// оставили прежним. Глушить в этом случае живой туннель нельзя — человек
+  /// сидит в интернете, и обрыв на ровном месте хуже, чем устаревшая ссылка.
+  /// Но и молчать больше не будем: профиль помечается отозванным, и это видно
+  /// на экране.
+  Future<void> _handleSubscriptionRevoked(
+      SubscriptionProfile profile, String reason) async {
+    profile.revoked = true;
+    await _saveProfiles();
+    _appendLog(tp('log.subRevoked', {'name': profile.name, 'reason': reason}));
+
+    final isActive = _activeProfile?.id == profile.id;
+    // Жив ли ещё туннель — спрашиваем тем же честным запросом, которым ходит
+    // проверка связи: он идёт через текущий outbound, а не мимо него.
+    final stillUp =
+        isActive && _runningEngine != null && await _probeActiveServer();
+
+    if (stillUp) {
+      _appendLog(t('log.subRevokedStillUp'));
+      if (mounted) {
+        setState(() => _subStatus = "${tp('sub.revoked', {'reason': reason})} — "
+            "${t('sub.revokedStillUp')}");
+      }
+      return;
+    }
+
+    if (isActive && _runningEngine != null) await _stopCore();
+    _serverCache.remove(profile.id);
+    if (!isActive || !mounted) return;
+    _stopAllXrayBridges();
+    setState(() {
+      _servers = [];
+      _selectedServer = null;
+      _latencyMs.clear();
+      _subStatus = tp('sub.revoked', {'reason': reason});
+    });
   }
 
   // Разбор содержимого подписки — общий для сетевой загрузки и локального файла.
@@ -6639,9 +6733,15 @@ del "%~f0"
   // реально прислала: на безлимитном тарифе (total=0) рисовать полосу остатка
   // и «осталось 0 Б» было бы враньём.
   Widget _profileUsage(SubscriptionProfile p) {
-    if (p.used == 0 && !p.hasQuota && !p.hasExpiry) return const SizedBox.shrink();
+    // Отозванный профиль показываем всегда, даже если панель не прислала ни
+    // трафика, ни срока: это ровно то, что человеку сейчас нужно видеть.
+    if (!p.revoked && p.used == 0 && !p.hasQuota && !p.hasExpiry) {
+      return const SizedBox.shrink();
+    }
 
-    final parts = <String>["${t('sub.used')} ${_formatBytes(p.used)}"];
+    final parts = <String>[];
+    if (p.revoked) parts.add('⚠ ${t('sub.revokedBadge')}');
+    parts.add("${t('sub.used')} ${_formatBytes(p.used)}");
     if (p.hasQuota) parts.add("${t('sub.of')} ${_formatBytes(p.total)}");
     if (p.hasExpiry) {
       final until = DateTime.fromMillisecondsSinceEpoch(p.expire * 1000);
@@ -6677,7 +6777,11 @@ del "%~f0"
                 minHeight: 4,
               ),
             ),
-          Text(parts.join(' · '), style: const TextStyle(fontSize: 11)),
+          Text(parts.join(' · '),
+              style: TextStyle(
+                fontSize: 11,
+                color: p.revoked ? Theme.of(context).colorScheme.error : null,
+              )),
         ],
       ),
     );
@@ -7430,7 +7534,7 @@ del "%~f0"
 // Версия приложения. Держится тут, а не читается пакетом package_info_plus:
 // ради одной строки тянуть зависимость незачем. МЕНЯТЬ ВМЕСТЕ с полем
 // `version:` в pubspec.yaml — они не связаны автоматически.
-const String kAppVersion = '1.0.2';
+const String kAppVersion = '1.0.3';
 
 /// Когда собрана ЭТА сборка.
 ///
