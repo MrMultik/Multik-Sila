@@ -10,6 +10,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:archive/archive.dart';
 import 'android_vpn.dart';
 import 'diagnostics.dart';
+import 'elevate.dart';
 import 'l10n.dart';
 import 'onboarding.dart';
 import 'platform_env.dart';
@@ -2293,54 +2294,55 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // Elevation отдельного дочернего процесса ломает и kill(), и живые логи,
   // и требует второй UAC на остановку — вместо этого перезапускаем само
   // приложение целиком с правами администратора.
+  /// Пока идёт запрос прав, повторные нажатия игнорируются.
+  ///
+  /// Без этого второе нажатие запускало ВТОРОЙ круг, и тот видел замок,
+  /// который первый круг только что забрал себе обратно после отказа, —
+  /// принимал его за новую копию и делал `exit(0)`. Приложение исчезало с
+  /// экрана вместо того, чтобы просто сказать «не получилось».
+  bool _elevating = false;
+
   Future<void> _restartElevated() async {
+    if (_elevating) return;
+    _elevating = true;
     final exePath = Platform.resolvedExecutable;
     // Отпускаем замок ДО запуска новой копии: иначе она упрётся в занятый
     // порт, решит, что приложение уже работает, и выйдет — а мы следом
     // закроемся сами, и на экране не останется ничего.
     await releaseSingleInstanceLock();
 
-    // Запуск ТОЛЬКО detached. Раньше здесь стоял `Process.run`, и он не
-    // возвращался никогда: `run` дочитывает stdout/stderr до закрытия труб, а
-    // элевированная копия наследует их и держит открытыми, пока живёт, — то
-    // есть всё время. Наружу это выходило так: человек жмёт «Перезапустить»,
-    // в лог ложится «перезапуск запрошен», и дальше НИЧЕГО — ни новой копии,
-    // ни сообщения об отмене, потому что до обеих веток дело не доходило.
-    // Замерено: 60 секунд без ответа на том же вызове (в логе пользователя
-    // от 09:51 — шесть нажатий подряд, шесть записей и ни одного перезапуска).
-    // `detached` труб не создаёт вовсе, поэтому висеть не на чем.
-    try {
-      await Process.start(
-        'powershell',
-        [
-          '-NoProfile',
-          '-WindowStyle',
-          'Hidden',
-          '-Command',
-          "Start-Process -FilePath '$exePath' -Verb RunAs"
-        ],
-        mode: ProcessStartMode.detached,
-      );
-    } catch (e) {
-      // Замок уже отпущен, а новой копии не будет — забираем обратно, иначе
-      // следующий запуск сочтёт, что приложение не работает, и поднимет вторую.
-      _appendLog(tp('log.elevationFailed', {'e': e}));
-      await _claimSingleInstance();
-      return;
+    // Права просим САМИ (см. lib/elevate.dart), а не через сторонний
+    // powershell. Здесь сменилось уже два неверных подхода, и оба молчали:
+    //   1. `Process.run` не возвращался никогда — он дочитывает stdout/stderr
+    //      до закрытия труб, а элевированная копия наследует их и держит,
+    //      пока живёт. Замерено: 60 секунд без ответа.
+    //   2. Тот же запуск detached труб не создаёт и возвращается сразу, но
+    //      Windows НЕ ПОКАЗЫВАЕТ окно UAC по просьбе фонового процесса.
+    //      Замерено: `Start-Process -Verb RunAs` простоял 40 секунд, и
+    //      `consent.exe` за это время в системе не появился ни разу.
+    // Для человека оба случая выглядели одинаково: нажал «Перезапустить» —
+    // не произошло ничего.
+    final rc = Elevate.runAs(exePath);
+
+    if (rc > Elevate.successThreshold) {
+      // Согласие получено, копия стартует. Уходим только после того, как она
+      // заняла замок: иначе на экране на секунду не остаётся ничего, а если
+      // она не поднимется — не остаётся и вовсе.
+      if (await _waitForPort(kSingleInstancePort,
+          timeout: const Duration(seconds: 30))) {
+        exit(0);
+      }
+      _appendLog(tp('log.elevationFailed', {'e': 'timeout'}));
+    } else {
+      _appendLog(rc == Elevate.accessDenied
+          ? t('log.elevationCancelled')
+          : tp('log.elevationFailed', {'e': 'ShellExecuteW=$rc'}));
     }
 
-    // У detached-запуска кода возврата нет, и «согласились ли на UAC» можно
-    // узнать только по факту: новая копия занимает замок на 17999. Ждём
-    // появления, а не гадаем по коду, которого нет.
-    if (await _waitForPort(kSingleInstancePort,
-        timeout: const Duration(seconds: 45))) {
-      exit(0);
-    }
-
-    // Не дождались: запрос UAC закрыли или отклонили. Остаёмся жить и
-    // обязательно возвращаем себе замок.
-    _appendLog(t('log.elevationCancelled'));
+    // Остаёмся жить — и обязательно возвращаем себе замок, иначе следующий
+    // запуск сочтёт, что приложение не работает, и поднимет вторую копию.
     await _claimSingleInstance();
+    _elevating = false;
   }
 
   Future<void> _toggleTunMode(bool value) async {
