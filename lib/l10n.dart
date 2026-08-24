@@ -1024,6 +1024,13 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'до {date} (осталось {days} дн.)',
     'en': 'until {date} ({days} days left)',
   },
+  'sub.formatLinks': {'ru': 'список ссылок', 'en': 'link list'},
+  'sub.unknownFormat': {
+    'ru': 'Формат подписки не распознан. Понимаем: список ссылок '
+        '(vless, vmess, trojan, hysteria2, ss), Clash YAML и конфиг sing-box.',
+    'en': 'Subscription format not recognised. Supported: a link list '
+        '(vless, vmess, trojan, hysteria2, ss), Clash YAML and a sing-box config.',
+  },
   'sub.revoked': {
     'ru': 'Доступ по этой подписке отозван ({reason})',
     'en': 'This subscription has been revoked ({reason})',
@@ -1688,6 +1695,10 @@ const Map<String, Map<String, String>> _strings = {
   'log.subAutoUpdate': {
     'ru': 'Автообновление подписки "{name}" (раз в {hours} ч)',
     'en': 'Auto-updating subscription "{name}" (every {hours} h)',
+  },
+  'log.subFormat': {
+    'ru': 'Подписка разобрана как {format}: серверов {count}, пропущено {skipped}',
+    'en': 'Subscription parsed as {format}: {count} servers, {skipped} skipped',
   },
   'log.subRevoked': {
     'ru': 'Подписка "{name}": доступ отозван ({reason})',

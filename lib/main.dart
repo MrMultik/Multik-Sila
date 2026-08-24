@@ -8,6 +8,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:screen_retriever/screen_retriever.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:archive/archive.dart';
+import 'package:yaml/yaml.dart';
 import 'android_vpn.dart';
 import 'diagnostics.dart';
 import 'elevate.dart';
@@ -1519,6 +1520,339 @@ ParsedServer? parseHysteria2(String line) {
     return ParsedServer(name: name, protocol: 'hysteria2', outbound: outbound);
   } catch (e) {
     return null;
+  }
+}
+
+/// Число из YAML/JSON, где порт бывает и числом, и строкой.
+int? _asInt(Object? v) => v is int ? v : int.tryParse('${v ?? ''}');
+
+/// base64 «как получится»: в подписках встречается и обычный алфавит, и
+/// url-safe, и добивка `=` то есть, то нет. `base64.decode` строг ко всем
+/// трём, поэтому нормализуем сами.
+String _decodeB64Loose(String s) {
+  var t = s.replaceAll('-', '+').replaceAll('_', '/').trim();
+  final pad = t.length % 4;
+  if (pad > 0) t += '=' * (4 - pad);
+  return utf8.decode(base64.decode(t));
+}
+
+/// `ss://` — Shadowsocks. В обиходе одновременно живут две несовместимые
+/// формы: SIP002 `ss://base64(method:password)@host:port#name` и старая, где
+/// в base64 упаковано всё целиком: `ss://base64(method:password@host:port)`.
+/// Обе встречаются в публичных подписках, поэтому разбираем обе.
+ParsedServer? parseShadowsocks(String line) {
+  if (!line.startsWith('ss://')) return null;
+
+  try {
+    // Имя отрезаем ПЕРВЫМ: в старой форме оно лежит за base64, и `Uri.parse`
+    // на такой строке разберёт не то, что нужно.
+    var body = line.substring('ss://'.length);
+    var name = '';
+    final hash = body.indexOf('#');
+    if (hash >= 0) {
+      name = Uri.decodeComponent(body.substring(hash + 1));
+      body = body.substring(0, hash);
+    }
+
+    // Плагин (obfs, v2ray-plugin) живёт в query — только у новой формы.
+    var params = const <String, String>{};
+    final q = body.indexOf('?');
+    if (q >= 0) {
+      params = Uri.splitQueryString(body.substring(q + 1));
+      body = body.substring(0, q);
+    }
+
+    // Приводим обе формы к одному виду `method:password@host:port`.
+    final at0 = body.lastIndexOf('@');
+    final plain = at0 >= 0
+        ? '${_decodeB64Loose(body.substring(0, at0))}@${body.substring(at0 + 1)}'
+        : _decodeB64Loose(body);
+
+    final at = plain.lastIndexOf('@');
+    if (at < 0) return null;
+    final cred = plain.substring(0, at);
+    final hostPort = plain.substring(at + 1);
+
+    final colon = cred.indexOf(':');
+    if (colon < 0) return null;
+    final method = cred.substring(0, colon);
+    final password = cred.substring(colon + 1);
+
+    // IPv6 приезжает в скобках (`[::1]:443`); порт всегда за последним
+    // двоеточием, а скобки для sing-box лишние.
+    final hp = hostPort.lastIndexOf(':');
+    if (hp < 0) return null;
+    final port = int.tryParse(hostPort.substring(hp + 1));
+    if (port == null) return null;
+    var server = hostPort.substring(0, hp);
+    if (server.startsWith('[') && server.endsWith(']')) {
+      server = server.substring(1, server.length - 1);
+    }
+    if (server.isEmpty) return null;
+
+    final outbound = <String, dynamic>{
+      "type": "shadowsocks",
+      "tag": "proxy",
+      "server": server,
+      "server_port": port,
+      "method": method,
+      "password": password,
+    };
+
+    final plugin = params['plugin'];
+    if (plugin != null && plugin.isNotEmpty) {
+      // `obfs-local;obfs=http;obfs-host=x` — имя плагина до первой точки с
+      // запятой, остальное уходит в опции как есть.
+      final parts = plugin.split(';');
+      outbound['plugin'] = parts.first;
+      if (parts.length > 1) outbound['plugin_opts'] = parts.sublist(1).join(';');
+    }
+
+    return ParsedServer(
+      name: name.isNotEmpty ? name : 'SS $server:$port',
+      protocol: 'shadowsocks',
+      outbound: outbound,
+    );
+  } catch (e) {
+    return null;
+  }
+}
+
+/// Блок TLS из полей Clash-записи. `force` — для протоколов, у которых TLS
+/// не опция, а часть протокола (trojan, hysteria2, tuic): у них ключа `tls`
+/// в YAML обычно нет вовсе.
+Map<String, dynamic>? _clashTls(Map proxy, String server, {bool force = false}) {
+  if (!force && proxy['tls'] != true) return null;
+
+  final sni = '${proxy['servername'] ?? proxy['sni'] ?? proxy['peer'] ?? server}';
+  final tls = <String, dynamic>{"enabled": true, "server_name": sni};
+
+  if (proxy['skip-cert-verify'] == true) tls['insecure'] = true;
+
+  final alpn = proxy['alpn'];
+  if (alpn is List && alpn.isNotEmpty) {
+    tls['alpn'] = alpn.map((e) => '$e').toList();
+  }
+
+  final fp = '${proxy['client-fingerprint'] ?? ''}';
+  if (fp.isNotEmpty) {
+    tls['utls'] = {"enabled": true, "fingerprint": fp};
+  }
+
+  final reality = proxy['reality-opts'];
+  if (reality is Map) {
+    tls['reality'] = {
+      "enabled": true,
+      "public_key": '${reality['public-key'] ?? ''}',
+      "short_id": '${reality['short-id'] ?? ''}',
+    };
+  }
+
+  return tls;
+}
+
+/// Транспорт из полей Clash-записи. `tcp` возвращает null: в sing-box это
+/// умолчание, и отдельного блока для него не существует.
+Map<String, dynamic>? _clashTransport(Map proxy) {
+  switch ('${proxy['network'] ?? 'tcp'}'.toLowerCase()) {
+    case 'ws':
+      final opts = proxy['ws-opts'];
+      final t = <String, dynamic>{"type": "ws", "path": "/"};
+      if (opts is Map) {
+        if (opts['path'] != null) t['path'] = '${opts['path']}';
+        final headers = opts['headers'];
+        if (headers is Map && headers.isNotEmpty) {
+          t['headers'] = headers.map((k, v) => MapEntry('$k', '$v'));
+        }
+      }
+      return t;
+    case 'grpc':
+      final opts = proxy['grpc-opts'];
+      return {
+        "type": "grpc",
+        "service_name": opts is Map ? '${opts['grpc-service-name'] ?? ''}' : '',
+      };
+    case 'h2':
+      final opts = proxy['h2-opts'];
+      final t = <String, dynamic>{"type": "http"};
+      if (opts is Map) {
+        if (opts['path'] != null) t['path'] = '${opts['path']}';
+        final host = opts['host'];
+        if (host is List && host.isNotEmpty) {
+          t['host'] = host.map((e) => '$e').toList();
+        }
+      }
+      return t;
+    default:
+      return null;
+  }
+}
+
+/// Одна запись из секции `proxies:` Clash-конфига — в outbound sing-box.
+///
+/// Ключи у Clash свои (`cipher`, `servername`, `skip-cert-verify`,
+/// `alterId`), и совпадений с sing-box почти нет: это перевод, а не
+/// переименование пары полей.
+ParsedServer? parseClashProxy(Map proxy) {
+  try {
+    final type = '${proxy['type'] ?? ''}'.toLowerCase();
+    final server = '${proxy['server'] ?? ''}';
+    final port = _asInt(proxy['port']);
+    if (server.isEmpty || port == null) return null;
+
+    final name = '${proxy['name'] ?? '$type $server:$port'}';
+    final outbound = <String, dynamic>{
+      "tag": "proxy",
+      "server": server,
+      "server_port": port,
+    };
+
+    switch (type) {
+      case 'ss':
+      case 'shadowsocks':
+        outbound['type'] = 'shadowsocks';
+        outbound['method'] = '${proxy['cipher'] ?? proxy['method'] ?? 'aes-128-gcm'}';
+        outbound['password'] = '${proxy['password'] ?? ''}';
+        final plugin = '${proxy['plugin'] ?? ''}';
+        if (plugin.isNotEmpty) {
+          outbound['plugin'] = plugin;
+          final opts = proxy['plugin-opts'];
+          if (opts is Map && opts.isNotEmpty) {
+            outbound['plugin_opts'] =
+                opts.entries.map((e) => '${e.key}=${e.value}').join(';');
+          }
+        }
+
+      case 'vmess':
+        outbound['type'] = 'vmess';
+        outbound['uuid'] = '${proxy['uuid'] ?? ''}';
+        outbound['alter_id'] = _asInt(proxy['alterId']) ?? 0;
+        outbound['security'] = '${proxy['cipher'] ?? 'auto'}';
+
+      case 'vless':
+        outbound['type'] = 'vless';
+        outbound['uuid'] = '${proxy['uuid'] ?? ''}';
+        final flow = '${proxy['flow'] ?? ''}';
+        if (flow.isNotEmpty) outbound['flow'] = flow;
+
+      case 'trojan':
+        outbound['type'] = 'trojan';
+        outbound['password'] = '${proxy['password'] ?? ''}';
+
+      case 'hysteria2':
+      case 'hy2':
+        outbound['type'] = 'hysteria2';
+        outbound['password'] = '${proxy['password'] ?? proxy['auth'] ?? ''}';
+        final obfs = '${proxy['obfs'] ?? ''}';
+        if (obfs.isNotEmpty) {
+          outbound['obfs'] = {
+            "type": obfs,
+            "password": '${proxy['obfs-password'] ?? ''}',
+          };
+        }
+
+      case 'tuic':
+        outbound['type'] = 'tuic';
+        outbound['uuid'] = '${proxy['uuid'] ?? ''}';
+        outbound['password'] = '${proxy['password'] ?? ''}';
+        final cc = '${proxy['congestion-controller'] ?? ''}';
+        if (cc.isNotEmpty) outbound['congestion_control'] = cc;
+        final urm = '${proxy['udp-relay-mode'] ?? ''}';
+        if (urm.isNotEmpty) outbound['udp_relay_mode'] = urm;
+
+      case 'socks5':
+      case 'socks':
+        outbound['type'] = 'socks';
+        outbound['version'] = '5';
+        if ('${proxy['username'] ?? ''}'.isNotEmpty) {
+          outbound['username'] = '${proxy['username']}';
+          outbound['password'] = '${proxy['password'] ?? ''}';
+        }
+
+      case 'http':
+        outbound['type'] = 'http';
+        if ('${proxy['username'] ?? ''}'.isNotEmpty) {
+          outbound['username'] = '${proxy['username']}';
+          outbound['password'] = '${proxy['password'] ?? ''}';
+        }
+
+      default:
+        // Тип, которого мы не умеем (ssr, snell, wireguard, ...). Молча
+        // пропускаем: одна незнакомая запись не повод терять остальные.
+        return null;
+    }
+
+    // У этих трёх TLS — часть протокола, а не опция, и ключа `tls` в
+    // Clash-записи для них обычно нет.
+    const alwaysTls = {'trojan', 'hysteria2', 'tuic'};
+    final tls = _clashTls(proxy, server, force: alwaysTls.contains(outbound['type']));
+    if (tls != null) outbound['tls'] = tls;
+
+    final transport = _clashTransport(proxy);
+    if (transport != null) outbound['transport'] = transport;
+
+    return ParsedServer(
+        name: name, protocol: '${outbound['type']}', outbound: outbound);
+  } catch (e) {
+    return null;
+  }
+}
+
+/// Похоже ли содержимое на Clash-конфиг. Смотрим на `proxies:` в начале
+/// строки, а не просто на слово: оно попадается и в комментариях обычных
+/// подписок.
+bool looksLikeClash(String raw) =>
+    RegExp(r'^\s*proxies\s*:', multiLine: true).hasMatch(raw);
+
+/// Clash-подписка: YAML с секцией `proxies:`.
+List<ParsedServer> parseClashYaml(String raw) {
+  try {
+    final doc = loadYaml(raw);
+    if (doc is! Map) return const [];
+    final proxies = doc['proxies'];
+    if (proxies is! List) return const [];
+
+    final out = <ParsedServer>[];
+    for (final p in proxies) {
+      if (p is! Map) continue;
+      final parsed = parseClashProxy(p);
+      if (parsed != null) out.add(parsed);
+    }
+    return out;
+  } catch (e) {
+    return const [];
+  }
+}
+
+/// Типы outbound-ов sing-box, которые являются серверами, а не служебными
+/// звеньями (`direct`, `block`, `dns`, `selector`, `urltest`).
+const Set<String> kSingboxProxyTypes = {
+  'shadowsocks', 'vmess', 'vless', 'trojan', 'hysteria', 'hysteria2',
+  'tuic', 'socks', 'http', 'ssh', 'shadowtls', 'anytls',
+};
+
+/// Готовый конфиг sing-box: его outbound-ы берём как есть — они уже в том
+/// самом виде, в который остальные парсеры переводят.
+List<ParsedServer> parseSingboxJson(String raw) {
+  try {
+    final doc = jsonDecode(raw);
+    final list = doc is List
+        ? doc
+        : (doc is Map && doc['outbounds'] is List ? doc['outbounds'] as List : null);
+    if (list == null) return const [];
+
+    final out = <ParsedServer>[];
+    for (final o in list) {
+      if (o is! Map) continue;
+      final type = '${o['type'] ?? ''}';
+      if (!kSingboxProxyTypes.contains(type)) continue;
+      final outbound = Map<String, dynamic>.from(o);
+      final name = '${outbound['tag'] ?? '$type ${outbound['server'] ?? ''}'}';
+      out.add(ParsedServer(name: name, protocol: type, outbound: outbound));
+    }
+    return out;
+  } catch (e) {
+    return const [];
   }
 }
 
@@ -3532,21 +3866,38 @@ del "%~f0"
       decoded = raw;
     }
 
-    final lines = decoded
-        .split('\n')
-        .map((l) => l.trim())
-        .where((l) => l.isNotEmpty)
-        .toList();
-
+    // Формат узнаём по содержимому, а не по расширению: подписка приходит по
+    // ссылке, где расширения нет вовсе, а файл могут назвать как угодно.
     final parsed = <ParsedServer>[];
     int skipped = 0;
-    for (final line in lines) {
-      final server = parseVless(line) ?? parseVmess(line) ?? parseTrojan(line) ?? parseHysteria2(line);
-      if (server != null) {
-        server.link = line;
-        parsed.add(server);
-      } else {
-        skipped++;
+    String format;
+
+    final head = decoded.trimLeft();
+    if (head.startsWith('{') || head.startsWith('[')) {
+      parsed.addAll(parseSingboxJson(decoded));
+      format = 'sing-box JSON';
+    } else if (looksLikeClash(decoded)) {
+      parsed.addAll(parseClashYaml(decoded));
+      format = 'Clash YAML';
+    } else {
+      format = t('sub.formatLinks');
+      final lines = decoded
+          .split('\n')
+          .map((l) => l.trim())
+          .where((l) => l.isNotEmpty)
+          .toList();
+      for (final line in lines) {
+        final server = parseVless(line) ??
+            parseVmess(line) ??
+            parseTrojan(line) ??
+            parseHysteria2(line) ??
+            parseShadowsocks(line);
+        if (server != null) {
+          server.link = line;
+          parsed.add(server);
+        } else {
+          skipped++;
+        }
       }
     }
 
@@ -3570,8 +3921,18 @@ del "%~f0"
       _servers = parsed;
       _selectedServer = parsed.isNotEmpty ? parsed.first : null;
       _latencyMs.clear();
-      _subStatus = "${t('sub.parsed')}: ${parsed.length} (VLESS+VMess+Trojan+Hysteria2) — ${t('sub.skipped')}: $skipped";
+      // Ноль серверов — это не «подписка пустая», а чаще всего «формат не
+      // тот». Раньше здесь писалось «Распознано: 0 — пропущено: 340», и по
+      // этой строке нельзя было понять, что подписка вообще другого вида:
+      // выглядело как сломанная подписка, а не как неподдержанный формат.
+      _subStatus = parsed.isEmpty
+          ? t('sub.unknownFormat')
+          : (skipped > 0
+              ? "${t('sub.parsed')}: ${parsed.length} ($format) — ${t('sub.skipped')}: $skipped"
+              : "${t('sub.parsed')}: ${parsed.length} ($format)");
     });
+    _appendLog(tp('log.subFormat',
+        {'format': format, 'count': parsed.length, 'skipped': skipped}));
   }
 
   Future<void> _switchProfile(SubscriptionProfile profile) async {
