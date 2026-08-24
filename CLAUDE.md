@@ -1131,6 +1131,43 @@ trojan 631 мс, hysteria2 683 мс, у всех верный exit-IP, 3 МБ з
    Схему конфига `sing-box check` уже прошёл, но сработал ли process-матчинг на
    Windows — проверяется только живым прогоном под TUN.
 
+## Сборка Android — три препятствия подряд, все внешние
+
+APK собирается, но ни одна из нужных переменных окружения на машине не
+задана, и каждая даёт свою ошибку. Рабочая команда целиком:
+
+```
+ANDROID_HOME=C:\dev\android-sdk
+JAVA_HOME="C:\Program Files\Android\openjdk\jdk-21.0.8"
+GRADLE_OPTS=-Djava.io.tmpdir=C:\dev\gradle-tmp
+TMP=C:\dev\gradle-tmp  TEMP=C:\dev\gradle-tmp
+flutter build apk --release --split-per-abi
+```
+
+1. **`No Android SDK found`** — SDK лежит в `C:\dev\android-sdk`, но
+   `ANDROID_HOME` не задан.
+2. **`JAVA_HOME is not set`** — отдельного JDK и Android Studio на машине НЕТ
+   вовсе (проверено по реестру и списку установленных программ). JDK приехал
+   вместе с SDK: `C:\Program Files\Android\openjdk\jdk-21.0.8`.
+3. **`java.io.IOException: Unable to establish loopback connection`** — не про
+   сеть. Петля у Java исправна (проверено отдельной программой: и `127.0.0.1`,
+   и `::1` работают), спотыкается Gradle о **кириллицу во временной папке**:
+   `C:\Users\Абилова Зарина\AppData\Local\Temp`. Отсюда и `C:\dev\gradle-tmp`,
+   созданный при прошлой удачной сборке 13 августа. Задавать надо И
+   `java.io.tmpdir`, И `TMP`/`TEMP`.
+
+**Грабля, из-за которой это легко проглядеть: `flutter build apk` выходит с
+кодом 0, даже когда не собрал НИЧЕГО.** Все три отказа выше вернули ноль.
+Если Android поедет в `tools/release.ps1` — проверять надо не код возврата, а
+дату файла в `build/app/outputs/flutter-apk/`. И искать APK именно там:
+в `android/app/build/outputs/` пусто всегда, на этом я один раз уже решил,
+что Android не собирался ни разу.
+
+`android/gradle.properties` пуст — ни `android.useAndroidX`, ни
+`org.gradle.jvmargs`. Сборке это пока не мешает (значения приезжают из
+Flutter Gradle Plugin), но если появятся странные отказы про AndroidX —
+смотреть сюда.
+
 ## Тестовые данные
 
 Ссылка на подписку и хост прокси-сервера — в `TESTDATA.local.md` рядом с этим
