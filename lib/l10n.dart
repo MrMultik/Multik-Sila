@@ -52,6 +52,21 @@ const Map<String, Map<String, String>> _strings = {
   'nav.connection': {'ru': 'Подключение', 'en': 'Connection'},
   'nav.servers': {'ru': 'Серверы', 'en': 'Servers'},
   'nav.routes': {'ru': 'Маршруты', 'en': 'Routing'},
+  'nav.promo': {'ru': 'VPN', 'en': 'VPN'},
+  'promo.title': {'ru': 'Нужен VPN?', 'en': 'Need a VPN?'},
+  'promo.text': {
+    'ru': 'Подписка на серверы для Multik Sila — в телеграм-боте. '
+        'Там же продление и поддержка.',
+    'en': 'Server subscriptions for Multik Sila are handled by our Telegram '
+        'bot — renewals and support included.',
+  },
+  'promo.open': {'ru': 'Открыть бота', 'en': 'Open the bot'},
+  'promo.copy': {'ru': 'Скопировать ссылку', 'en': 'Copy the link'},
+  'promo.copied': {'ru': 'Ссылка скопирована', 'en': 'Link copied'},
+  'promo.openFailed': {
+    'ru': 'Не удалось открыть Telegram — ссылка скопирована в буфер',
+    'en': 'Could not open Telegram — the link has been copied instead',
+  },
 
   'common.save': {'ru': 'Сохранить', 'en': 'Save'},
   'common.cancel': {'ru': 'Отмена', 'en': 'Cancel'},

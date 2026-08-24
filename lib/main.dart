@@ -8,6 +8,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:screen_retriever/screen_retriever.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:archive/archive.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:yaml/yaml.dart';
 import 'android_vpn.dart';
 import 'diagnostics.dart';
@@ -33,6 +34,11 @@ import 'package:window_manager/window_manager.dart';
 // системный прокси и TUN-адаптер. Пользователь поймал именно это — два окна,
 // в одном «Protected», в другом «Not protected».
 const int kSingleInstancePort = 17999;
+
+/// Телеграм-бот, через который выдаётся подписка. Показывается на вкладке
+/// с предложением VPN: кнопкой, ссылкой в буфер и QR-кодом.
+const String kPromoBotHandle = '@Sila_Multik_bot';
+const String kPromoBotUrl = 'https://t.me/Sila_Multik_bot';
 ServerSocket? _instanceLock;
 
 
@@ -7614,6 +7620,11 @@ del "%~f0"
             selectedIcon: const Icon(Icons.alt_route),
             label: t('nav.routes'),
           ),
+          NavigationDestination(
+            icon: const Icon(Icons.rocket_launch_outlined),
+            selectedIcon: const Icon(Icons.rocket_launch),
+            label: t('nav.promo'),
+          ),
         ],
       ),
       body: Padding(
@@ -8020,12 +8031,109 @@ del "%~f0"
                 ),
               ),
             ),
+            if (_tab == 3) _promoTab(),
             // 16 -> 8: нижний отступ идёт сразу над панелью навигации, где
             // и без него достаточно воздуха, а высота на главном экране в цене.
             const SizedBox(height: 8),
           ],
         ),
       ),
+    );
+  }
+
+  /// Вкладка с предложением подписки: ссылка на телеграм-бота, кнопка
+  /// копирования и QR-код.
+  ///
+  /// QR здесь не для красоты: экран показывают с ноутбука, а ставит VPN
+  /// человек себе на телефон — навести камеру быстрее, чем диктовать имя
+  /// бота с подчёркиваниями. Код всегда на белом поле, даже в тёмной теме:
+  /// сканеры ждут тёмный узор на светлом, инверсию читают через раз (та же
+  /// причина, что и у QR серверов).
+  Widget _promoTab() {
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                Icon(Icons.rocket_launch_outlined, size: 40, color: scheme.primary),
+                const SizedBox(height: 12),
+                Text(t('promo.title'),
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Text(t('promo.text'),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant)),
+                const SizedBox(height: 16),
+                FilledButton.icon(
+                  icon: const Icon(Icons.send, size: 18),
+                  label: Text(t('promo.open')),
+                  onPressed: () async {
+                    final uri = Uri.parse(kPromoBotUrl);
+                    // Не открылось — не молчим: на машине может не быть
+                    // Telegram, и «нажал, ничего не произошло» человек
+                    // истолкует как поломку приложения.
+                    var ok = false;
+                    try {
+                      ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+                    } catch (_) {
+                      // launchUrl не только возвращает false, но и БРОСАЕТ,
+                      // когда обработчика для схемы нет вовсе. Необработанное
+                      // исключение здесь означало бы кнопку, которая молча не
+                      // делает ничего.
+                      ok = false;
+                    }
+                    if (ok) return;
+                    // Telegram не открылся — кладём ссылку в буфер, чтобы
+                    // человеку было что вставить. Об этом и говорит текст:
+                    // обещать копирование и не копировать нельзя.
+                    await Clipboard.setData(const ClipboardData(text: kPromoBotUrl));
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(t('promo.openFailed'))),
+                    );
+                  },
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  icon: const Icon(Icons.copy, size: 18),
+                  label: Text(t('promo.copy')),
+                  onPressed: () async {
+                    await Clipboard.setData(const ClipboardData(text: kPromoBotUrl));
+                    if (!mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(t('promo.copied'))),
+                    );
+                  },
+                ),
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: QrImageView(
+                    data: kPromoBotUrl,
+                    size: 180,
+                    backgroundColor: Colors.white,
+                    errorCorrectionLevel: QrErrorCorrectLevel.M,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                SelectableText(
+                  kPromoBotHandle,
+                  style: TextStyle(fontSize: 13, color: scheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
