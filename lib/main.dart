@@ -4972,6 +4972,25 @@ del "%~f0"
       ...xraySeversForBridge.map((s) => _xrayOutboundHost(s.outbound)).whereType<String>(),
     };
 
+    // Порты самих серверов — чтобы страховка от петли (правило «адрес сервера
+    // → direct») не забирала себе ВЕСЬ хост.
+    //
+    // На одной машине с прокси-серверами обычно живёт и панель управления
+    // подпиской, на своём отдельном порту. Правило по голому `ip_cidr` уводило
+    // её напрямую вместе с серверами — а туда, где эта машина доступна только
+    // через туннель, «напрямую» означает «никуда». Наружу выходило так: через
+    // собственное приложение не открывается собственная панель. Замерено:
+    // напрямую — код 000 и таймаут за 5 с, через туннель — ответ за 0.3 с.
+    //
+    // Петля при этом никуда не девается и защита остаётся: наши ядра ходят к
+    // серверу именно на эти порты, их и оставляем прямыми. Всё остальное на
+    // том же адресе — панель, сайт, что угодно — идёт обычным путём.
+    final proxyPorts = <int>{};
+    for (final s in [...singboxServers, ...xraySeversForBridge]) {
+      final endpoint = _serverEndpoint(s);
+      if (endpoint != null) proxyPorts.add(endpoint.$2);
+    }
+
     // И только теперь — подмена. Обязательно ДО сборки config["outbounds"]:
     // там значения уже копируются в конфиг, и правка после этой строки в
     // готовый JSON не попадёт. На это я один раз наступил.
@@ -5536,7 +5555,13 @@ del "%~f0"
               "process_path": [_xrayPath],
               "outbound": "direct",
             },
-          if (bypassCidrs.isNotEmpty) {"ip_cidr": bypassCidrs, "outbound": "direct"},
+          if (bypassCidrs.isNotEmpty)
+            {
+              "ip_cidr": bypassCidrs,
+              // Только порты серверов, а не весь адрес — см. proxyPorts выше.
+              if (proxyPorts.isNotEmpty) "port": proxyPorts.toList()..sort(),
+              "outbound": "direct",
+            },
           ...splitRules(),
         ],
         "final": "proxy",
