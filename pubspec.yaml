@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.6+7
+version: 1.0.7+8
 
 environment:
   sdk: ^3.12.2
@@ -91,6 +91,19 @@ flutter:
     # Наборы правил лежат в самом приложении: GitHub может быть недоступен
     # ровно тогда, когда VPN нужнее всего. 66 КБ на все три.
     - assets/rulesets/
+
+  fonts:
+    # Флаги стран. В системном шрифте Windows (Segoe UI Emoji) их НЕТ вообще —
+    # Microsoft их не включила, и вместо 🇩🇪 система рисует буквы-индикаторы
+    # «DE». Панели подписок ставят флаг в имя сервера, и выглядело это так,
+    # будто приложение не умеет их показывать.
+    #
+    # Подключён именно ЗАПАСНЫМ шрифтом (fontFamilyFallback), а не основным:
+    # системный обслуживает всё, что умеет, а Noto подставляется только там,
+    # где у того глифа нет — то есть на флагах. Цена — 10 МБ в установщике.
+    - family: NotoColorEmoji
+      fonts:
+        - asset: assets/fonts/NotoColorEmoji.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:
