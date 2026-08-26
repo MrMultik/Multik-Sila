@@ -1711,6 +1711,18 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Автообновление подписки "{name}" (раз в {hours} ч)',
     'en': 'Auto-updating subscription "{name}" (every {hours} h)',
   },
+  'log.networkGone': {
+    'ru': 'Сети нет — жду её возвращения, серверы тут ни при чём',
+    'en': 'No network — waiting for it to return; the servers are not at fault',
+  },
+  'log.networkBack': {
+    'ru': 'Сеть вернулась — перезапускаю ядро',
+    'en': 'Network is back — restarting the core',
+  },
+  'log.autoSelectNoNetwork': {
+    'ru': 'Авто-выбор пропущен: сети нет',
+    'en': 'Auto-select skipped: no network',
+  },
   'log.autoSelectSkipBad': {
     'ru': 'Автовыбор: пропущено серверов без связи — {n}',
     'en': 'Auto-select: {n} unreachable server(s) skipped',

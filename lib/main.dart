@@ -7032,6 +7032,13 @@ del "%~f0"
   }
 
   Future<void> _autoSelectBest({bool silent = false}) async {
+    // Без сети тест покажет «недоступны все» — и это скажет ровно ничего о
+    // серверах. Гонять его в такой момент значит только зря тратить время и
+    // писать в лог неправду (см. _runHealthCheck).
+    if (!await _hasPhysicalNetwork()) {
+      _appendLog(t('log.autoSelectNoNetwork'));
+      return;
+    }
     await _testAllLatencies();
 
     final candidates = _autoSelectCandidates();
@@ -7122,10 +7129,78 @@ del "%~f0"
     });
   }
 
+  /// Была ли сеть недоступна на прошлой проверке. Нужен, чтобы поймать
+  /// МОМЕНТ возвращения, а не просто знать текущее состояние.
+  bool _networkDown = false;
+
+  /// Есть ли у машины сеть вообще — не считая нашего же TUN-адаптера.
+  ///
+  /// Считать «сеть есть, раз интерфейсы перечисляются» нельзя: под TUN в
+  /// списке всегда лежит наш собственный `SilaTUN` со своим адресом, и
+  /// машина без единого физического подключения выглядела бы подключённой.
+  /// Поэтому его и петлю пропускаем. APIPA (`169.254.*`) и link-local
+  /// (`fe80:`) тоже не в счёт: такой адрес Windows выдаёт себе сама, когда
+  /// настоящего получить не удалось, — это признак ОТСУТСТВИЯ сети, а не её
+  /// наличия.
+  Future<bool> _hasPhysicalNetwork() async {
+    try {
+      final interfaces = await NetworkInterface.list(
+          includeLoopback: false, type: InternetAddressType.any);
+      for (final iface in interfaces) {
+        if (iface.name == _settings.tunName) continue;
+        for (final addr in iface.addresses) {
+          if (addr.isLoopback) continue;
+          if (addr.address.startsWith('169.254.')) continue;
+          if (addr.address.toLowerCase().startsWith('fe80:')) continue;
+          return true;
+        }
+      }
+    } catch (_) {
+      // Не смогли спросить — считаем, что сеть есть: ложное «сети нет»
+      // остановило бы проверку связи насовсем.
+      return true;
+    }
+    return false;
+  }
+
   Future<void> _runHealthCheck() async {
     // Во время запуска и остановки проверять нечего: ядро как раз меняется
     // под нами, и провал означал бы только это.
     if (_runningEngine == null || _busy || _stopRequested) return;
+
+    // Нет сети — нечего проверять и НЕКОГО винить.
+    //
+    // Разбор реального случая: машина ушла в сон, вернулась — и приложение
+    // две минуты металось. Windows после пробуждения адаптер ещё не подняла
+    // (ядро прямо писало `network: missing default interface`), а мы это
+    // приняли за поломку серверов: тест показал «все недоступны», проверка
+    // связи забраковала исправный сервер и переключилась, ядро дважды
+    // перезапустилось, и на семнадцать секунд машина осталась вообще без
+    // VPN. Само прошло, когда сеть вернулась, но со стороны это выглядело
+    // как зависшее приложение.
+    if (!await _hasPhysicalNetwork()) {
+      if (!_networkDown) {
+        _networkDown = true;
+        _appendLog(t('log.networkGone'));
+      }
+      // Провалы не копим: два подряд означали бы «сервер плохой», а сервер
+      // тут ни при чём.
+      _healthFails = 0;
+      return;
+    }
+
+    if (_networkDown) {
+      _networkDown = false;
+      _appendLog(t('log.networkBack'));
+      // Ядро, пережившее пропажу сети, остаётся привязанным к интерфейсу,
+      // которого больше нет. В разобранном случае помог именно перезапуск —
+      // экземпляр, поднятый уже с сетью, заработал сразу. Делаем это ОДИН
+      // раз, на самом возвращении, а не по кругу.
+      if (_runningEngine != null && !_busy) {
+        await _startCore(isAutoRestart: true);
+        return;
+      }
+    }
 
     if (await _probeActiveServer()) {
       if (_healthFails > 0) _appendLog(t('log.healthRecovered'));
