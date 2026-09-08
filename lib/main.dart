@@ -2332,6 +2332,20 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   String _serverSearch = '';
   String _serverSort = 'default'; // default | latency | name
   static const String _serverSortPrefsKey = 'server_sort';
+  static const String _autoServerPrefsKey = 'auto_server_mode';
+
+  /// Выбирает ли сервер приложение (`true`) или человек (`false`).
+  ///
+  /// Раньше выбора не было: настройка «автовыбор перед подключением» просто
+  /// перебивала указанный сервер, и в логе это выглядело издевательски —
+  /// «Выбран сервер Vless TLS», следом «Автовыбор: Trojan T», следом старт
+  /// Trojan T. Плюс автовыбор по расписанию уводил с выбранного каждые
+  /// пятнадцать минут. Нажать на сервер было НЕЛЬЗЯ в том смысле, что выбор
+  /// ни на что не влиял.
+  ///
+  /// Теперь это режим, и переключается он тем же списком: строка «Авто»
+  /// сверху — выбирает приложение, любой сервер ниже — выбрал человек.
+  bool _autoServerMode = true;
   // Строка поиска намеренно НЕ сохраняется: это разовый фильтр «где тут
   // Trojan», и восстановить его при запуске значило бы показать человеку
   // урезанный список без видимой причины. Порядок сортировки — наоборот,
@@ -2631,11 +2645,16 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     // если его value не совпадает ни с одним пунктом, а в настройках может
     // лежать что угодно — от старого имени режима до правки файла руками.
     final savedSort = prefs.getString(_serverSortPrefsKey);
+    // Режим выбора сервера. На свежей установке берём его из настройки
+    // «автовыбор перед подключением» — она и означала это же самое, пока
+    // выбор не стал отдельным.
+    final savedAuto = prefs.getBool(_autoServerPrefsKey);
     if (!mounted) return;
     setState(() {
       if (savedSort != null && _serverSortValues.contains(savedSort)) {
         _serverSort = savedSort;
       }
+      _autoServerMode = savedAuto ?? _settings.autoSelectOnConnect;
       _favorites = savedFavorites.toSet();
       if (rawSettings != null) {
         try {
@@ -5948,7 +5967,9 @@ del "%~f0"
     // Перед подключением выбираем самый быстрый сервер. Тест гоняем только
     // если задержки ещё не измерены: гонять его на каждое нажатие — это
     // лишние секунды ожидания там, где цифры уже есть.
-    if (_settings.autoSelectOnConnect && _servers.length > 1) {
+    // Сервер выбирает приложение только в режиме «Авто». Если человек указал
+    // сервер сам, его выбор и есть ответ — перевыбирать нечего.
+    if (_autoServerMode && _settings.autoSelectOnConnect && _servers.length > 1) {
       final measured = _servers.where((s) => _latencyMs.containsKey(s.outbound['tag'])).length;
       if (measured < _servers.length) {
         _appendLog(t('log.autoSelectBeforeConnect'));
@@ -6271,6 +6292,36 @@ del "%~f0"
     await _restoreSystemProxy();
     _appendLog(t('log.coreStopped'));
     if (mounted) setState(() => _statsText = "");
+  }
+
+  /// Нажатие на сервер в списке — это решение человека, и с этой минуты
+  /// сервер выбирает он. Флаг снимается ЗДЕСЬ, а не внутри `_switchServer`:
+  /// туда же приходят автовыбор и проверка связи, и они ручным выбором не
+  /// являются.
+  Future<void> _pickServerManually(ParsedServer server) async {
+    if (_autoServerMode) {
+      setState(() => _autoServerMode = false);
+      await _saveAutoServerMode();
+      _appendLog(t('log.manualModeOn'));
+    }
+    await _switchServer(server);
+  }
+
+  /// Строка «Авто»: выбор возвращается приложению.
+  Future<void> _enableAutoServerMode() async {
+    if (!_autoServerMode) {
+      setState(() => _autoServerMode = true);
+      await _saveAutoServerMode();
+      _appendLog(t('log.autoModeOn'));
+    }
+    // Применяем сразу. Иначе «Авто» выглядит включённым, а работает прежний
+    // сервер, и понять, сделало ли нажатие хоть что-нибудь, нельзя.
+    if (_servers.isNotEmpty) await _autoSelectBest();
+  }
+
+  Future<void> _saveAutoServerMode() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_autoServerPrefsKey, _autoServerMode);
   }
 
   Future<void> _switchServer(ParsedServer newServer) async {
@@ -7337,6 +7388,10 @@ del "%~f0"
     if (minutes <= 0) return;
     _autoSelectTimer = Timer.periodic(Duration(minutes: minutes), (_) {
       if (_servers.isEmpty || _testingLatency) return;
+      // В ручном режиме молчим совсем. Переключение по расписанию рвёт живые
+      // соединения, и делать это с сервером, который человек выбрал сам, —
+      // значит отменять его решение каждые пятнадцать минут.
+      if (!_autoServerMode) return;
       _appendLog(tp('log.autoSelectScheduled', {'min': minutes}));
       _autoSelectBest(silent: true);
     });
@@ -7930,13 +7985,44 @@ del "%~f0"
                     return Center(child: Text(t('common.notFound')));
                   }
                   return ListView.builder(
-                    itemCount: visible.length,
+                    // +1 — строка «Авто» сверху. Режим выбирается тем же
+                    // списком, что и сервер: это один вопрос («кто выбирает»),
+                    // и разносить его по разным местам экрана незачем.
+                    itemCount: visible.length + 1,
                     itemBuilder: (context, i) {
-                      final s = visible[i];
+                      if (i == 0) {
+                        final scheme = Theme.of(context).colorScheme;
+                        return ListTile(
+                          dense: true,
+                          selected: _autoServerMode,
+                          selectedTileColor: scheme.primary.withValues(alpha: 0.15),
+                          leading: Icon(Icons.auto_awesome,
+                              size: 20,
+                              color: _autoServerMode ? scheme.primary : null),
+                          title: Text(t('servers.autoMode'),
+                              style: TextStyle(
+                                  fontWeight: _autoServerMode
+                                      ? FontWeight.bold
+                                      : FontWeight.normal)),
+                          subtitle: Text(t('servers.autoHint'),
+                              style: const TextStyle(fontSize: 11)),
+                          trailing: _autoServerMode
+                              ? Icon(Icons.check, size: 18, color: scheme.primary)
+                              : null,
+                          onTap: _enableAutoServerMode,
+                        );
+                      }
+                      final s = visible[i - 1];
                       final tag = s.outbound['tag'] as String;
                       final ms = _latencyMs[tag];
                       final tested = _latencyMs.containsKey(tag);
-                      final selected = _selectedServer?.outbound['tag'] == tag;
+                      // В режиме «Авто» галочка стоит на строке «Авто», а
+                      // сервер лишь подсвечен как текущий — но не как выбор
+                      // человека. Иначе выделенными выглядели бы обе строки,
+                      // и было бы непонятно, что вообще решает.
+                      final selected =
+                          !_autoServerMode && _selectedServer?.outbound['tag'] == tag;
+                      final current = _selectedServer?.outbound['tag'] == tag;
                       final favorite = _favorites.contains(s.name);
 
                       final Widget trailing;
@@ -7985,13 +8071,16 @@ del "%~f0"
                         ),
                         title: Text(s.name,
                             style: TextStyle(
-                                fontWeight: selected ? FontWeight.bold : FontWeight.normal)),
+                                // Жирным — сервер, который сейчас в работе,
+                                // даже если его выбрало приложение: видеть,
+                                // через кого идёт трафик, нужно в любом режиме.
+                                fontWeight: current ? FontWeight.bold : FontWeight.normal)),
                         subtitle: Text(
                           s.engine == 'xray' ? '${s.protocol} · Xray' : s.protocol,
                           style: const TextStyle(fontSize: 11),
                         ),
                         trailing: trailing,
-                        onTap: () => _switchServer(s),
+                        onTap: () => _pickServerManually(s),
                         // Долгое нажатие — QR со ссылкой сервера: обычный
                         // способ перекинуть конфиг на телефон, не пересылая
                         // себе ссылку через мессенджер.

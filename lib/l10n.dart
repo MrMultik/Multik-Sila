@@ -1644,6 +1644,19 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'Shutdown is taking too long — exiting, leftovers will be cleaned on next start',
   },
   'log.switching': {'ru': 'Переключаюсь на {name}...', 'en': 'Switching to {name}...'},
+  'servers.autoMode': {'ru': 'Авто', 'en': 'Auto'},
+  'servers.autoHint': {
+    'ru': 'сервер выбирает приложение — самый быстрый',
+    'en': 'the app picks the server — whichever is fastest',
+  },
+  'log.manualModeOn': {
+    'ru': 'Сервер выбираете вы — автовыбор выключен',
+    'en': 'You choose the server now — auto-select is off',
+  },
+  'log.autoModeOn': {
+    'ru': 'Режим «Авто»: сервер снова выбирает приложение',
+    'en': 'Auto mode: the app picks the server again',
+  },
   'log.serverPicked': {
     'ru': 'Выбран сервер {name} — нажмите щит, чтобы подключиться',
     'en': 'Server {name} selected — press the shield to connect',
