@@ -4438,8 +4438,16 @@ del "%~f0"
           const SizedBox(width: 8),
           Expanded(
             child: OutlinedButton.icon(
-              onPressed:
-                  _servers.isEmpty || _testingLatency ? null : _autoSelectBest,
+              // Кнопка ВКЛЮЧАЕТ режим «Авто», а не подбирает сервер разово.
+              //
+              // Иначе на экране два элемента со словом «Авто», делающих
+              // разное: строка списка меняет режим, кнопка — подбирает один
+              // раз и оставляет ручной. Человек жмёт кнопку, видит выбор
+              // сервера и считает, что автовыбор вернулся, — а он через
+              // минуту снова молчит.
+              onPressed: _servers.isEmpty || _testingLatency
+                  ? null
+                  : _enableAutoServerMode,
               icon: const Icon(Icons.auto_awesome, size: 18),
               label: Text(t('servers.auto')),
             ),
