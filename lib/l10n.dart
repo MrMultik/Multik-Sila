@@ -1740,6 +1740,14 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Автовыбор: пропущено серверов без связи — {n}',
     'en': 'Auto-select: {n} unreachable server(s) skipped',
   },
+  'log.healthNoResolve': {
+    'ru': 'Сервер возит трафик, но НЕ разрешает имена — почта и домены из обхода через него не работают',
+    'en': 'The server carries traffic but does not resolve names — mail and bypassed domains will not work through it',
+  },
+  'log.probeCoreFailed': {
+    'ru': 'Не удалось подготовить копию ядра для замера: {e}',
+    'en': 'Could not prepare the core copy used for measuring: {e}',
+  },
   'log.subFormat': {
     'ru': 'Подписка разобрана как {format}: серверов {count}, пропущено {skipped}',
     'en': 'Subscription parsed as {format}: {count} servers, {skipped} skipped',

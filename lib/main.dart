@@ -4634,6 +4634,48 @@ del "%~f0"
 
   String get _singBoxPath => '$_appDir${Platform.pathSeparator}sing-box.exe';
 
+  /// Отдельная КОПИЯ ядра для пробников теста задержки.
+  ///
+  /// Зачем копия, а не тот же файл. Под TUN `auto_route` заворачивает в
+  /// туннель трафик всех процессов машины. Ядро исключает из туннеля само
+  /// себя, но про другие копии того же файла не знает — а пробники это ровно
+  /// они. Их коннекты до серверов уходили в измеряемый туннель, и замер
+  /// показывал не задержку до сервера, а «сервер через сервер»: 620–893 мс
+  /// вместо 100–170, а часто просто таймаут. Дальше автовыбор верил цифрам и
+  /// рвал живое соединение.
+  ///
+  /// Исключить `sing-box.exe` по пути НЕЛЬЗЯ — пробовали, и это кладёт всё:
+  /// под правило попадает и рабочее ядро, его трафик уходит мимо туннеля, и
+  /// наружу не выходит ничего (проверено на живой машине). Правило по пути
+  /// не различает копии одного файла — значит копии нужны разные. Пробники
+  /// живут в подпапке, и в обход выведена ОНА, а рабочее ядро не задето.
+  String get _probeCorePath =>
+      '$_workDir${Platform.pathSeparator}probe${Platform.pathSeparator}sing-box.exe';
+
+  /// Готовит копию ядра для пробников. Возвращает путь к ней, а при неудаче —
+  /// путь к обычному ядру: замер с искажённой цифрой всё же лучше, чем
+  /// отсутствие замера.
+  Future<String> _ensureProbeCore() async {
+    try {
+      final src = File(_singBoxPath);
+      if (!src.existsSync()) return _singBoxPath;
+      final dst = File(_probeCorePath);
+      // Ядро обновляется само, поэтому копию сверяем по размеру и времени:
+      // устаревшая копия — это замер другой версией, чем работает туннель.
+      if (dst.existsSync()) {
+        final s = src.statSync();
+        final d = dst.statSync();
+        if (s.size == d.size && !s.modified.isAfter(d.modified)) return dst.path;
+      }
+      await dst.parent.create(recursive: true);
+      await src.copy(dst.path);
+      return dst.path;
+    } catch (e) {
+      _appendLog(tp('log.probeCoreFailed', {'e': e}));
+      return _singBoxPath;
+    }
+  }
+
   String get _configPath => '$_workDir${Platform.pathSeparator}config.json';
 
   String get _xrayPath => '$_appDir${Platform.pathSeparator}xray.exe';
@@ -5583,9 +5625,18 @@ del "%~f0"
           // Петля здесь невозможна и без правила: мосты работают внутри
           // нашего же процесса, а он исключён из туннеля целиком
           // (`addDisallowedApplication` в openTun).
+          // Вместе с мостом Xray выводим и КОПИЮ ядра, которой работают
+          // пробники теста задержки (см. _probeCorePath). Без этого замер
+          // идёт через измеряемый же туннель и врёт втрое, а автовыбор потом
+          // рвёт живое соединение по выдуманным цифрам.
+          //
+          // Здесь именно путь копии, а не `_singBoxPath`: правило по пути не
+          // отличает копии одного файла, и указание рабочего ядра увело бы
+          // мимо туннеля ЕГО СОБСТВЕННЫЙ трафик — проверено, наружу тогда не
+          // выходит ничего.
           if (Env.coreRunsAsProcess)
             {
-              "process_path": [_xrayPath],
+              "process_path": [_xrayPath, _probeCorePath],
               "outbound": "direct",
             },
           if (bypassCidrs.isNotEmpty)
@@ -6712,7 +6763,8 @@ del "%~f0"
 
     Process? probe;
     try {
-      probe = await Process.start(_singBoxPath, ['run', '-c', probeConfigPath]);
+      probe = await Process.start(
+          await _ensureProbeCore(), ['run', '-c', probeConfigPath]);
       _probeProcesses.add(probe);
       _watchProbeErrors(probe, 'sing-box');
       if (!await _waitForPort(probeApiPort)) {
@@ -6787,7 +6839,8 @@ del "%~f0"
 
     Process? probe;
     try {
-      probe = await Process.start(_singBoxPath, ['run', '-c', probeConfigPath]);
+      probe = await Process.start(
+          await _ensureProbeCore(), ['run', '-c', probeConfigPath]);
       _probeProcesses.add(probe);
       _watchProbeErrors(probe, 'sing-box');
       if (!await _waitForPort(probeApiPort)) {
@@ -7331,10 +7384,23 @@ del "%~f0"
             .timeout(timeout);
         // 200 — прошло. Недоступный адрес Clash отдаёт как ошибку, и это
         // ровно то, что мы ловим.
-        return resp.statusCode == 200;
+        if (resp.statusCode != 200) return false;
       } catch (_) {
         return false;
       }
+      // HTTP прошёл — но этого мало, и вот почему.
+      //
+      // Сервер может исправно возить веб и при этом НЕ разрешать имена. Так
+      // ведёт себя trojan поверх gRPC у пользователя: страницы открываются
+      // (FakeIP выдаёт адрес, никого не спрашивая), а всё, чему нужен
+      // настоящий адрес, — корпоративная почта, домены из обхода «РФ
+      // напрямую», SRV-записи автообнаружения — не работает. Замерено с
+      // исключённым кэшем: 0 успешных разрешений из 4 против 4 из 4 у
+      // соседнего сервера, при живом HTTP на обоих.
+      //
+      // Пока проверка спрашивала только HTTP, такой сервер считался
+      // здоровым, приложение молчало, и человек искал причину сам.
+      return _probeResolve();
     }
 
     // У Xray Clash API нет вообще — идём через локальный порт соединения.
@@ -7350,6 +7416,48 @@ del "%~f0"
       return false;
     } finally {
       client.close(force: true);
+    }
+  }
+
+  /// Проверяет, разрешает ли текущий сервер имена. `true` — разрешает.
+  ///
+  /// Запрос ОБЯЗАН быть типа TXT, а не A, и это главное здесь. FakeIP
+  /// перехватывает только A и AAAA — и отвечает на них выдуманным адресом,
+  /// никого не спрашивая. То есть проверка типом A не проверяет НИЧЕГО: она
+  /// одинаково успешна и на исправном сервере, и на сломанном. Я на это уже
+  /// наступил: первая версия спрашивала A и показала «здоров» для обоих,
+  /// включая тот, на котором у человека не работала почта. TXT под правило
+  /// FakeIP не подпадает и уходит настоящим путём — тем самым, которым
+  /// разрешаются домены из обхода «РФ напрямую» и адреса почты.
+  ///
+  /// Имя каждый раз НОВОЕ — иначе ответ возьмётся из кэша, и сломанный
+  /// сервер снова выглядит рабочим. На этом я тоже попался при разборе:
+  /// сервер показал три успеха подряд после того, как соседний уже положил
+  /// запись в кэш.
+  ///
+  /// Несуществующее имя не помеха: важен не ответ, а сам факт, что он дошёл.
+  /// NXDOMAIN приходит с секцией Authority — этого достаточно.
+  ///
+  /// Проверено на четырёх серверах подписки: сломанный дал 0 успехов из 3,
+  /// три исправных — 3 из 3.
+  Future<bool> _probeResolve() async {
+    final host = Uri.tryParse(_settings.healthCheckUrl)?.host;
+    if (host == null || host.isEmpty) return true;
+    final label = 'p${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
+    try {
+      final resp = await http
+          .get(Uri.parse('$_clashApiBase/dns/query?name=$label.$host&type=TXT'))
+          .timeout(Duration(milliseconds: _settings.latencyTimeoutMs + 1000));
+      if (resp.statusCode != 200) return false;
+      // Ядро отвечает 200 и на неудачу, кладя причину в `message` — поэтому
+      // смотрим на содержимое, а не на код.
+      final body = resp.body;
+      final ok = body.contains('"Answer"') || body.contains('"Authority"');
+      if (!ok) _appendLog(t('log.healthNoResolve'));
+      return ok;
+    } catch (_) {
+      _appendLog(t('log.healthNoResolve'));
+      return false;
     }
   }
 
