@@ -7027,6 +7027,17 @@ del "%~f0"
   static const int _xrayProbeBasePort = 17400;
 
   Future<void> _testXrayLatencies(List<ParsedServer> servers) async {
+    // Адреса запекаем и здесь, а не только в мостах.
+    //
+    // Замер строит СВОЙ конфиг из тех же outbound-ов, и первая версия правки
+    // это место пропустила: соединение через мост уже работало, а список
+    // серверов продолжал показывать красный треугольник — потому что пробник
+    // по-прежнему ходил по имени и под TUN его не разрешал. Половина починки
+    // выглядит хуже целой: связь есть, а приложение говорит, что сервера нет.
+    for (final s in servers) {
+      await _bakeXrayServerIp(s.outbound);
+    }
+
     final probeConfigPath = '$_workDir${Platform.pathSeparator}xray_probe.json';
     final ports = <String, int>{
       for (var i = 0; i < servers.length; i++)
@@ -7133,6 +7144,10 @@ del "%~f0"
 
     for (final server in servers) {
       final tag = server.outbound['tag'] as String;
+      // Тот же запечённый адрес, что и в остальных путях: под TUN имя
+      // сервера может не разрешаться, и тогда пробник врёт «недоступен» о
+      // вполне живом сервере.
+      await _bakeXrayServerIp(server.outbound);
       final config = {
         "log": {"loglevel": "warning"},
         "inbounds": [
