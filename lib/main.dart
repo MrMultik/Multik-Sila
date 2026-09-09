@@ -4959,6 +4959,65 @@ del "%~f0"
     }
   }
 
+  /// То же запекание адреса, но для outbound-а Xray — то есть для мостов.
+  ///
+  /// Без него мосты остаются единственным местом, которое ходит к серверу ПО
+  /// ИМЕНИ, и попадают в ту самую петлю: чтобы поднять прокси, нужен адрес
+  /// хоста; чтобы узнать адрес, нужен DNS; а DNS под TUN идёт через прокси.
+  /// Для sing-box это вылечили давно, на мосты не распространили.
+  ///
+  /// Наружу выходило так: xhttp-серверы «подняты, но наружу не выходит», а
+  /// все остальные работают. Замерено в момент поломки: `fill.<...>` не
+  /// резолвится вовсе (nslookup — таймаут), при этом тот же сервер по IP
+  /// отвечает за 16 мс; в конфиге sing-box стоит адрес, в конфиге моста —
+  /// имя. Оба моста давали 0 успехов из 6 с таймаутами по 11–20 секунд.
+  ///
+  /// Имя не теряется: оно нужно REALITY и TLS для SNI, и проставляется в
+  /// `serverName` перед подменой — ровно по той же причине, что и у sing-box.
+  Future<void> _bakeXrayServerIp(Map<String, dynamic> outbound) async {
+    final host = _xrayOutboundHost(outbound);
+    if (host == null || host.isEmpty) return;
+    if (RegExp(r'^[\d.]+$').hasMatch(host) || host.contains(':')) return;
+
+    if (!_hostIpCache.containsKey(host)) {
+      try {
+        final addrs = await InternetAddress.lookup(host, type: InternetAddressType.IPv4)
+            .timeout(const Duration(seconds: 5));
+        _hostIpCache[host] = addrs.isEmpty ? null : addrs.first.address;
+      } catch (_) {
+        _hostIpCache[host] = null;
+      }
+    }
+    final ip = _hostIpCache[host];
+    if (ip == null) {
+      _appendLog(tp('log.resolveBypassFailed', {'host': host}));
+      return;
+    }
+
+    // SNI — ДО подмены адреса. Для xhttp+REALITY имя лежит в realitySettings,
+    // для обычного TLS — в tlsSettings; заполняем то, что есть.
+    final stream = outbound['streamSettings'];
+    if (stream is Map) {
+      for (final key in const ['realitySettings', 'tlsSettings']) {
+        final block = stream[key];
+        if (block is Map) {
+          final sni = block['serverName'];
+          if (sni is! String || sni.isEmpty) block['serverName'] = host;
+        }
+      }
+    }
+
+    final settings = outbound['settings'];
+    if (settings is! Map) return;
+    for (final key in const ['vnext', 'servers']) {
+      final list = settings[key];
+      if (list is List && list.isNotEmpty && list.first is Map) {
+        (list.first as Map)['address'] = ip;
+        return;
+      }
+    }
+  }
+
   // Серверы с engine == 'xray' (xhttp-транспорт) sing-box поднять сам не может —
   // в обычном режиме они просто не попадают в его конфиг (см. _startXrayCore).
   // В TUN-режиме для них добавляется bridge-outbound на локальный Xray.
@@ -5721,6 +5780,13 @@ del "%~f0"
   }
 
   Future<void> _writeXrayConfig(ParsedServer server, {required int port, required bool isBridge, required String configPath}) async {
+    // Адрес сервера — заранее отрезолвленным IP, а не именем. Под TUN спросить
+    // DNS в момент подключения уже нельзя, запрос уедет в туннель (см.
+    // _bakeXrayServerIp). Делаем это ДО сборки config: значения копируются в
+    // него ниже, и правка после этой строки в готовый JSON не попадёт — на
+    // том же месте в `_writeConfig` однажды уже наступили.
+    await _bakeXrayServerIp(server.outbound);
+
     final config = {
       "log": {"loglevel": "warning"},
       "inbounds": [
