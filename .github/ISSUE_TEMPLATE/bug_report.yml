@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in the app does not work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. English or Russian are both fine.
+
+        **Questions about a subscription, payment or renewal** go to
+        [@Sila_Multik_bot](https://t.me/Sila_Multik_bot) — they can't be solved here.
+
+        ⚠️ **Never paste a server link or a subscription URL.** They work like a password:
+        anyone who sees them can use your subscription.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        I switched TUN on and pressed the shield. It connected, but websites don't open.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: Shown in **Settings → About**.
+      placeholder: "1.0.10"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows 11
+        - Windows 10
+        - Android
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Connection mode
+      description: On Android the tunnel is always system-wide — pick the last option.
+      options:
+        - Regular (system proxy)
+        - TUN
+        - Android / not sure
+    validations:
+      required: true
+  - type: input
+    id: protocol
+    attributes:
+      label: Server type
+      description: The protocol shown next to the server, not the link itself.
+      placeholder: "VLESS REALITY, VLESS xhttp, Trojan, Hysteria2…"
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        Open **Core log** (the button in the top bar), press **Copy** and paste it here.
+        Look it over first and remove anything you consider private.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Screenshots, whether it worked in an earlier version, other VPN apps running at the same time.

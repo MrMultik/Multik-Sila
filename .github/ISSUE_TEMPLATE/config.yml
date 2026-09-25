@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Subscription, payment or renewal
+    url: https://t.me/Sila_Multik_bot
+    about: Subscriptions and support for our servers are handled in the Telegram bot, not here.

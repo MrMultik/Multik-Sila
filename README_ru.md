@@ -22,6 +22,7 @@
   <a href="https://github.com/MrMultik/Multik-Sila/issues"><img src="https://img.shields.io/github/issues/MrMultik/Multik-Sila?style=flat-square&color=7C4DFF&label=%D0%B2%D0%BE%D0%BF%D1%80%D0%BE%D1%81%D0%BE%D0%B2" alt="Вопросы"></a>
   <a href="https://github.com/MrMultik/Multik-Sila/commits/main"><img src="https://img.shields.io/github/last-commit/MrMultik/Multik-Sila?style=flat-square&color=7C4DFF&label=%D0%BE%D0%B1%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD%D0%BE" alt="Последнее обновление"></a>
   <img src="https://img.shields.io/badge/%D0%BF%D0%BB%D0%B0%D1%82%D1%84%D0%BE%D1%80%D0%BC%D1%8B-Windows%20%7C%20Android-7C4DFF?style=flat-square" alt="Платформы">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/MrMultik/Multik-Sila?style=flat-square&color=7C4DFF&label=%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F" alt="Лицензия"></a>
 </p>
 
 <p align="center">
@@ -179,6 +180,14 @@ flutter build apk --release --split-per-abi
 Multik Sila работает на [sing-box](https://github.com/SagerNet/sing-box) и
 [Xray-core](https://github.com/XTLS/Xray-core) — самостоятельных проектах со
 своими лицензиями.
+
+## Лицензия
+
+Multik Sila — свободная программа, распространяется по лицензии
+[GNU General Public License v3.0](LICENSE).
+
+Рисунок в `docs/assets` — © MrMultik, под эту лицензию не подпадает:
+использовать его без разрешения нельзя.
 
 <p align="center">
   <a href="https://t.me/Sila_Multik_bot"><img src="https://img.shields.io/badge/%D0%95%D1%81%D1%82%D1%8C%20%D0%B2%D0%BE%D0%BF%D1%80%D0%BE%D1%81%D1%8B%3F-%D0%9F%D0%B8%D1%88%D0%B8%D1%82%D0%B5%20%D0%B2%20Telegram-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Вопросы — в Telegram"></a>

@@ -22,6 +22,7 @@
 # ASCII only: PowerShell 5.1 reads a BOM-less .ps1 as ANSI and chokes on Cyrillic.
 param(
   [switch]$Publish,          # without it: build and package only, no upload
+  [string]$Notes,            # release notes written from tools\release_notes.md
   [string]$Root = "C:\dev\proxy_app_test"
 )
 
@@ -37,6 +38,14 @@ $pub = [regex]::Match((Get-Content "pubspec.yaml" -Raw), '(?m)^version:\s*([\d.]
 $dart = [regex]::Match((Get-Content "lib\main.dart" -Raw -Encoding UTF8), "kAppVersion\s*=\s*'([^']+)'").Groups[1].Value
 Write-Host "version: iss=$ver pubspec=$pub kAppVersion=$dart"
 if ($ver -ne $pub -or $ver -ne $dart) { throw "versions disagree - fix before releasing" }
+
+# Notes are checked before the build, not after it: finding a forgotten TODO
+# only at upload time would cost a full build for nothing.
+if ($Notes) {
+  if (-not (Test-Path $Notes)) { throw "notes file not found: $Notes" }
+  $notesText = [IO.File]::ReadAllText((Resolve-Path $Notes), [Text.Encoding]::UTF8).Replace("{{VERSION}}", $ver)
+  if ($notesText -match "TODO") { throw "notes still contain TODO - fill them in first" }
+}
 
 $rel = "build\windows\x64\runner\Release"
 
@@ -96,10 +105,20 @@ $tag = "v$ver"
 Write-Host "publishing $tag"
 & git tag -f $tag | Out-Null
 & git push origin $tag --force | Out-Null
+# Without a notes file GitHub lists the commits, which is fine for a quick fix
+# but says nothing to people who just want to know what changed for them.
+$notesArgs = @("--generate-notes")
+if ($Notes) {
+  # UTF-8 without a BOM: GitHub would show a BOM as a stray character.
+  $notesFile = "installer\output\release-notes-$ver.md"
+  [IO.File]::WriteAllText((Join-Path $Root $notesFile), $notesText, (New-Object Text.UTF8Encoding($false)))
+  $notesArgs = @("--notes-file", $notesFile)
+}
 $exists = & $gh release view $tag --json tagName 2>$null
 if ($LASTEXITCODE -eq 0) {
   & $gh release upload $tag "installer\output\MultikSila-$ver-setup.exe" $zip --clobber
+  if ($Notes) { & $gh release edit $tag --notes-file $notesFile }
 } else {
-  & $gh release create $tag "installer\output\MultikSila-$ver-setup.exe" $zip --title "Multik Sila $ver" --generate-notes
+  & $gh release create $tag "installer\output\MultikSila-$ver-setup.exe" $zip --title "Multik Sila $ver" @notesArgs
 }
 Write-Host "done: https://github.com/MrMultik/Multik-Sila/releases/tag/$tag"

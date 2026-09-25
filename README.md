@@ -22,6 +22,7 @@
   <a href="https://github.com/MrMultik/Multik-Sila/issues"><img src="https://img.shields.io/github/issues/MrMultik/Multik-Sila?style=flat-square&color=7C4DFF" alt="Issues"></a>
   <a href="https://github.com/MrMultik/Multik-Sila/commits/main"><img src="https://img.shields.io/github/last-commit/MrMultik/Multik-Sila?style=flat-square&color=7C4DFF" alt="Last commit"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Android-7C4DFF?style=flat-square" alt="Platforms">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/MrMultik/Multik-Sila?style=flat-square&color=7C4DFF" alt="License"></a>
 </p>
 
 <p align="center">
@@ -182,6 +183,13 @@ flutter build apk --release --split-per-abi
 Multik Sila stands on [sing-box](https://github.com/SagerNet/sing-box) and
 [Xray-core](https://github.com/XTLS/Xray-core) — independent projects with their own
 licences.
+
+## License
+
+Multik Sila is free software, released under the [GNU General Public License v3.0](LICENSE).
+
+The artwork in `docs/assets` is © MrMultik and is not covered by that licence —
+please don't reuse it without permission.
 
 <p align="center">
   <a href="https://t.me/Sila_Multik_bot"><img src="https://img.shields.io/badge/Questions%3F-Ask%20in%20Telegram-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Ask in Telegram"></a>
