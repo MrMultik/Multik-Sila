@@ -1061,6 +1061,7 @@ const Map<String, Map<String, String>> _strings = {
   'unit.kb': {'ru': 'КБ', 'en': 'KB'},
   'unit.mb': {'ru': 'МБ', 'en': 'MB'},
   'unit.gb': {'ru': 'ГБ', 'en': 'GB'},
+  'unit.tb': {'ru': 'ТБ', 'en': 'TB'},
   'unit.s': {'ru': 'с', 'en': 's'},
   'unit.m': {'ru': 'м', 'en': 'm'},
 

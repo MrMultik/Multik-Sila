@@ -354,6 +354,25 @@ void main() async {
   runApp(const MyApp());
 }
 
+/// Объём в байтах с единицей по величине: Б, КБ, МБ, ГБ, ТБ.
+///
+/// Одна функция на всё приложение. Раньше их было три, и у главной потолком
+/// были мегабайты: израсходованный трафик подписки выходил как
+/// «333509.4 МБ» вместо «325.7 ГБ».
+String formatBytes(num bytes) {
+  if (bytes < 1024) return '${bytes.round()} ${t('unit.b')}';
+  const units = ['unit.kb', 'unit.mb', 'unit.gb', 'unit.tb'];
+  var value = bytes / 1024;
+  var i = 0;
+  // Порог 1023.95, а не 1024: всё, что выше, при округлении до десятых
+  // превратилось бы в «1024.0 КБ» вместо «1.0 МБ».
+  while (value >= 1023.95 && i < units.length - 1) {
+    value /= 1024;
+    i++;
+  }
+  return '${value.toStringAsFixed(1)} ${t(units[i])}';
+}
+
 class ParsedServer {
   final String name;
   final String protocol;
@@ -2174,7 +2193,14 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   final Map<String, List<ParsedServer>> _serverCache = {};
 
   List<ParsedServer> _servers = [];
-  String _subStatus = "";
+
+  /// Строка состояния подписки под выбором профиля. null — сказать нечего.
+  ///
+  /// Хранится функция, а не готовый текст: перевод делается при отрисовке.
+  /// Раньше здесь лежала уже переведённая строка, и после смены языка она
+  /// оставалась на прежнем до следующей загрузки подписки — «Распознано
+  /// серверов: 9 (список ссылок)» посреди английского интерфейса.
+  String Function()? _subStatus;
   ParsedServer? _selectedServer;
 
   // ключ — тег outbound'а сервера; отсутствие ключа значит "ещё не тестировали",
@@ -2206,8 +2232,13 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     _verifyConnection();
   }
 
-  /// Что показала проверка соединения. Пусто — не проверяли.
-  String _connectionCheck = '';
+  /// Что показала проверка соединения: КЛЮЧ строки (`check.*`), а не текст.
+  /// Пусто — не проверяли.
+  ///
+  /// Ключ, потому что перевод обязан делаться при отрисовке. Готовый текст
+  /// застывал на языке момента проверки: после переключения на английский
+  /// под «Protected» так и висело «Проверено: через сервер выходит».
+  String _connectionCheckKey = '';
 
   /// Прошла ли последняя проверка. Нужно только для цвета подписи.
   bool _connectionOk = false;
@@ -2227,22 +2258,23 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   /// его выбор без спроса — ровно то поведение, на которое он уже жаловался.
   Future<void> _verifyConnection() async {
     if (_runningEngineValue == null) {
-      if (mounted) setState(() => _connectionCheck = '');
+      if (mounted) setState(() => _connectionCheckKey = '');
       return;
     }
     if (mounted) {
       setState(() {
-        _connectionCheck = t('check.running');
+        _connectionCheckKey = 'check.running';
         _connectionOk = false;
       });
     }
     final ok = await _probeActiveServer();
     if (!mounted || _runningEngineValue == null) return;
+    final key = ok ? 'check.ok' : 'check.failed';
     setState(() {
       _connectionOk = ok;
-      _connectionCheck = ok ? t('check.ok') : t('check.failed');
+      _connectionCheckKey = key;
     });
-    _appendLog(ok ? t('check.ok') : t('check.failed'));
+    _appendLog(t(key));
   }
 
   String? _runningEngineValue;
@@ -2259,7 +2291,9 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   bool get _coreIsLive =>
       Env.coreRunsAsProcess ? _coreProcess != null : _runningEngine != null;
   String _log = "";
-  String _statsText = "";
+  // Функция, а не готовый текст — по той же причине, что у `_subStatus`:
+  // перевод при отрисовке, иначе строка застывает на прежнем языке.
+  String Function()? _statsText;
   Timer? _statsTimer;
 
   // Сколько опросов подряд не удались. Один промах — заминка (ядро только
@@ -2491,6 +2525,16 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     // русским. Пересобираем на каждое изменение языка, а не только при
     // смене состояния ядра.
     appLang.addListener(_refreshTrayMenu);
+    appLang.addListener(_rebuildForLanguage);
+  }
+
+  // Язык меняется на экране настроек, поверх этой страницы, и сама она от
+  // этого не перестраивается: MaterialApp получает `home` константой.
+  // Без перестройки строки, которые переводятся при отрисовке, остались бы
+  // на прежнем языке до первого постороннего setState — например, если
+  // закрыть настройки без «Сохранить».
+  void _rebuildForLanguage() {
+    if (mounted) setState(() {});
   }
 
   // Пункт «Подключить/Отключить» должен отражать текущее состояние, поэтому
@@ -3817,7 +3861,7 @@ del "%~f0"
     setState(() {
       _profiles = profiles;
       _activeProfile = active;
-      if (active == null) _subStatus = t('profile.addNone');
+      if (active == null) _subStatus = () => t('profile.addNone');
     });
 
     if (raw == null && profiles.isNotEmpty) {
@@ -3842,7 +3886,7 @@ del "%~f0"
   }
 
   Future<void> _loadSubscription(SubscriptionProfile profile) async {
-    setState(() => _subStatus = "${t('sub.loading')} \"${profile.name}\"...");
+    setState(() => _subStatus = () => "${t('sub.loading')} \"${profile.name}\"...");
 
     // Локальный профиль: содержимое лежит файлом рядом с .exe, сети не нужно.
     // Заголовков с квотой у него нет по определению — просто читаем и парсим.
@@ -3852,7 +3896,7 @@ del "%~f0"
         _applySubscriptionContent(profile, content);
       } catch (e) {
         if (_activeProfile?.id == profile.id) {
-          setState(() => _subStatus = '${t('sub.readFail')}: $e');
+          setState(() => _subStatus = () => '${t('sub.readFail')}: $e');
         }
       }
       return;
@@ -3871,7 +3915,7 @@ del "%~f0"
         (uri.scheme != 'http' && uri.scheme != 'https') ||
         uri.host.isEmpty) {
       if (_activeProfile?.id == profile.id) {
-        setState(() => _subStatus = t('sub.notAUrl'));
+        setState(() => _subStatus = () => t('sub.notAUrl'));
       }
       return;
     }
@@ -3901,7 +3945,7 @@ del "%~f0"
           }
         }
         if (_activeProfile?.id == profile.id) {
-          setState(() => _subStatus = "${t('sub.httpError')} ${resp.statusCode}");
+          setState(() => _subStatus = () => "${t('sub.httpError')} ${resp.statusCode}");
         }
         return;
       }
@@ -3909,7 +3953,7 @@ del "%~f0"
       await _applySubscriptionResponse(profile, resp);
     } catch (e) {
       if (_activeProfile?.id == profile.id) {
-        setState(() => _subStatus = "${t('sub.error')}: $e");
+        setState(() => _subStatus = () => "${t('sub.error')}: $e");
       }
     }
   }
@@ -3967,7 +4011,7 @@ del "%~f0"
     if (stillUp) {
       _appendLog(t('log.subRevokedStillUp'));
       if (mounted) {
-        setState(() => _subStatus = "${tp('sub.revoked', {'reason': reason})} — "
+        setState(() => _subStatus = () => "${tp('sub.revoked', {'reason': reason})} — "
             "${t('sub.revokedStillUp')}");
       }
       return;
@@ -3981,7 +4025,7 @@ del "%~f0"
       _servers = [];
       _selectedServer = null;
       _latencyMs.clear();
-      _subStatus = tp('sub.revoked', {'reason': reason});
+      _subStatus = () => tp('sub.revoked', {'reason': reason});
     });
   }
 
@@ -3998,17 +4042,19 @@ del "%~f0"
     // ссылке, где расширения нет вовсе, а файл могут назвать как угодно.
     final parsed = <ParsedServer>[];
     int skipped = 0;
-    String format;
+    // Функцией, а не строкой: подпись попадает в `_subStatus` и должна
+    // переводиться при отрисовке, а не застыть на языке момента разбора.
+    String Function() format;
 
     final head = decoded.trimLeft();
     if (head.startsWith('{') || head.startsWith('[')) {
       parsed.addAll(parseSingboxJson(decoded));
-      format = 'sing-box JSON';
+      format = () => 'sing-box JSON';
     } else if (looksLikeClash(decoded)) {
       parsed.addAll(parseClashYaml(decoded));
-      format = 'Clash YAML';
+      format = () => 'Clash YAML';
     } else {
-      format = t('sub.formatLinks');
+      format = () => t('sub.formatLinks');
       final lines = decoded
           .split('\n')
           .map((l) => l.trim())
@@ -4053,14 +4099,15 @@ del "%~f0"
       // тот». Раньше здесь писалось «Распознано: 0 — пропущено: 340», и по
       // этой строке нельзя было понять, что подписка вообще другого вида:
       // выглядело как сломанная подписка, а не как неподдержанный формат.
-      _subStatus = parsed.isEmpty
-          ? t('sub.unknownFormat')
+      final count = parsed.length;
+      _subStatus = count == 0
+          ? () => t('sub.unknownFormat')
           : (skipped > 0
-              ? "${t('sub.parsed')}: ${parsed.length} ($format) — ${t('sub.skipped')}: $skipped"
-              : "${t('sub.parsed')}: ${parsed.length} ($format)");
+              ? () => "${t('sub.parsed')}: $count (${format()}) — ${t('sub.skipped')}: $skipped"
+              : () => "${t('sub.parsed')}: $count (${format()})");
     });
     _appendLog(tp('log.subFormat',
-        {'format': format, 'count': parsed.length, 'skipped': skipped}));
+        {'format': format(), 'count': parsed.length, 'skipped': skipped}));
   }
 
   Future<void> _switchProfile(SubscriptionProfile profile) async {
@@ -4074,8 +4121,9 @@ del "%~f0"
         _servers = cached;
         _selectedServer = cached.isNotEmpty ? cached.first : null;
         _latencyMs.clear();
-        _subStatus = '${t('sub.profile')} "${profile.name}": '
-            '${t('sub.cached')} — ${cached.length}';
+        final count = cached.length;
+        _subStatus = () => '${t('sub.profile')} "${profile.name}": '
+            '${t('sub.cached')} — $count';
       });
     } else {
       setState(() {
@@ -4644,7 +4692,7 @@ del "%~f0"
       _servers = _activeProfile != null ? (_serverCache[_activeProfile!.id] ?? []) : [];
       _selectedServer = _servers.isNotEmpty ? _servers.first : null;
       _latencyMs.clear();
-      if (_activeProfile == null) _subStatus = t('profile.addNone');
+      if (_activeProfile == null) _subStatus = () => t('profile.addNone');
     });
     await _saveProfiles();
 
@@ -6352,7 +6400,7 @@ del "%~f0"
 
     // Опрос уже выключен сеттером `_runningEngine` (у Xray Clash API нет),
     // остаётся только сказать об этом на экране.
-    setState(() => _statsText = tp('stats.xrayNoApi', {'name': server.name}));
+    setState(() => _statsText = () => tp('stats.xrayNoApi', {'name': server.name}));
   }
 
   // Ждём, пока порт реально начнёт принимать соединения — вместо того чтобы
@@ -6471,7 +6519,7 @@ del "%~f0"
       _unhealthy.clear();
       _rescheduleHealthCheck();
       _appendLog(t('log.coreStopped'));
-      if (mounted) setState(() => _statsText = "");
+      if (mounted) setState(() => _statsText = null);
       return;
     }
     _coreProcess?.kill();
@@ -6485,7 +6533,7 @@ del "%~f0"
     _refreshTrayMenu();
     await _restoreSystemProxy();
     _appendLog(t('log.coreStopped'));
-    if (mounted) setState(() => _statsText = "");
+    if (mounted) setState(() => _statsText = null);
   }
 
   /// Нажатие на сервер в списке — это решение человека, и с этой минуты
@@ -6604,7 +6652,7 @@ del "%~f0"
     if (_runningEngine == null) {
       _statsTimer?.cancel();
       _statsTimer = null;
-      if (mounted && _statsText.isNotEmpty) setState(() => _statsText = '');
+      if (mounted && _statsText != null) setState(() => _statsText = null);
       return;
     }
     try {
@@ -6622,14 +6670,14 @@ del "%~f0"
             ? versionResp.statusCode
             : connectionsResp.statusCode;
         if (mounted) {
-          setState(() => _statsText = tp('stats.apiStatus', {'code': code}));
+          setState(() => _statsText = () => tp('stats.apiStatus', {'code': code}));
         }
         return;
       }
       {
         final connectionsJson = jsonDecode(connectionsResp.body);
-        final downloadTotal = connectionsJson['downloadTotal'] ?? 0;
-        final uploadTotal = connectionsJson['uploadTotal'] ?? 0;
+        final num downloadTotal = connectionsJson['downloadTotal'] ?? 0;
+        final num uploadTotal = connectionsJson['uploadTotal'] ?? 0;
         final activeConnections = (connectionsJson['connections'] as List?)?.length ?? 0;
         _statsFails = 0;
         if (!mounted) return;
@@ -6638,8 +6686,8 @@ del "%~f0"
           // Одной строкой, а не четырьмя: имя сервера уже написано под щитом,
           // а четыре строки на низком окне выдавливали переключатель TUN за
           // край и заставляли прокручивать главный экран.
-          _statsText = '${t('stat.connections')}: $activeConnections   '
-              '↓ ${_formatBytes(downloadTotal)}   ↑ ${_formatBytes(uploadTotal)}';
+          _statsText = () => '${t('stat.connections')}: $activeConnections   '
+              '↓ ${formatBytes(downloadTotal)}   ↑ ${formatBytes(uploadTotal)}';
         });
       }
     } catch (e) {
@@ -6649,7 +6697,7 @@ del "%~f0"
       // порядке. Со второго промаха подряд это уже состояние, а не заминка.
       _statsFails++;
       if (_statsFails < 2 || !mounted) return;
-      setState(() => _statsText = tp('stats.apiDown', {'e': e}));
+      setState(() => _statsText = () => tp('stats.apiDown', {'e': e}));
     }
   }
 
@@ -7643,8 +7691,8 @@ del "%~f0"
 
     final parts = <String>[];
     if (p.revoked) parts.add('⚠ ${t('sub.revokedBadge')}');
-    parts.add("${t('sub.used')} ${_formatBytes(p.used)}");
-    if (p.hasQuota) parts.add("${t('sub.of')} ${_formatBytes(p.total)}");
+    parts.add("${t('sub.used')} ${formatBytes(p.used)}");
+    if (p.hasQuota) parts.add("${t('sub.of')} ${formatBytes(p.total)}");
     if (p.hasExpiry) {
       final until = DateTime.fromMillisecondsSinceEpoch(p.expire * 1000);
       final days = until.difference(DateTime.now()).inDays;
@@ -7780,12 +7828,12 @@ del "%~f0"
         //
         // Именно здесь человек читает, в каком он состоянии, и именно здесь
         // раньше стояло обещание, которого никто не проверял.
-        if (running && _connectionCheck.isNotEmpty) ...[
+        if (running && _connectionCheckKey.isNotEmpty) ...[
           SizedBox(height: tight ? 2 : 4),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: Text(
-              _connectionCheck,
+              t(_connectionCheckKey),
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 12,
@@ -7883,18 +7931,12 @@ del "%~f0"
     );
   }
 
-  String _formatBytes(dynamic bytes) {
-    final b = (bytes is int) ? bytes : int.tryParse(bytes.toString()) ?? 0;
-    if (b < 1024) return '$b ${t('unit.b')}';
-    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} ${t('unit.kb')}';
-    return '${(b / (1024 * 1024)).toStringAsFixed(1)} ${t('unit.mb')}';
-  }
-
   @override
   void dispose() {
     windowManager.removeListener(this);
     trayManager.removeListener(this);
     appLang.removeListener(_refreshTrayMenu);
+    appLang.removeListener(_rebuildForLanguage);
     _coreProcess?.kill();
     _xrayProcess?.kill();
     _stopAllXrayBridges();
@@ -8107,7 +8149,7 @@ del "%~f0"
               ],
             ),
             if (_tab == 1) const SizedBox(height: 4),
-            if (_tab == 1) Text(_subStatus.isEmpty ? t('profile.addNone') : _subStatus),
+            if (_tab == 1) Text(_subStatus?.call() ?? t('profile.addNone')),
             if (_tab == 1 && _activeProfile != null) _profileUsage(_activeProfile!),
             // Щит занимает всё свободное место и стоит по центру — это
             // единственное содержимое вкладки, прижимать его к верху незачем.
@@ -8453,7 +8495,7 @@ del "%~f0"
                     ),
                     const SizedBox(width: 14),
                     Expanded(
-                      child: Text(_statsText.isEmpty ? t('home.noData') : _statsText,
+                      child: Text(_statsText?.call() ?? t('home.noData'),
                           style: const TextStyle(fontSize: 12, height: 1.45)),
                     ),
                   ],
@@ -8980,7 +9022,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   // Выбор из готовых вариантов, который просто подставляет значение в поле.
   // Само поле остаётся редактируемым: пресеты — подсказка, а не ограничение.
   bool _pickingDns = false;
-  String? _dnsPickResult;
+  // Функция, а не текст: язык переключается на этом же экране, и готовая
+  // строка осталась бы на прежнем.
+  String Function()? _dnsPickResult;
 
   // Открытый раздел настроек. null — показываем список разделов.
   // Сделано через состояние, а не через Navigator: все поля живут в этом
@@ -9106,7 +9150,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (results.isEmpty) {
       setState(() {
         _pickingDns = false;
-        _dnsPickResult = t('dns.pickNoReply');
+        _dnsPickResult = () => t('dns.pickNoReply');
       });
       return;
     }
@@ -9114,7 +9158,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       target.text = sorted.first.key;
       _pickingDns = false;
-      _dnsPickResult = tp('dns.pickResult', {
+      _dnsPickResult = () => tp('dns.pickResult', {
         'name': sorted.first.key,
         'list': sorted.map((e) => "${e.key}: ${e.value} ${t('common.ms')}").join(', '),
       });
@@ -9521,7 +9565,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           if (_dnsPickResult != null)
             Padding(
               padding: const EdgeInsets.only(top: 6),
-              child: Text(_dnsPickResult!, style: const TextStyle(fontSize: 11, height: 1.35)),
+              child: Text(_dnsPickResult!(), style: const TextStyle(fontSize: 11, height: 1.35)),
             ),
           _presetPicker(t('hint.presetsDirect'), AppSettings.dnsPresets, _dnsDirect),
           _field(_dnsDirect, t('set.dnsDirect'), hint: t('hint.dnsDirect')),
@@ -10094,15 +10138,6 @@ class _StatsScreenState extends State<StatsScreen> {
     }
   }
 
-  String _fmt(num b) {
-    if (b < 1024) return '$b ${t('unit.b')}';
-    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} ${t('unit.kb')}';
-    if (b < 1024 * 1024 * 1024) {
-      return '${(b / (1024 * 1024)).toStringAsFixed(1)} ${t('unit.mb')}';
-    }
-    return '${(b / (1024 * 1024 * 1024)).toStringAsFixed(2)} ${t('unit.gb')}';
-  }
-
   Widget _bigNumber(IconData icon, Color color, String value, String label) => Expanded(
         child: Column(
           children: [
@@ -10142,9 +10177,9 @@ class _StatsScreenState extends State<StatsScreen> {
                     child: Row(
                       children: [
                         _bigNumber(Icons.south, Colors.lightBlueAccent,
-                            '${_fmt(_speedDown)}/${t('unit.s')}', t('stats.speedDown')),
+                            '${formatBytes(_speedDown)}/${t('unit.s')}', t('stats.speedDown')),
                         _bigNumber(Icons.north, Colors.orangeAccent,
-                            '${_fmt(_speedUp)}/${t('unit.s')}', t('stats.speedUp')),
+                            '${formatBytes(_speedUp)}/${t('unit.s')}', t('stats.speedUp')),
                       ],
                     ),
                   ),
@@ -10180,9 +10215,9 @@ class _StatsScreenState extends State<StatsScreen> {
                     padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
                     child: Row(
                       children: [
-                        _bigNumber(Icons.download, scheme.onSurface, _fmt(_down),
+                        _bigNumber(Icons.download, scheme.onSurface, formatBytes(_down),
                             t('stats.totalDown')),
-                        _bigNumber(Icons.upload, scheme.onSurface, _fmt(_up),
+                        _bigNumber(Icons.upload, scheme.onSurface, formatBytes(_up),
                             t('stats.totalUp')),
                         _bigNumber(Icons.link, scheme.onSurface, '$_active',
                             t('stats.active')),
@@ -10202,7 +10237,7 @@ class _StatsScreenState extends State<StatsScreen> {
                       dense: true,
                       contentPadding: EdgeInsets.zero,
                       title: Text(e.$1, maxLines: 1, overflow: TextOverflow.ellipsis),
-                      trailing: Text(_fmt(e.$2), style: const TextStyle(fontSize: 12)),
+                      trailing: Text(formatBytes(e.$2), style: const TextStyle(fontSize: 12)),
                     )),
                 Padding(
                   padding: const EdgeInsets.only(top: 12),
@@ -10328,12 +10363,6 @@ class _ConnectionsScreenState extends State<ConnectionsScreen> {
     } catch (_) {}
   }
 
-  String _fmt(num b) {
-    if (b < 1024) return '$b ${t('unit.b')}';
-    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} ${t('unit.kb')}';
-    return '${(b / (1024 * 1024)).toStringAsFixed(1)} ${t('unit.mb')}';
-  }
-
   String _age(String? start) {
     if (start == null) return '';
     // Имя tm, а не t: t — функция перевода, локальная переменная её перекрыла бы.
@@ -10422,7 +10451,7 @@ class _ConnectionsScreenState extends State<ConnectionsScreen> {
                           mainAxisAlignment: MainAxisAlignment.center,
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            Text('↓ ${_fmt(c['download'] ?? 0)}  ↑ ${_fmt(c['upload'] ?? 0)}',
+                            Text('↓ ${formatBytes(c['download'] ?? 0)}  ↑ ${formatBytes(c['upload'] ?? 0)}',
                                 style: const TextStyle(fontSize: 11)),
                             Text(_age(c['start'] as String?),
                                 style: const TextStyle(fontSize: 10, color: Colors.grey)),
