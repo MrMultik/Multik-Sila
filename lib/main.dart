@@ -3174,6 +3174,24 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // <файл>.new. Подменять работающий бинарь на ходу нельзя, поэтому замена
   // отложена до следующего старта приложения — тот же приём, что с наборами
   // правил. Возвращает true, если обновление подготовлено.
+  /// Любой из конфигов, которые приложение отдаёт Xray: основной
+  /// (`xray_config.json`, обычный режим) или мост TUN (`xray_bridge_*.json`).
+  /// Нужен, чтобы проверить скачанный Xray на ЕГО конфиге, а не на чужом.
+  /// Нет ни одного — значит Xray ещё ни разу не запускался, и проверять
+  /// нечем; тогда обновление принимается по одной лишь версии, как раньше.
+  String? _anyXrayConfigPath() {
+    if (File(_xrayConfigPath).existsSync()) return _xrayConfigPath;
+    try {
+      final bridges = Directory(_workDir)
+          .listSync()
+          .whereType<File>()
+          .where((f) => RegExp(r'xray_bridge_.*\.json$').hasMatch(f.path))
+          .toList();
+      if (bridges.isNotEmpty) return bridges.first.path;
+    } catch (_) {}
+    return null;
+  }
+
   Future<bool> _stageCoreUpdate({
     required String repo,
     required String exePath,
@@ -3231,10 +3249,24 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       // (в 1.12 это был депрекейт, дальше стало фатальным). Без этой
       // проверки автообновление тихо заменило бы рабочее ядро на такое,
       // с которым приложение перестаёт подключаться.
-      final cfg = File(_configPath);
-      if (await cfg.exists()) {
+      // У каждого ядра СВОЙ конфиг и СВОЯ команда проверки, и путать их
+      // нельзя. Эта проверка писалась под sing-box и потом без изменений
+      // применялась к Xray: `xray check -c config.json`. Но `config.json` —
+      // конфиг sing-box, а команды `check` у Xray нет вовсе («xray check:
+      // unknown command», код выхода 2). Отказ получал ЛЮБОЙ Xray, даже уже
+      // установленный, — поэтому Xray не обновлялся никогда, а в лог шло
+      // обманчивое «не принимает наш конфиг». Так пропустили 26.9.9, на
+      // которую уже переехал сервер. Проверено: верной проверкой — `run -test`
+      // на конфиге моста — 26.9.9 проходит с кодом 0.
+      final isXray = repo.contains('Xray');
+      final String? cfgPath = isXray ? _anyXrayConfigPath() : _configPath;
+      if (cfgPath != null && await File(cfgPath).exists()) {
         try {
-          final verdict = await Process.run(staged.path, ['check', '-c', _configPath])
+          final verdict = await Process.run(
+                  staged.path,
+                  isXray
+                      ? ['run', '-test', '-c', cfgPath]
+                      : ['check', '-c', cfgPath])
               .timeout(const Duration(seconds: 30));
           if (verdict.exitCode != 0) {
             await staged.delete();
