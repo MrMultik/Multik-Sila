@@ -3083,17 +3083,55 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   //     поэтому для него запоминаем тег, а не разбираем версию из бинарника.
   static const String _coreTagPrefsKey = 'known_core_tags';
 
-  Future<String?> _latestTag(String repo) async {
+  /// Новейший релиз репозитория — ПО НОМЕРУ ВЕРСИИ, а не по метке «latest».
+  ///
+  /// `/releases/latest` у GitHub означает «последний непредрелизный», и для
+  /// Xray это делает автообновление бесполезным навсегда: там ВСЕ релизы
+  /// помечены pre-release. Проверено запросом: 26.9.9, 26.9.8, 26.7.28,
+  /// 26.7.11 — у всех `"prerelease": true`, а `/releases/latest` отдаёт
+  /// 26.3.27. У человека при этом стояла 26.7.28, то есть ответ GitHub был
+  /// СТАРШЕ установленного, обновлятор честно видел «версия ниже» и не делал
+  /// ничего — при вышедшей 26.9.9 и обновлённом до неё сервере.
+  ///
+  /// Поэтому берём список релизов и выбираем наибольшую версию сами.
+  ///
+  /// Но флаг `prerelease` при этом игнорируем, а СУФФИКС в номере — нет, и
+  /// это не одно и то же. У Xray предрелизами помечены обычные выпуски, у
+  /// sing-box — настоящие альфы: `1.15.0-alpha.8`. Первая версия этой правки
+  /// смотрела только на числа, и разбор `1.15.0-alpha.8` давал 1.15.0.8 —
+  /// то есть людей утащило бы на альфа-ядро. Берём только чистые номера вида
+  /// `1.2.3`, всё с дефисом отбрасываем.
+  ///
+  /// Черновики пропускаем: их ассеты могут быть не выложены.
+  Future<Map<String, dynamic>?> _latestRelease(String repo) async {
     try {
       final r = await http
-          .get(Uri.parse('https://api.github.com/repos/$repo/releases/latest'))
-          .timeout(const Duration(seconds: 15));
+          .get(Uri.parse('https://api.github.com/repos/$repo/releases?per_page=20'))
+          .timeout(const Duration(seconds: 20));
       if (r.statusCode != 200) return null;
-      return (jsonDecode(r.body) as Map<String, dynamic>)['tag_name'] as String?;
+      final list = jsonDecode(r.body) as List;
+
+      Map<String, dynamic>? best;
+      String? bestVersion;
+      for (final item in list) {
+        if (item is! Map<String, dynamic>) continue;
+        if (item['draft'] == true) continue;
+        final tag = (item['tag_name'] as String?)?.replaceAll(RegExp(r'^v'), '');
+        // Только чистый номер: `26.9.9` да, `1.15.0-alpha.8` нет.
+        if (tag == null || !RegExp(r'^\d+(\.\d+)*$').hasMatch(tag)) continue;
+        if (bestVersion == null || _compareVersions(tag, bestVersion) > 0) {
+          best = item;
+          bestVersion = tag;
+        }
+      }
+      return best;
     } catch (_) {
       return null;
     }
   }
+
+  Future<String?> _latestTag(String repo) async =>
+      (await _latestRelease(repo))?['tag_name'] as String?;
 
   // Версия УСТАНОВЛЕННОГО ядра — спрашиваем сам бинарь, а не помним тег.
   // Причина конкретная: у пользователя стоял Xray 26.7.28, а GitHub на
@@ -3143,11 +3181,10 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     required String exeInArchive,
   }) async {
     try {
-      final r = await http
-          .get(Uri.parse('https://api.github.com/repos/$repo/releases/latest'))
-          .timeout(const Duration(seconds: 20));
-      if (r.statusCode != 200) return false;
-      final release = jsonDecode(r.body) as Map<String, dynamic>;
+      // Тот же выбор новейшей версии, что и в проверке (см. _latestRelease):
+      // по номеру, а не по метке «latest», иначе Xray не обновится никогда.
+      final release = await _latestRelease(repo);
+      if (release == null) return false;
       final tag = (release['tag_name'] as String?)?.replaceAll(RegExp(r'^v'), '');
       if (tag == null) return false;
 
