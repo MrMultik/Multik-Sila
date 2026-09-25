@@ -245,6 +245,49 @@ begin
     DeleteFile(CorePath);
 end;
 
+// Ядра переживают удаление прошлой версии.
+//
+// Без этого две защиты в этом файле отменяли друг друга. [Files] ставит ядра
+// с `onlyifdoesntexist` — ровно затем, чтобы не откатывать то, что приложение
+// обновило само. Но на строку раньше RemovePreviousVersion запускал полное
+// удаление, а оно стирает и ядра, и подготовленные к подмене `.new` (они
+// перечислены в [UninstallDelete]). К моменту [Files] ядер уже не было, и
+// вставали вшитые в дистрибутив — старые.
+//
+// Итог: КАЖДОЕ обновление приложения откатывало ядра на вшитые версии и
+// выбрасывало скачанное. Пойман на живой машине: Xray 26.9.9 скачан и готов,
+// после обновления снова 26.7.28; sing-box был 1.14.0 — стал 1.13.16, то
+// есть ровно то, что лежит в сборке. Сервер при этом уже был на 26.9.9.
+procedure KeepCore(Name: String; Save: Boolean);
+var
+  AppFile, TmpFile: String;
+begin
+  AppFile := ExpandConstant('{app}\' + Name);
+  TmpFile := ExpandConstant('{tmp}\keep_' + Name);
+  if Save then
+  begin
+    if FileExists(AppFile) then
+      FileCopy(AppFile, TmpFile, False);
+  end
+  else
+  begin
+    if FileExists(TmpFile) and not FileExists(AppFile) then
+      FileCopy(TmpFile, AppFile, False);
+  end;
+end;
+
+procedure KeepCores(Save: Boolean);
+begin
+  // Папку приложения удаление может снести целиком (dirifempty), поэтому
+  // перед возвратом её создаём заново.
+  if not Save then
+    ForceDirectories(ExpandConstant('{app}'));
+  KeepCore('sing-box.exe', Save);
+  KeepCore('xray.exe', Save);
+  KeepCore('sing-box.exe.new', Save);
+  KeepCore('xray.exe.new', Save);
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
@@ -261,7 +304,12 @@ begin
       Exit;
     end;
   end;
+  // Порядок значим: сохранить -> удалить прошлую версию -> вернуть -> и
+  // только потом отбраковать ядро без версии. Последний шаг должен видеть
+  // возвращённое ядро, иначе самосборный sing-box проскочил бы мимо него.
+  KeepCores(True);
   RemovePreviousVersion();
+  KeepCores(False);
   ReplaceUnversionedCore();
 end;
 
