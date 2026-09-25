@@ -31,6 +31,13 @@
   <a href="https://t.me/Sila_Multik_bot"><img src="https://img.shields.io/badge/Telegram-@Sila__Multik__bot-26A5E4?style=for-the-badge&logo=telegram&logoColor=white" alt="Telegram bot"></a>
 </p>
 
+<p align="center">
+  <img src="docs/screenshots/windows-connection.png" width="200" alt="Connection screen">
+  <img src="docs/screenshots/windows-servers.png" width="200" alt="Server list">
+  <img src="docs/screenshots/windows-routing.png" width="200" alt="Routing">
+  <img src="docs/screenshots/windows-settings.png" width="200" alt="Settings">
+</p>
+
 ---
 
 ## Download
