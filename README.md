@@ -1,8 +1,6 @@
-<!-- Banner: drop the artwork into docs/assets/banner.png and uncomment this block.
 <p align="center">
-  <img src="docs/assets/banner.png" alt="Multik Sila" width="320">
+  <img src="docs/assets/banner.svg" alt="Multik Sila" width="360">
 </p>
--->
 
 <h1 align="center">Multik Sila</h1>
 
