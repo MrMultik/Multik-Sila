@@ -2036,10 +2036,45 @@ List<ParsedServer> parseSingboxJson(String raw) {
 /// промолчать и попробовать в следующий раз, но не выбрасывать серверы.
 const Set<int> kRevokedCodes = {401, 403, 404, 410};
 
+/// Кем приложение представляется панели подписки, если в профиле не выбрано
+/// иное. Панели (Remnawave, Marzban, 3x-ui) по User-Agent решают, в каком
+/// виде отдать подписку, и незнакомому клиенту отдают список ссылок — а это
+/// ровно тот формат, который приложение понимает полнее всего: только в нём
+/// доезжает транспорт xhttp. Проверено 2026-09-26 на рабочей подписке: на
+/// этот заголовок, на прежний `Dart/…` и на v2rayN/v2rayNG/Happ/Hiddify/
+/// sing-box панель отдала одни и те же ссылки (10 серверов, 2 на xhttp), а на
+/// Karing, mihomo и clash-verge — Clash YAML. Поэтому по умолчанию НЕ
+/// притворяемся ни Karing, ни Clash: разбор Clash YAML транспорт xhttp не
+/// переносит, и такие серверы молча сломались бы.
+const String kSubscriptionUserAgent = 'MultikSila/$kAppVersion';
+
+/// Готовые значения для поля User-Agent в профиле — на случай, когда
+/// провайдер отдаёт подписку только определённому приложению. Название ->
+/// заголовок; порядок — как в меню.
+const Map<String, String> kSubscriptionUserAgentPresets = {
+  'v2rayN': 'v2rayN/7.13.8',
+  'v2rayNG': 'v2rayNG/1.10.16',
+  'Happ': 'Happ/2.9.0',
+  'Hiddify': 'HiddifyNext/2.5.7',
+  'Clash Verge': 'clash-verge/v2.2.3',
+  'sing-box': 'sing-box 1.14.2',
+};
+
+/// Запрос подписки — один на оба места в `_loadSubscription`, основной и
+/// подтверждающий: от заголовка зависит формат ответа, и второй запрос с
+/// другим заголовком мог бы получить совсем другую подписку.
+Future<http.Response> fetchSubscription(Uri uri, SubscriptionProfile profile) =>
+    http.get(uri, headers: {'User-Agent': profile.effectiveUserAgent})
+        .timeout(const Duration(seconds: 10));
+
 class SubscriptionProfile {
   final String id;
   String name;
   String url;
+
+  /// Свой User-Agent для запроса подписки; пустая строка — стандартный
+  /// [kSubscriptionUserAgent].
+  String userAgent;
 
   // Данные из заголовков ответа подписки. Панели отдают их почти всегда:
   // Subscription-Userinfo: upload=..; download=..; total=..; expire=..
@@ -2062,6 +2097,7 @@ class SubscriptionProfile {
     required this.id,
     required this.name,
     required this.url,
+    this.userAgent = '',
     this.upload = 0,
     this.download = 0,
     this.total = 0,
@@ -2076,10 +2112,14 @@ class SubscriptionProfile {
   int get used => upload + download;
   int get remaining => hasQuota ? (total - used).clamp(0, total) : 0;
 
+  String get effectiveUserAgent =>
+      userAgent.trim().isEmpty ? kSubscriptionUserAgent : userAgent.trim();
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'name': name,
         'url': url,
+        'userAgent': userAgent,
         'upload': upload,
         'download': download,
         'total': total,
@@ -2093,6 +2133,7 @@ class SubscriptionProfile {
         id: json['id'] as String,
         name: json['name'] as String,
         url: json['url'] as String,
+        userAgent: json['userAgent'] as String? ?? '',
         upload: json['upload'] as int? ?? 0,
         download: json['download'] as int? ?? 0,
         total: json['total'] as int? ?? 0,
@@ -4062,7 +4103,7 @@ del "%~f0"
     }
 
     try {
-      final resp = await http.get(uri).timeout(const Duration(seconds: 10));
+      final resp = await fetchSubscription(uri, profile);
 
       if (resp.statusCode != 200) {
         // «Ссылку отозвали» и «панель моргнула» — разные вещи, а раньше они
@@ -4075,7 +4116,7 @@ del "%~f0"
           // для панели, которую перезапускают. Приговор выносим только после
           // подтверждения вторым запросом.
           await Future.delayed(const Duration(seconds: 3));
-          final confirm = await http.get(uri).timeout(const Duration(seconds: 10));
+          final confirm = await fetchSubscription(uri, profile);
           if (kRevokedCodes.contains(confirm.statusCode)) {
             await _handleSubscriptionRevoked(profile, 'HTTP ${confirm.statusCode}');
             return;
@@ -4757,6 +4798,9 @@ del "%~f0"
   Future<void> _showProfileDialog({SubscriptionProfile? editing}) async {
     final nameController = TextEditingController(text: editing?.name ?? '');
     final urlController = TextEditingController(text: editing?.url ?? '');
+    final uaController = TextEditingController(text: editing?.userAgent ?? '');
+    // У профиля из файла запроса к панели нет вовсе, и заголовок ему не нужен.
+    final isLocal = editing?.url.startsWith('file:') ?? false;
 
     final saved = await showDialog<bool>(
       context: context,
@@ -4774,6 +4818,31 @@ del "%~f0"
               controller: urlController,
               decoration: InputDecoration(labelText: t('dlg.subUrl')),
             ),
+            if (!isLocal) ...[
+              const SizedBox(height: 8),
+              TextField(
+                controller: uaController,
+                decoration: InputDecoration(
+                  labelText: t('dlg.userAgent'),
+                  // Пустое поле — не «без заголовка», а стандартный. Показываем
+                  // его прямо в поле, чтобы было видно, что уйдёт панели.
+                  hintText: kSubscriptionUserAgent,
+                  floatingLabelBehavior: FloatingLabelBehavior.always,
+                  helperText: t('dlg.userAgentHelp'),
+                  helperMaxLines: 3,
+                  suffixIcon: PopupMenuButton<String>(
+                    tooltip: t('dlg.userAgentPick'),
+                    icon: const Icon(Icons.arrow_drop_down),
+                    onSelected: (v) => uaController.text = v,
+                    itemBuilder: (_) => [
+                      PopupMenuItem(value: '', child: Text(t('dlg.userAgentDefault'))),
+                      for (final e in kSubscriptionUserAgentPresets.entries)
+                        PopupMenuItem(value: e.value, child: Text(e.key)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
         actions: [
@@ -4799,11 +4868,13 @@ del "%~f0"
     // Пустое поле отдаём помощнику как есть: имя по умолчанию он строит сам
     // и там же проверяет, не занято ли оно.
     final name = _uniqueProfileName(nameController.text, exceptId: editing?.id);
+    final userAgent = uaController.text.trim();
 
     if (editing != null) {
       setState(() {
         editing.name = name;
         editing.url = url;
+        editing.userAgent = userAgent;
       });
       _serverCache.remove(editing.id);
       await _saveProfiles();
@@ -4815,6 +4886,7 @@ del "%~f0"
         id: DateTime.now().millisecondsSinceEpoch.toString(),
         name: name,
         url: url,
+        userAgent: userAgent,
       );
       setState(() {
         _profiles.add(profile);

@@ -829,6 +829,18 @@ const Map<String, Map<String, String>> _strings = {
   // --- Диалоги профиля ---
   'dlg.name': {'ru': 'Название', 'en': 'Name'},
   'dlg.subUrl': {'ru': 'Ссылка на подписку', 'en': 'Subscription link'},
+  'dlg.userAgent': {'ru': 'User-Agent', 'en': 'User-Agent'},
+  'dlg.userAgentHelp': {
+    'ru': 'По нему панель решает, в каком виде отдать подписку. Меняйте, '
+        'только если провайдер просит определённое приложение.',
+    'en': 'Panels pick the subscription format by it. Change it only if '
+        'your provider asks for a specific app.',
+  },
+  'dlg.userAgentPick': {'ru': 'Выбрать из списка', 'en': 'Pick from a list'},
+  'dlg.userAgentDefault': {
+    'ru': 'По умолчанию (Multik Sila)',
+    'en': 'Default (Multik Sila)',
+  },
   'dlg.newProfile': {'ru': 'Новый профиль', 'en': 'New profile'},
   'dlg.pasteContent': {'ru': 'Вставить содержимое', 'en': 'Paste content'},
   'dlg.pasteHint': {
@@ -1064,9 +1076,13 @@ const Map<String, Map<String, String>> _strings = {
   'sub.formatLinks': {'ru': 'список ссылок', 'en': 'link list'},
   'sub.unknownFormat': {
     'ru': 'Формат подписки не распознан. Понимаем: список ссылок '
-        '(vless, vmess, trojan, hysteria2, ss), Clash YAML и конфиг sing-box.',
+        '(vless, vmess, trojan, hysteria2, ss), Clash YAML и конфиг sing-box. '
+        'Формат выбирает панель по User-Agent — его можно сменить в '
+        'настройках профиля.',
     'en': 'Subscription format not recognised. Supported: a link list '
-        '(vless, vmess, trojan, hysteria2, ss), Clash YAML and a sing-box config.',
+        '(vless, vmess, trojan, hysteria2, ss), Clash YAML and a sing-box config. '
+        'The panel picks the format by the User-Agent, which you can change '
+        'in the profile settings.',
   },
   'sub.revoked': {
     'ru': 'Доступ по этой подписке отозван ({reason})',
