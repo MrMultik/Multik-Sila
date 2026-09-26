@@ -99,6 +99,21 @@ On Android the tunnel is always system-wide, so there is nothing to choose.
   interfaces and routes, and the exact configs handed to the engines.
 - Country flags, light and dark themes, English and Russian interface.
 
+## Privacy
+
+Multik Sila has no telemetry, no analytics and no accounts. Your subscriptions and
+settings stay on your device. The app itself only talks to:
+
+- **your subscription address** — to load and refresh your servers;
+- **the servers you connect to**;
+- **GitHub** — to check for updates of the app and the engines, and to refresh the
+  routing rule sets (update checks can be switched off in **Settings → Updates**);
+- **the latency-check address**, `cp.cloudflare.com` by default — to measure servers and
+  confirm that traffic gets through (changeable in **Settings → Latency test**);
+- **DNS servers**, `1.1.1.1` and `8.8.8.8` by default (changeable in **Settings → DNS**);
+- only when you run them from diagnostics: `api.ipify.org` to show your external IP and
+  `speed.cloudflare.com` for the speed test; an NTP server only if you turn time sync on.
+
 ## FAQ
 
 <details>
