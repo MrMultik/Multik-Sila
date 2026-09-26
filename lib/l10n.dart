@@ -1247,6 +1247,18 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Прошлый сеанс не завершился штатно — возвращаю системный прокси',
     'en': 'The previous session did not exit cleanly — restoring the system proxy',
   },
+  'log.dataMigrated': {
+    'ru': 'Профили и настройки перенесены из {from} в {to}. Старая папка '
+        'оставлена как резервная копия',
+    'en': 'Profiles and settings copied from {from} to {to}. The old folder '
+        'is kept as a backup',
+  },
+  'log.dataMigrationFailed': {
+    'ru': 'Не удалось перенести профили и настройки из {from}: {e}. Они целы '
+        'в старой папке',
+    'en': 'Could not copy profiles and settings from {from}: {e}. They are '
+        'intact in the old folder',
+  },
   'log.coreUpToDate': {
     'ru': '{core}: обновлений нет (последний релиз {tag})',
     'en': '{core}: no updates (latest release {tag})',

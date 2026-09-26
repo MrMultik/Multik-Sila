@@ -13,16 +13,43 @@ GeoSite/GeoIP, правила для программ, автообновлен�
 
 ## Критические грабли (не наступать снова)
 
-1. **`ProductName` в `windows/runner/Runner.rc` — НЕ ТРОГАТЬ.** `shared_preferences`/
-   `path_provider` на Windows строит путь к данным как `%APPDATA%\<CompanyName>\<ProductName>\`,
-   беря оба значения из VERSIONINFO-ресурсов .exe. Однажды меняли ProductName при
-   ребрендинге — приложение тут же "потеряло" все сохранённые профили (они физически
-   остались в старой папке, просто новый ProductName указывал на другую). Название
-   приложения меняется только через: `MaterialApp.title`/`AppBar` в main.dart,
-   нативный заголовок окна в `windows/runner/main.cpp` (`window.Create(L"...", ...)`),
-   и `FileDescription` в Runner.rc. `ProductName`, `CompanyName`, `OriginalFilename`,
-   `InternalName`, имя самого .exe и `BINARY_NAME` в CMakeLists.txt — всегда
-   `proxy_app_test` / `com.example`, независимо от отображаемого названия.
+1. **`CompanyName` и `ProductName` в `windows/runner/Runner.rc` задают папку данных —
+   без переноса их не менять.** `shared_preferences`/`path_provider` на Windows строит
+   путь к данным как `%APPDATA%\<CompanyName>\<ProductName>\`, беря оба значения из
+   VERSIONINFO-ресурсов .exe. Однажды ProductName поменяли при ребрендинге без
+   переноса — приложение тут же "потеряло" все профили (они физически остались в
+   старой папке, просто новый ProductName указывал на другую).
+
+   **Как сейчас (после 1.0.10):** `ProductName` = `Multik Sila` — этого требует
+   SignPath (все product name-атрибуты = имя проекта). Данные лежат в
+   `%APPDATA%\com.example\Multik Sila\`; по 1.0.10 включительно — в
+   `%APPDATA%\com.example\proxy_app_test\`. Перенос — `lib/legacy_data.dart`,
+   вызывается из `main()` до первого обращения к SharedPreferences (плагин читает файл
+   один раз и держит в памяти) и до замка одной копии. Если в новой папке нет
+   `shared_preferences.json`, а в старой есть, — КОПИРУЕТ всю старую папку, файл
+   настроек последним через `.migrating` + rename (появление файла = перенос
+   завершён). Старую папку не трогает никогда. Итог — в `startup_log.txt` и в
+   `app_log.txt` (`log.dataMigrated` / `log.dataMigrationFailed`).
+
+   Проверено 2026-09-26 собранным .exe на реальных данных (резерв —
+   `%APPDATA%\com.example\proxy_app_test.backup-2026-09-26`): первый запуск
+   скопировал 3 файла побайтово, старая папка не изменилась; после правки файла в
+   новой папке второй запуск её не тронул. Трюк для такой проверки: перенос стоит
+   ДО замка, поэтому тестовый .exe при работающем приложении переносит данные,
+   стучится в него (у того просто показывается окно) и выходит — ни ядра, ни
+   прокси, ни автоподключения. Тестовая папка потом переименована в
+   `Multik Sila.migration-test-2026-09-26`, чтобы настоящая установка перенесла
+   свежие данные, а не снимок с момента теста.
+
+   Следствия: откат на 1.0.10 читает старую папку, и сделанное в новой там не видно;
+   при повторном обновлении перенос НЕ повторится (в новой файл уже есть).
+   `CompanyName` (`com.example`), `InternalName`, `OriginalFilename`, имя .exe и
+   `BINARY_NAME` — по-прежнему `proxy_app_test` / `com.example`: CompanyName сдвинет
+   папку данных снова, а имя .exe зашито в установщик (`AppExeName`, проверка «уже
+   запущено»), ярлыки и автозапуск в `HKCU\...\Run`. Отображаемое название — это
+   `MaterialApp.title`/`AppBar`, заголовок окна в `windows/runner/main.cpp` и
+   `FileDescription`. Любая следующая смена CompanyName/ProductName — только с таким
+   же переносом.
 
 2. **Убивать посторонние процессы по ИМЕНИ нельзя вообще нигде — исправлено.**
    Раньше `_killStrayXray()` делал `taskkill /IM xray.exe /F` перед стартом своего
@@ -753,7 +780,8 @@ when that file already exists` — а Clash API он занять не успе�
 ### Осторожно с файлом настроек из PowerShell
 `Get-Content` в PS 5.1 читает UTF-8 как ANSI. Однажды так испортили имя профиля:
 «Профиль 1» превратилось в «РџСЂРѕС„РёР»СЊ 1» и попало обратно в
-`%APPDATA%\com.example\proxy_app_test\shared_preferences.json`.
+`%APPDATA%\com.example\proxy_app_test\shared_preferences.json`. Сейчас
+файл лежит в `%APPDATA%\com.example\Multik Sila\` (см. грабля №1).
 Читать только `[System.IO.File]::ReadAllText($p, [Text.Encoding]::UTF8)`,
 писать только через `UTF8Encoding($false)` (без BOM).
 
@@ -1239,8 +1267,8 @@ Multik Sila.lnk -> %LOCALAPPDATA%\Programs\Multik Sila\proxy_app_test.exe
 
 Рабочие файлы (`config.json`, `app_log.txt`, `rulesets/`) приложение кладёт
 рядом с .exe, то есть теперь в `Release\`. Профили и настройки лежат отдельно,
-в `%APPDATA%\com.example\proxy_app_test\shared_preferences.json`, и от
-переустановки/удаления не зависят — деинсталлятор туда не лезет (проверено по
+в `%APPDATA%\com.example\Multik Sila\shared_preferences.json` (по 1.0.10 —
+в `...\proxy_app_test\`, см. грабля №1), и от переустановки/удаления не зависят — деинсталлятор туда не лезет (проверено по
 секции `[UninstallDelete]`).
 
 Установщик собирается из ТОЙ ЖЕ папки Release:

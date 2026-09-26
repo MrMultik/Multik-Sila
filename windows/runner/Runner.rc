@@ -89,13 +89,19 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
+            // CompanyName and ProductName name the data folder:
+            // %APPDATA%\<CompanyName>\<ProductName>\ (path_provider and
+            // shared_preferences read them from this resource). Changing
+            // either one moves every profile to a new, empty folder.
+            // ProductName was proxy_app_test up to 1.0.10; lib/legacy_data.dart
+            // copies the old folder over on first start. See CLAUDE.md, rule 1.
             VALUE "CompanyName", "com.example" "\0"
             VALUE "FileDescription", "Multik Sila" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "proxy_app_test" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
             VALUE "OriginalFilename", "proxy_app_test.exe" "\0"
-            VALUE "ProductName", "proxy_app_test" "\0"
+            VALUE "ProductName", "Multik Sila" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

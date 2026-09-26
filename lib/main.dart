@@ -14,12 +14,14 @@ import 'android_vpn.dart';
 import 'diagnostics.dart';
 import 'elevate.dart';
 import 'l10n.dart';
+import 'legacy_data.dart';
 import 'onboarding.dart';
 import 'platform_env.dart';
 import 'prefs_keys.dart';
 import 'qr_import.dart';
 import 'system_proxy.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
@@ -247,6 +249,35 @@ Future<bool> _knock() async {
   return acked;
 }
 
+/// Итог переноса данных из папки старого ProductName. Экрана и его журнала
+/// в момент переноса ещё нет, поэтому итог ждёт здесь, а экран пишет его в
+/// `app_log.txt`, когда язык интерфейса уже известен.
+LegacyDataMigration? legacyDataMigration;
+
+Future<void> _migrateLegacyData() async {
+  try {
+    // Новый путь спрашиваем у того же path_provider, которым пользуется
+    // shared_preferences, а не собираем сами: так перенос попадает ровно
+    // туда, откуда плагин потом будет читать.
+    final newDir = await getApplicationSupportDirectory();
+    final result = migrateLegacyData(newDir, legacyDataDirFor(newDir));
+    switch (result.outcome) {
+      case LegacyDataOutcome.notNeeded:
+        break;
+      case LegacyDataOutcome.copied:
+        _startupLog('данные перенесены: ${result.from} -> ${result.to}, '
+            'файлов ${result.files}; старая папка оставлена как есть');
+        legacyDataMigration = result;
+      case LegacyDataOutcome.failed:
+        _startupLog('перенос данных из ${result.from} не удался: ${result.error}');
+        legacyDataMigration = result;
+    }
+  } catch (e) {
+    // Не смогли даже узнать путь — запуск важнее переноса.
+    _startupLog('перенос данных: не удалось определить папку: $e');
+  }
+}
+
 /// Отпустить замок перед намеренным перезапуском самих себя.
 Future<void> releaseSingleInstanceLock() async {
   try {
@@ -275,6 +306,14 @@ void main() async {
   }
 
   await windowManager.ensureInitialized();
+  // Перенос профилей из папки старого ProductName — строго ДО первого
+  // обращения к SharedPreferences (оно ниже, координаты окна): плагин
+  // читает файл один раз и держит в памяти, подложить его позже уже нельзя.
+  //
+  // Стоит до замка «одна копия» намеренно: лишняя копия тут ничего не
+  // испортит. Копирование идёт, только пока в новой папке нет файла
+  // настроек, а сам файл появляется последним и атомарно.
+  if (Platform.isWindows) await _migrateLegacyData();
   if (!await _claimSingleInstance()) {
     // Окно уже показала работающая копия — тихо уходим.
     exit(0);
@@ -2726,6 +2765,13 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       _tunMode = Env.isAndroid ? true : (requested && admin);
     });
     _appendLog(tp('log.adminState', {'admin': admin, 'tun': _tunMode}));
+    // Здесь, а не в initState: язык интерфейса известен только теперь.
+    final migration = legacyDataMigration;
+    if (migration != null) {
+      _appendLog(migration.outcome == LegacyDataOutcome.copied
+          ? tp('log.dataMigrated', {'from': migration.from, 'to': migration.to})
+          : tp('log.dataMigrationFailed', {'from': migration.from, 'e': migration.error}));
+    }
   }
 
   // Elevation отдельного дочернего процесса ломает и kill(), и живые логи,
