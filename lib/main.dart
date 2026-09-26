@@ -471,6 +471,7 @@ Map<String, dynamic> _buildXhttpStreamSettings(Map<String, String> params, Strin
       "publicKey": params['pbk'],
       "shortId": params['sid'] ?? '',
       if ((params['spx'] ?? '').isNotEmpty) "spiderX": params['spx'],
+      if ((params['pqv'] ?? '').isNotEmpty) "mldsa65Verify": params['pqv'],
     };
   } else {
     final alpnParam = params['alpn'];
@@ -482,6 +483,87 @@ Map<String, dynamic> _buildXhttpStreamSettings(Map<String, String> params, Strin
   }
 
   return streamSettings;
+}
+
+/// VLESS+REALITY уводится с sing-box на Xray — из ЛЮБОГО источника: ссылки,
+/// Clash YAML, конфига sing-box. Поэтому это отдельный шаг после разбора, а не
+/// ветка в каждом парсере.
+///
+/// Причина — Xray 26.9.9 на сервере. С 8 сентября 2026 библиотека REALITY
+/// отвергает ClientHello без обмена ключами X25519MLKEM768 перед X25519
+/// (XTLS/REALITY 8cdf7bf9). sing-box 1.14.2 такого ClientHello не шлёт ни с
+/// одним отпечатком: на стенде с сервером 26.9.9 все десять (chrome, firefox,
+/// edge, safari, ios, android, random, randomized, 360, qq) дали
+/// `reality verification failed`, а клиент Xray на том же стенде — HTTP 204.
+/// Контроль стенда: sing-box на тот же сервер без REALITY — тоже 204.
+///
+/// Со старыми серверами клиент Xray работает так же, то есть перевод ничего не
+/// ломает сегодня и спасает завтра, когда сервер обновят. Этим Multik Sila
+/// отличается от Karing и Clash, которые на таком сервере теряют все
+/// REALITY-подключения.
+///
+/// Транспорт — только tcp и grpc: поверх остального REALITY не бывает, и такой
+/// outbound оставляем как был. Параметров `pqv` (ключ ML-DSA-65) и `spx` в
+/// outbound sing-box нет вовсе, поэтому они берутся из исходной ссылки.
+ParsedServer realityViaXray(ParsedServer s) {
+  if (s.engine != 'singbox') return s;
+  final o = s.outbound;
+  if (o['type'] != 'vless') return s;
+  final tls = o['tls'];
+  if (tls is! Map || tls['enabled'] != true) return s;
+  final reality = tls['reality'];
+  if (reality is! Map || reality['enabled'] != true) return s;
+  final transport = o['transport'];
+  final transportType = transport is Map ? transport['type'] : null;
+  if (transportType != null && transportType != 'grpc') return s;
+
+  final utls = tls['utls'];
+  final fp = utls is Map && utls['fingerprint'] is String ? utls['fingerprint'] as String : 'chrome';
+  final flow = o['flow'];
+  var linkParams = const <String, String>{};
+  if (s.link.startsWith('vless://')) {
+    try {
+      linkParams = Uri.parse(s.link).queryParameters;
+    } catch (_) {}
+  }
+  final spx = linkParams['spx'] ?? '';
+  final pqv = linkParams['pqv'] ?? '';
+
+  final xray = <String, dynamic>{
+    "protocol": "vless",
+    "tag": o['tag'] ?? 'proxy',
+    "settings": {
+      "vnext": [
+        {
+          "address": o['server'],
+          "port": o['server_port'],
+          "users": [
+            {
+              "id": o['uuid'],
+              "encryption": "none",
+              if (flow is String && flow.isNotEmpty) "flow": flow,
+            }
+          ],
+        }
+      ],
+    },
+    "streamSettings": {
+      "network": transportType == 'grpc' ? 'grpc' : 'tcp',
+      "security": "reality",
+      "realitySettings": {
+        "serverName": tls['server_name'] ?? o['server'],
+        "fingerprint": fp,
+        "publicKey": reality['public_key'],
+        "shortId": reality['short_id'] ?? '',
+        if (spx.isNotEmpty) "spiderX": spx,
+        if (pqv.isNotEmpty) "mldsa65Verify": pqv,
+      },
+      if (transportType == 'grpc')
+        "grpcSettings": {"serviceName": (transport as Map)['service_name'] ?? ''},
+    },
+  };
+  return ParsedServer(name: s.name, protocol: s.protocol, outbound: xray, engine: 'xray')
+    ..link = s.link;
 }
 
 // Режим маршрутизации. global — всё в туннель (как было всегда).
@@ -2105,7 +2187,14 @@ class MyApp extends StatelessWidget {
       // комментарий у шрифта в pubspec.yaml). Именно ЗАПАСНОЙ, а не
       // основной: подставляется только там, где у системного глифа нет,
       // поэтому весь остальной текст и эмодзи выглядят как прежде.
-      fontFamilyFallback: const ['NotoColorEmoji'],
+      //
+      // ТОЛЬКО на Windows. На Android основной шрифт по имени не находится,
+      // и первым в списке оказывается этот: в нём есть свои пробел, цифры,
+      // точка и двоеточие (основа эмодзи вида 1️⃣), и Android берёт их отсюда.
+      // Вышло на эмуляторе 26.09.2026: пробелы шириной в слово по всему
+      // интерфейсу, серые разреженные цифры в адресах и миллисекундах. Флаги
+      // Android рисует сам — его системный эмодзи-шрифт и есть Noto.
+      fontFamilyFallback: Platform.isWindows ? const ['NotoColorEmoji'] : null,
       // Скруглённые карточки и кнопки вместо плоских прямоугольников —
       // основная разница между «формой на Flutter» и приложением.
       cardTheme: CardThemeData(
@@ -2295,6 +2384,12 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   /// Результат только показывается. Переключать сервер самостоятельно здесь
   /// нельзя: человек нажал «Подключить» к КОНКРЕТНОМУ серверу, и подменять
   /// его выбор без спроса — ровно то поведение, на которое он уже жаловался.
+  ///
+  /// Зовётся при смене ядра (сеттер `_runningEngine`) И после каждой смены
+  /// сервера в `_switchServer`. Второе обязательно: при переключении ядро то
+  /// же, сеттер молчит, и под новым сервером висел итог прежнего. На эмуляторе
+  /// так под REALITY-сервером, через который не шло ни байта, стояло
+  /// «Checked: traffic gets through».
   Future<void> _verifyConnection() async {
     if (_runningEngineValue == null) {
       if (mounted) setState(() => _connectionCheckKey = '');
@@ -4119,6 +4214,13 @@ del "%~f0"
           skipped++;
         }
       }
+    }
+
+    // REALITY — через Xray, из какого бы формата сервер ни пришёл (почему —
+    // см. realityViaXray). До раздачи тегов: тег должен попасть в итоговый
+    // outbound, а не в выброшенный.
+    for (var i = 0; i < parsed.length; i++) {
+      parsed[i] = realityViaXray(parsed[i]);
     }
 
     // уникальный тег на сервер: нужен, чтобы грузить все серверы профиля
@@ -6653,6 +6755,7 @@ del "%~f0"
               .timeout(const Duration(seconds: 3));
           if (resp.statusCode == 204 || resp.statusCode == 200) {
             _appendLog(tp('log.active', {'name': newServer.name}));
+            _verifyConnection();
             return;
           }
           _appendLog(tp('log.clashApiStatus', {'code': resp.statusCode}));
@@ -6661,6 +6764,7 @@ del "%~f0"
         }
       }
       await _startCore();
+      _verifyConnection();
       return;
     }
 
@@ -6679,6 +6783,7 @@ del "%~f0"
             .timeout(const Duration(seconds: 3));
         if (resp.statusCode == 204 || resp.statusCode == 200) {
           _appendLog(tp('log.active', {'name': newServer.name}));
+          _verifyConnection();
           return;
         }
         _appendLog(tp('log.clashApiStatus', {'code': resp.statusCode}));
@@ -6688,6 +6793,7 @@ del "%~f0"
     }
 
     await _startCore();
+    _verifyConnection();
   }
 
   Future<void> _fetchStats() async {
@@ -7561,6 +7667,7 @@ del "%~f0"
     if (await _probeActiveServer()) {
       if (_healthFails > 0) _appendLog(t('log.healthRecovered'));
       _healthFails = 0;
+      _showCheckResult(true);
       return;
     }
 
@@ -7569,6 +7676,10 @@ del "%~f0"
       'name': _selectedServer?.name ?? '-',
       'n': _healthFails,
     }));
+    // Строка под щитом обязана говорить то же, что проверка. Раньше провал
+    // уходил только в лог, и под мёртвым сервером оставалось зелёное
+    // «трафик проходит» от прошлой удачной проверки.
+    if (_healthFails >= 2) _showCheckResult(false);
     // Долгий провал лечится ПЕРЕЗАПУСКОМ ядра, а не сменой сервера.
     //
     // Случай, ради которого это заведено: машина надолго осталась без сети
@@ -7605,7 +7716,24 @@ del "%~f0"
     // Один промах — это заминка сети, а не приговор серверу. Дёргать
     // соединение под человеком из-за одного неудачного запроса нельзя.
     if (_healthFails < 2 || !_settings.healthCheckAutoSwitch) return;
+    // В ручном режиме сервер не меняем: человек выбрал его сам, и README
+    // обещает держать ровно его. Переключение по расписанию это уже
+    // соблюдало, а переключение по проверке — нет: на эмуляторе лог писал
+    // «автовыбор выключен» и следом сам уводил с выбранного сервера. Провал
+    // при этом виден — красной строкой под щитом (выше).
+    if (!_autoServerMode) return;
     await _switchAwayFromUnhealthy();
+  }
+
+  /// Итог проверки связи — в строку под щитом. Та же пара полей, что пишет
+  /// `_verifyConnection`; перерисовываем, только если итог изменился.
+  void _showCheckResult(bool ok) {
+    final key = ok ? 'check.ok' : 'check.failed';
+    if (!mounted || (_connectionOk == ok && _connectionCheckKey == key)) return;
+    setState(() {
+      _connectionOk = ok;
+      _connectionCheckKey = key;
+    });
   }
 
   /// Когда в последний раз перезапускали ядро по проверке связи.

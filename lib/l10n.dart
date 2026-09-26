@@ -797,8 +797,8 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'Starred servers take priority in automatic selection',
   },
   'hint.latencyWarmup': {
-    'ru': 'Точнее для xhttp-серверов, но тест идёт вдвое дольше',
-    'en': 'More accurate for xhttp servers, but the test takes twice as long',
+    'ru': 'Точнее для серверов через Xray (xhttp, REALITY), но тест идёт вдвое дольше',
+    'en': 'More accurate for servers that go through Xray (xhttp, REALITY), but the test takes twice as long',
   },
   'hint.muxStreams': {'ru': 'Обычно 4–16', 'en': 'Usually 4–16'},
   'hint.muxPadding': {
@@ -1459,8 +1459,8 @@ const Map<String, Map<String, String>> _strings = {
         'without it — press the shield again and confirm the request.',
   },
   'log.androidBridges': {
-    'ru': 'Мостов Xray для xhttp-серверов: {n}',
-    'en': 'Xray bridges for xhttp servers: {n}',
+    'ru': 'Мостов Xray (xhttp и REALITY): {n}',
+    'en': 'Xray bridges (xhttp and REALITY): {n}',
   },
   'log.healthFailed': {
     'ru': 'Проверка сервера «{name}» не прошла (подряд: {n})',
@@ -1629,12 +1629,12 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'Start: server={name}, engine={engine}, tag={tag}, TUN={tun}, admin={admin}',
   },
   'log.bridgesStarting': {
-    'ru': 'Поднимаю мосты Xray для xhttp-серверов...',
-    'en': 'Starting Xray bridges for xhttp servers...',
+    'ru': 'Поднимаю мосты Xray для серверов xhttp и REALITY...',
+    'en': 'Starting Xray bridges for xhttp and REALITY servers...',
   },
   'log.noSingboxServers': {
-    'ru': 'В этом профиле нет серверов, совместимых с sing-box (все — xhttp)',
-    'en': 'This profile has no sing-box compatible servers (all of them are xhttp)',
+    'ru': 'В этом профиле нет серверов для sing-box (все идут через Xray)',
+    'en': 'This profile has no servers for sing-box (all of them go through Xray)',
   },
   'log.generatingConfig': {
     'ru': 'Генерирую config.json...',
@@ -1646,8 +1646,8 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'Generating the Xray config ({name})...',
   },
   'log.startingXray': {
-    'ru': 'Запускаю xray (движок для xhttp-серверов)...',
-    'en': 'Starting xray (the engine for xhttp servers)...',
+    'ru': 'Запускаю xray (движок для серверов xhttp и REALITY)...',
+    'en': 'Starting xray (the engine for xhttp and REALITY servers)...',
   },
   'log.bridgeDied': {
     'ru': 'Мост Xray для {name} завершился (код {code})',

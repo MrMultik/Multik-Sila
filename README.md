@@ -90,8 +90,12 @@ On Android the tunnel is always system-wide, so there is nothing to choose.
 - **Custom rules** by domain, address, popular service or individual program.
 - **Ad and tracker blocking.**
 - **Self-healing connection:** a health check notices a server that stops passing
-  traffic and moves off it; after sleep the app waits for the network instead of
+  traffic — in Auto mode the app moves to another one, in manual mode it tells you
+  and leaves the choice to you; after sleep the app waits for the network instead of
   blaming the servers.
+- **Ready for Xray 26.9.9+ servers:** REALITY servers go through Xray, so they keep
+  working after the server moves to the post-quantum handshake that sing-box-based
+  clients cannot do.
 - **Engines that keep themselves up to date** (Windows): new sing-box and Xray
   releases are downloaded, verified against your configuration, and applied on
   the next start.
@@ -154,10 +158,16 @@ updates and even an uninstall.
 
 ## Why two engines
 
-sing-box provides native TUN support and does most of the work. It does not support
-the `xhttp` transport, so servers using it are handled by Xray: in regular mode Xray
-hosts the local proxy itself, and in TUN mode each such server gets its own bridge
-while sing-box still does all the routing.
+sing-box provides native TUN support and does most of the work. Two kinds of servers
+go through Xray instead:
+
+- **`xhttp`** — sing-box does not support this transport at all;
+- **REALITY** — since Xray 26.9.9 a REALITY server rejects any handshake without the
+  post-quantum X25519MLKEM768 key exchange, and sing-box 1.14 does not send one with
+  any of its fingerprints. The Xray client does, and it works with older servers too.
+
+In regular mode Xray hosts the local proxy itself; in TUN mode and on Android each such
+server gets its own Xray bridge while sing-box still does all the routing.
 
 ## Building from source
 
