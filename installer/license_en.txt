@@ -19,4 +19,11 @@ and has no relation to the contents of the traffic passing through it.
 4. It bundles third-party open-source software (sing-box by SagerNet, Xray-core
    by XTLS) distributed under their own licenses.
 
+5. While connected in regular mode, the app sets the Windows system proxy and
+   restores the previous setting when you disconnect or quit. TUN mode adds a
+   virtual network adapter and asks for administrator rights. Starting with
+   Windows is offered once and stays off unless you agree. The engines update
+   themselves from their official GitHub releases; this can be turned off in
+   the settings.
+
 By continuing the installation you confirm your agreement with these terms.

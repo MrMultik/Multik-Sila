@@ -101,8 +101,7 @@ const Map<String, Map<String, String>> _strings = {
         'Профили, настройки и журнал работы хранятся только на этом устройстве.\n\n'
         '4. В состав входят сторонние программы с открытым исходным кодом '
         '(sing-box, Xray-core), распространяемые на условиях их собственных '
-        'лицензий.\n\n'
-        'Нажимая «Принимаю», вы подтверждаете согласие с этими условиями.',
+        'лицензий.',
     'en': 'Copyright holder: Multik\n\n'
         'Multik Sila is a client for connecting to proxy servers that you '
         'choose yourself. The application does not provide servers, is not part '
@@ -116,8 +115,31 @@ const Map<String, Map<String, String>> _strings = {
         '3. The application collects no personal data and sends none anywhere. '
         'Profiles, settings and the activity log stay on this device only.\n\n'
         '4. It bundles third-party open-source software (sing-box, Xray-core) '
-        'distributed under their own licenses.\n\n'
-        'By pressing "Accept" you confirm your agreement with these terms.',
+        'distributed under their own licenses.',
+  },
+  // Пункт про изменения системы — отдельной строкой, потому что он только
+  // для Windows (см. onboarding.dart). SignPath, который подписывает сборки,
+  // требует предупреждать о них заранее, а главное из них — системный
+  // прокси — включается при первом же подключении. Тот же текст стоит в
+  // условиях установщика (installer/license_*.txt).
+  'onb.licenseSystemChanges': {
+    'ru': '5. Пока приложение подключено в обычном режиме, оно устанавливает '
+        'системный прокси Windows, а при отключении и выходе возвращает '
+        'прежнюю настройку. Режим TUN добавляет виртуальный сетевой адаптер и '
+        'запрашивает права администратора. Запуск вместе с Windows '
+        'предлагается один раз и включается только с вашего согласия. Ядра '
+        'обновляются сами с их официальных страниц на GitHub — это можно '
+        'отключить в настройках.',
+    'en': '5. While connected in regular mode, the app sets the Windows system '
+        'proxy and restores the previous setting when you disconnect or quit. '
+        'TUN mode adds a virtual network adapter and asks for administrator '
+        'rights. Starting with Windows is offered once and stays off unless '
+        'you agree. The engines update themselves from their official GitHub '
+        'releases; this can be turned off in the settings.',
+  },
+  'onb.licenseAgree': {
+    'ru': 'Нажимая «Принимаю», вы подтверждаете согласие с этими условиями.',
+    'en': 'By pressing "Accept" you confirm your agreement with these terms.',
   },
   'onb.accept': {'ru': 'Принимаю', 'en': 'Accept'},
   'onb.decline': {'ru': 'Не согласен — выйти', 'en': 'Decline and quit'},

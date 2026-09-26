@@ -184,7 +184,16 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
               borderRadius: BorderRadius.circular(14),
             ),
-            child: SingleChildScrollView(child: Text(t('onb.licenseText'))),
+            child: SingleChildScrollView(
+              // Пункт про изменения системы — только на Windows: системного
+              // прокси и TUN с правами администратора на Android нет, а
+              // разрешение на VPN там спрашивает сама система.
+              child: Text([
+                t('onb.licenseText'),
+                if (Env.needsSystemProxy) t('onb.licenseSystemChanges'),
+                t('onb.licenseAgree'),
+              ].join('\n\n')),
+            ),
           ),
         ),
         const SizedBox(height: 14),
