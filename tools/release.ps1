@@ -205,8 +205,16 @@ if ($Notes) {
   [IO.File]::WriteAllText((Join-Path $Root $notesFile), $notesText, (New-Object Text.UTF8Encoding($false)))
   $notesArgs = @("--notes-file", $notesFile)
 }
+# For a new tag gh prints "release not found" to stderr. Under
+# $ErrorActionPreference = "Stop" PowerShell 5.1 turns that line into a
+# terminating error even with 2>$null, so the script died right after pushing
+# the tag and every new release had to be created by hand (1.0.11 was).
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 $exists = & $gh release view $tag --json tagName 2>$null
-if ($LASTEXITCODE -eq 0) {
+$releaseExists = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevEap
+if ($releaseExists) {
   & $gh release upload $tag "installer\output\MultikSila-$ver-setup.exe" $zip --clobber
   if ($Notes) { & $gh release edit $tag --notes-file $notesFile }
 } else {
