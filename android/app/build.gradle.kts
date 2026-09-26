@@ -1,7 +1,29 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+// Ключ подписи релизов. Лежит ВНЕ репозитория (C:\dev\keys), а сюда кладётся
+// только android/key.properties со ссылкой на него — файл в .gitignore.
+//
+// Ключ менять НЕЛЬЗЯ никогда: Android ставит обновление только поверх APK,
+// подписанного тем же ключом. Новый ключ = каждому пользователю удалять
+// приложение вместе с подписками и ставить заново. Потерять его — то же самое.
+//
+// Без key.properties (сборка из исходников у постороннего человека) подпись
+// откатывается на отладочную, чтобы сборка вообще шла. Для раздачи такой APK
+// не годится — поэтому предупреждение в лог сборки.
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+val hasReleaseKey = keystorePropertiesFile.exists()
+if (hasReleaseKey) {
+    FileInputStream(keystorePropertiesFile).use { keystoreProperties.load(it) }
+} else {
+    logger.warn("android/key.properties not found: release APK will be signed with the DEBUG key")
 }
 
 android {
@@ -51,11 +73,20 @@ android {
         // разница существенная.
     }
 
+    signingConfigs {
+        if (hasReleaseKey) {
+            create("release") {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (hasReleaseKey) "release" else "debug")
         }
     }
 }
