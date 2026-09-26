@@ -19,6 +19,14 @@
 AppId={{8F3A9C21-4B7E-4D62-9E15-2A6C8D5F1B03}
 AppName={#AppName}
 AppVersion={#AppVersion}
+; Версия в свойствах самого setup.exe. Без этих строк у него пустая
+; «Версия файла», а SignPath требует, чтобы версия продукта у всех
+; подписываемых файлов релиза совпадала: у .exe приложения это те же три
+; числа без номера сборки (см. FLUTTER_PRODUCT_VERSION в
+; windows/runner/CMakeLists.txt).
+VersionInfoVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}
+VersionInfoProductTextVersion={#AppVersion}
 AppPublisher=Multik Sila
 DefaultDirName={localappdata}\Programs\Multik Sila
 DefaultGroupName=Multik Sila
