@@ -15,8 +15,12 @@
 # ASCII only: PowerShell 5.1 reads a BOM-less .ps1 as ANSI and chokes on Cyrillic.
 param(
   [string]$AppDir = "$env:LOCALAPPDATA\Programs\Multik Sila",
-  [string]$Out = "C:\dev\proxy_app_test\build\windows\x64\runner\Release\ab_strictroute.txt"
+  [string]$Out = "C:\dev\proxy_app_test\build\diag\ab_strictroute.txt"
 )
+
+# Not next to the built exe, where this used to write: that folder is what gets
+# packaged, and this very file went out with the 1.0.2-1.0.10 releases.
+if (Split-Path $Out) { New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null }
 
 $cfgSrc = Join-Path $AppDir "config.json"
 if (-not (Test-Path $cfgSrc)) { "no config at $cfgSrc" | Out-File $Out -Encoding utf8; exit }

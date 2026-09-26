@@ -15,8 +15,12 @@
 param(
   [int]$Seconds = 40,
   [string]$AppDir = "$env:LOCALAPPDATA\Programs\Multik Sila",
-  [string]$Out = "C:\dev\proxy_app_test\build\windows\x64\runner\Release\tundebug.txt"
+  [string]$Out = "C:\dev\proxy_app_test\build\diag\tundebug.txt"
 )
+
+# Not next to the built exe, where this used to write: that folder is what gets
+# packaged, and one such file went out with the 1.0.2-1.0.10 releases.
+if (Split-Path $Out) { New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null }
 
 $ErrorActionPreference = "Continue"
 $cfgSrc = Join-Path $AppDir "config.json"

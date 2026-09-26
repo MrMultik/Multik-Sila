@@ -57,19 +57,83 @@ if ($Notes) {
 }
 
 $rel = "build\windows\x64\runner\Release"
+$exeName = "proxy_app_test.exe"
+
+# What a package may contain, as paths relative to the Release folder: the
+# app's exe, the DLLs next to it, what Flutter puts into data\ and the two
+# cores. installer\multik_sila.iss takes exactly this set.
+#
+# An allowlist on purpose. The Release folder is also where the app runs from
+# when started out of the build, and where the diagnostic scripts used to
+# write, so files land there that a list of things to leave out does not know
+# about yet. That list was kept here and in the .iss, and it lost: the output
+# of tools\tun_ab_strictroute.ps1 went out in every update zip from 1.0.2 to
+# 1.0.10 and in the 1.0.10 installer, and the app's own startup_log.txt
+# (Windows user name in paths), xray_probe_single.json (a server's
+# credentials) and profile_<id>.txt (an imported profile, all of its servers)
+# were on neither list. A file not named here stops the release instead of
+# shipping.
+function Get-Unshippable([string[]]$Files, [switch]$NoCores) {
+  foreach ($f in $Files) {
+    $p = $f.Replace("/", "\")
+    $ok = $p -eq $exeName -or ($p -like "*.dll" -and $p -notlike "*\*") -or
+          $p -eq "data\app.so" -or $p -eq "data\icudtl.dat" -or $p -like "data\flutter_assets\*" -or
+          (-not $NoCores -and ($p -eq "sing-box.exe" -or $p -eq "xray.exe"))
+    if (-not $ok) { $f }
+  }
+}
+
+# Checked before the build and again before packaging: a stray file found
+# only in the finished installer would cost a full build and a compile.
+# Deletes nothing - what is not the app's may be someone's measurement.
+function Assert-ReleaseFolder {
+  if (-not (Test-Path $rel)) { return }
+  $base = (Resolve-Path $rel).ProviderPath.TrimEnd("\") + "\"
+  $files = Get-ChildItem $rel -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($base.Length) }
+  $extra = @(Get-Unshippable -Files $files)
+  if ($extra.Count) {
+    throw ("$rel holds files that are not part of the app: " + ($extra -join ", ") +
+           ". Nothing was deleted - move them out of the build folder and run again.")
+  }
+}
+
+# The final word is what actually went into a package, not what the .iss or
+# the copy meant to put there. The exe and rule-set checks make sure an audit
+# of an empty or misparsed file list does not pass by saying nothing. A
+# package that fails is deleted: left in installer\output under the release's
+# own name, it would look like the one to upload.
+function Assert-Package([string]$What, [string]$Path, [string[]]$Files, [switch]$NoCores) {
+  $extra = @(Get-Unshippable -Files $Files -NoCores:$NoCores)
+  $srs = @($Files | Where-Object { $_ -like "*.srs" }).Count
+  $problem = $null
+  if ($extra.Count) { $problem = "contains files that are not part of the app: $($extra -join ', ')" }
+  elseif ($Files -notcontains $exeName) { $problem = "does not contain $exeName" }
+  elseif ($srs -lt 3) { $problem = "is missing rule sets ($srs of 3)" }
+  if ($problem) {
+    Remove-Item $Path -Force -ErrorAction SilentlyContinue
+    throw "$What $problem - $Path deleted"
+  }
+  Write-Host "$What`: $($Files.Count) files, $srs rule sets, nothing outside the allowlist"
+}
 
 if ($Stage -ne "package") {
   # The Release folder doubles as the app's working directory when it is run from
   # the build, so it accumulates configs with real server addresses, logs and
-  # rule-set caches. None of that may end up in a published artefact.
+  # rule-set caches. These the app recreates, and capture/tundiag/tundebug are
+  # where tools\*.ps1 used to write, so all of it goes without asking. This list
+  # is a convenience, not the safeguard: whatever it misses stops the release
+  # at Assert-ReleaseFolder below.
   Write-Host "cleaning working files out of the build folder"
   foreach ($f in @("config.json", "xray_config.json", "app_log.txt", "app_log.txt.prev.txt",
-                   "capture.txt", "tundiag.txt", "tundebug.txt")) {
+                   "startup_log.txt", "capture.txt", "tundiag.txt", "tundebug.txt")) {
     Remove-Item (Join-Path $rel $f) -Force -ErrorAction SilentlyContinue
   }
   Get-ChildItem $rel -Filter "xray_bridge_*.json" -ErrorAction SilentlyContinue | Remove-Item -Force
-  Get-ChildItem $rel -Filter "*_probe.json" -ErrorAction SilentlyContinue | Remove-Item -Force
-  Get-ChildItem $rel -Filter "rulesets" -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+  Get-ChildItem $rel -Filter "*_probe*.json" -ErrorAction SilentlyContinue | Remove-Item -Force
+  foreach ($d in @("rulesets", "probe")) {
+    Remove-Item (Join-Path $rel $d) -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  Assert-ReleaseFolder
 
   Write-Host "building"
   # The build stamp is what tells two builds of the same version apart on the
@@ -82,22 +146,27 @@ if ($Stage -ne "package") {
   if ($Stage -eq "build") { Write-Host "built only (stage build)"; exit }
 }
 
+# Again here, not only before the build: -Stage package runs on its own, and a
+# build can start putting a new kind of file next to the exe. Either way a
+# person decides - ship it (extend the allowlist and the .iss) or move it out.
+Assert-ReleaseFolder
+
 Write-Host "compiling installer"
 Get-ChildItem "installer\output" -Filter *.exe -ErrorAction SilentlyContinue | Remove-Item -Force
 $log = Join-Path $env:TEMP "iscc_release.txt"
 & "tools\innosetup\ISCC.exe" "installer\multik_sila.iss" | Out-File $log -Encoding utf8
 if (-not (Select-String -Path $log -Pattern "Successful compile" -Quiet)) { throw "installer failed, see $log" }
 
-# Audit what actually went into the package rather than trusting the Excludes.
-$packed = Select-String -Path $log -Pattern "Compressing: (.+)$" | ForEach-Object { $_.Matches.Groups[1].Value }
-$leak = $packed | Where-Object {
-  $_ -like "*config.json" -or $_ -like "*_probe.json" -or $_ -like "*xray_bridge*" -or
-  $_ -like "*app_log*" -or $_ -like "*capture.txt" -or $_ -like "*tundiag*" -or $_ -like "*tundebug*"
+# ISCC names every file it packs by the path it was given, which has the
+# Release folder in it (installer\..\build\...\Release\data\app.so). Anything
+# packed from elsewhere keeps its full path and so fails the allowlist.
+$marker = "\$rel\"
+$packed = Select-String -Path $log -Pattern "Compressing: (.+)$" | ForEach-Object {
+  $p = $_.Matches[0].Groups[1].Value.Trim()
+  $i = $p.IndexOf($marker, [StringComparison]::OrdinalIgnoreCase)
+  if ($i -ge 0) { $p.Substring($i + $marker.Length) } else { $p }
 }
-if ($leak) { throw "installer contains working files: $($leak -join ', ')" }
-$srs = ($packed | Where-Object { $_ -like "*.srs" }).Count
-if ($srs -lt 3) { throw "rule sets missing from the installer ($srs of 3)" }
-Write-Host "installer: $($packed.Count) files, $srs rule sets, no working files"
+Assert-Package "installer" "installer\output\MultikSila-$ver-setup.exe" $packed
 
 Write-Host "packing the update zip"
 $zip = "installer\output\MultikSila-$ver-windows-x64.zip"
@@ -110,6 +179,14 @@ foreach ($f in @("sing-box.exe", "xray.exe")) {
 }
 Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $zip -CompressionLevel Optimal
 Remove-Item $staging -Recurse -Force -ErrorAction SilentlyContinue
+
+# The zip is checked by its own entries: it is copied straight from the
+# Release folder, so nothing in the .iss protects it. Directory entries have
+# no name. The cores must not be in it at all (see the top of this file).
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$z = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip).ProviderPath)
+try { $zipped = $z.Entries | Where-Object { $_.Name } | ForEach-Object { $_.FullName } } finally { $z.Dispose() }
+Assert-Package "update zip" $zip $zipped -NoCores
 Write-Host ("zip: {0:N1} MB" -f ((Get-Item $zip).Length / 1MB))
 
 if (-not $Publish) { Write-Host "built only; pass -Publish to upload"; exit }

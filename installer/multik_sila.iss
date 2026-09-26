@@ -72,20 +72,27 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; при обновлении поверх старой установки должны замениться и exe, и dll,
 ; и содержимое data (там лежат ассеты сборки, включая наборы правил).
 ;
-; Excludes ОБЯЗАТЕЛЕН и держится в актуальном состоянии. Папка Release — это
-; ещё и рабочий каталог приложения при запуске из сборки: туда ложатся
-; config.json и конфиги мостов с РЕАЛЬНЫМИ адресами серверов, UUID и паролями
-; из подписки, лог со всей историей соединений и кэш наборов правил. Без
-; исключений всё это запекается внутрь setup.exe и уезжает каждому, кто его
-; скачает. Поймано перед первой публикацией на GitHub.
-; Каждый шаблон начинается с "\" — это ЯКОРЬ НА КОРЕНЬ папки сборки. Без него
-; Inno применяет шаблон на любом уровне вложенности, и `rulesets\*` вырезал не
-; только рабочий кэш рядом с .exe, но и вшитые в сборку наборы правил
-; `data\flutter_assets\assets\rulesets\*.srs` — раздельное туннелирование
-; поехало бы к людям без единого набора и молча выродилось в «всё через VPN».
-; Поймано проверкой списка файлов в собранном пакете, а не глазами.
-Source: "{#BuildDir}\*"; DestDir: "{app}"; \
-    Excludes: "\sing-box.exe,\xray.exe,\config.json,\xray_config.json,\xray_bridge_*.json,\*_probe.json,\app_log.txt,\app_log.txt.*,\capture.txt,\*.new,\*.bak,\rulesets\*,\update_staging\*,\backup_*\*"; \
+; Берём ТОЛЬКО то, что производит сборка, поимённо, а не «всю папку минус
+; исключения». Папка Release — это ещё и рабочий каталог приложения при
+; запуске из сборки: туда ложатся config.json и конфиги мостов с РЕАЛЬНЫМИ
+; адресами серверов, UUID и паролями из подписки, лог со всей историей
+; соединений, импортированные профили. Раньше здесь был `{#BuildDir}\*` со
+; списком Excludes, и список проигрывал каждому новому файлу: вывод
+; tools\tun_ab_strictroute.ps1 уехал во все zip обновления с 1.0.2 по 1.0.10
+; и в установщик 1.0.10, а startup_log.txt, xray_probe_single.json и
+; profile_<id>.txt в нём не значились вовсе. Теперь незнакомый файл просто
+; не берётся.
+;
+; Тот же набор — allowlist в tools\release.ps1: он сверяет с ним и папку
+; сборки, и готовый установщик, и zip. Если сборка начнёт класть рядом с
+; .exe что-то новое, релиз остановится — дописывать надо в ОБА места.
+; Наборы правил (data\flutter_assets\assets\rulesets\*.srs) едут в дереве
+; data; что их в пакете три, release.ps1 тоже проверяет.
+Source: "{#BuildDir}\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\*.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\data\app.so"; DestDir: "{app}\data"; Flags: ignoreversion
+Source: "{#BuildDir}\data\icudtl.dat"; DestDir: "{app}\data"; Flags: ignoreversion
+Source: "{#BuildDir}\data\flutter_assets\*"; DestDir: "{app}\data\flutter_assets"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; Ядра — ТОЛЬКО если их ещё нет. Приложение обновляет их само, и к моменту
@@ -123,14 +130,20 @@ Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; F
 Type: files; Name: "{app}\config.json"
 Type: files; Name: "{app}\xray_config.json"
 Type: files; Name: "{app}\xray_bridge_*.json"
-Type: files; Name: "{app}\*_probe.json"
+; *_probe*.json, а не *_probe.json: пробник одного сервера пишет
+; xray_probe_single.json, и в нём адрес и ключи сервера.
+Type: files; Name: "{app}\*_probe*.json"
 Type: files; Name: "{app}\app_log.txt"
 Type: files; Name: "{app}\app_log.txt.prev.txt"
+Type: files; Name: "{app}\startup_log.txt"
 Type: files; Name: "{app}\sing-box.exe.new"
 Type: files; Name: "{app}\sing-box.exe.bak"
 Type: files; Name: "{app}\xray.exe.new"
 Type: files; Name: "{app}\xray.exe.bak"
 Type: filesandordirs; Name: "{app}\rulesets"
+; Копия sing-box.exe для пробников задержки (80 МБ). Приложение делает её
+; заново при первом замере, так что удаление перед обновлением ничего не ломает.
+Type: filesandordirs; Name: "{app}\probe"
 Type: filesandordirs; Name: "{app}\update_staging"
 Type: dirifempty; Name: "{app}"
 ; Если папка установки оказалась недоступна на запись (например, приложение

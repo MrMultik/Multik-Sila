@@ -17,10 +17,14 @@
 # ASCII only: PowerShell 5.1 reads a BOM-less .ps1 as ANSI and chokes on Cyrillic.
 param(
   [int]$WaitMinutes = 12,
-  [string]$Out = "C:\dev\proxy_app_test\build\windows\x64\runner\Release\tundiag.txt",
+  [string]$Out = "C:\dev\proxy_app_test\build\diag\tundiag.txt",
   [string]$ProxyIp = "78.17.99.116",
   [int]$ProxyPort = 57181
 )
+
+# Not next to the built exe, where this used to write: that folder is what gets
+# packaged, and one such file went out with the 1.0.2-1.0.10 releases.
+if (Split-Path $Out) { New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null }
 
 $api = "http://127.0.0.1:9090"
 $deadline = (Get-Date).AddMinutes($WaitMinutes)

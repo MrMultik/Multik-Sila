@@ -1300,3 +1300,18 @@ Multik Sila.lnk -> %LOCALAPPDATA%\Programs\Multik Sila\proxy_app_test.exe
 Установщик собирается из ТОЙ ЖЕ папки Release:
 `tools\innosetup\ISCC.exe installer\multik_sila.iss` — то есть сначала
 доводим сборку до рабочего состояния, и только потом пакуем.
+
+**В пакет идёт только allowlist, а не «папка минус исключения»** (с 2026-09-26):
+`proxy_app_test.exe`, `*.dll` в корне, `data\app.so`, `data\icudtl.dat`,
+`data\flutter_assets\**` и ядра (ядра — только в установщик, не в zip). Так
+перечислено в `[Files]` .iss и в `Get-Unshippable` в `tools/release.ps1`, и
+держать их надо одинаковыми. Список исключений проигрывал каждому новому файлу:
+`ab_strictroute.txt` (вывод `tools/tun_ab_strictroute.ps1`) уехал во все zip
+1.0.2–1.0.10 и в установщик 1.0.10, а `startup_log.txt`, `xray_probe_single.json`
+и `profile_<id>.txt` (импортированный профиль, со всеми серверами) не значились
+в нём вовсе. `release.ps1` сверяет с allowlist папку Release до сборки и перед
+упаковкой, затем сами установщик (по строкам `Compressing:` лога ISCC) и zip (по
+записям архива); чужой файл останавливает релиз, провалившийся пакет удаляется.
+Сам скрипт стирает только рабочие файлы приложения (config, логи, мосты,
+пробники, `rulesets\`, `probe\`), остальное оставляет человеку. Диагностические
+`tools/*.ps1` пишут в `build\diag\`, не в Release.

@@ -16,8 +16,12 @@
 #   - whether our port 1337 is listening
 param(
   [double]$Minutes = 8,
-  [string]$Out = "C:\dev\proxy_app_test\build\windows\x64\runner\Release\capture.txt"
+  [string]$Out = "C:\dev\proxy_app_test\build\diag\capture.txt"
 )
+
+# Not next to the built exe, where this used to write: that folder is what gets
+# packaged, and one such file went out with the 1.0.2-1.0.10 releases.
+if (Split-Path $Out) { New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null }
 
 $body = '{"model":"claude-opus-4-1","max_tokens":1,"messages":[{"role":"user","content":"x"}]}'
 $key = "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
