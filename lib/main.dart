@@ -6631,9 +6631,12 @@ del "%~f0"
   // xhttp-серверами было чистым Clash API selector switch без единого килла.
   Future<void> _ensureAllXrayBridgesRunning() async {
     final xrayServers = _servers.where((s) => s.engine == 'xray').toList();
-    for (final server in xrayServers) {
-      await _ensureXrayBridge(server);
-    }
+    // Параллельно, а не по очереди: с переводом REALITY на Xray мостов стало
+    // вдвое больше (у пользователя ~10), а каждый по очереди — это ~0,3 с
+    // ожидания порта. Гонок нет: порт выводится из тега (_bridgePortFor),
+    // конфиг у каждого в своём файле, а словарь процессов трогает один
+    // поток событий Dart.
+    await Future.wait(xrayServers.map(_ensureXrayBridge));
   }
 
   void _stopAllXrayBridges() {
