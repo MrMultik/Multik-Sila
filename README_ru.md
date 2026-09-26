@@ -32,10 +32,19 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/windows-connection.png" width="200" alt="Главный экран">
-  <img src="docs/screenshots/windows-servers.png" width="200" alt="Список серверов">
-  <img src="docs/screenshots/windows-routing.png" width="200" alt="Маршрутизация">
-  <img src="docs/screenshots/windows-settings.png" width="200" alt="Настройки">
+  <sub><b>Windows</b></sub><br>
+  <img src="docs/screenshots/windows-connection.png" width="200" alt="Главный экран на Windows">
+  <img src="docs/screenshots/windows-servers.png" width="200" alt="Список серверов на Windows">
+  <img src="docs/screenshots/windows-routing.png" width="200" alt="Маршрутизация на Windows">
+  <img src="docs/screenshots/windows-settings.png" width="200" alt="Настройки на Windows">
+</p>
+
+<p align="center">
+  <sub><b>Android</b></sub><br>
+  <img src="docs/screenshots/android-connection.png" width="170" alt="Главный экран на Android">
+  <img src="docs/screenshots/android-servers.png" width="170" alt="Список серверов на Android">
+  <img src="docs/screenshots/android-routing.png" width="170" alt="Маршрутизация на Android">
+  <img src="docs/screenshots/android-settings.png" width="170" alt="Настройки на Android">
 </p>
 
 ---

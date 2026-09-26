@@ -32,10 +32,19 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/windows-connection.png" width="200" alt="Connection screen">
-  <img src="docs/screenshots/windows-servers.png" width="200" alt="Server list">
-  <img src="docs/screenshots/windows-routing.png" width="200" alt="Routing">
-  <img src="docs/screenshots/windows-settings.png" width="200" alt="Settings">
+  <sub><b>Windows</b></sub><br>
+  <img src="docs/screenshots/windows-connection.png" width="200" alt="Connection screen on Windows">
+  <img src="docs/screenshots/windows-servers.png" width="200" alt="Server list on Windows">
+  <img src="docs/screenshots/windows-routing.png" width="200" alt="Routing on Windows">
+  <img src="docs/screenshots/windows-settings.png" width="200" alt="Settings on Windows">
+</p>
+
+<p align="center">
+  <sub><b>Android</b></sub><br>
+  <img src="docs/screenshots/android-connection.png" width="170" alt="Connection screen on Android">
+  <img src="docs/screenshots/android-servers.png" width="170" alt="Server list on Android">
+  <img src="docs/screenshots/android-routing.png" width="170" alt="Routing on Android">
+  <img src="docs/screenshots/android-settings.png" width="170" alt="Settings on Android">
 </p>
 
 ---
