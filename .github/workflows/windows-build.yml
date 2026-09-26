@@ -116,11 +116,11 @@ jobs:
           $p = Start-Process $setup -Wait -PassThru -ArgumentList `
             "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER", "/NOICONS", "/DIR=`"$dir`""
           if ($p.ExitCode -ne 0) { throw "Inno Setup install failed with exit code $($p.ExitCode)" }
-          $iscc = Join-Path $dir "ISCC.exe"
-          if (-not (Test-Path $iscc)) { throw "ISCC.exe did not land in $dir" }
-          $installed = (Get-Item $iscc).VersionInfo.ProductVersion
-          Write-Host "ISCC $installed"
-          if (-not $installed.StartsWith($env:INNO_VERSION)) { throw "expected Inno Setup $env:INNO_VERSION, got $installed" }
+          # No version check on the installed files: Inno Setup's own binaries
+          # carry 0.0.0.0 in their version resource. The installer's SHA-256
+          # above already pins the exact version.
+          if (-not (Test-Path (Join-Path $dir "ISCC.exe"))) { throw "ISCC.exe did not land in $dir" }
+          Write-Host "Inno Setup $env:INNO_VERSION installed into $dir"
 
       - name: Show the toolchain
         run: |
