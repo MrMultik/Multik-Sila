@@ -1,0 +1,178 @@
+# Builds the Windows release from source on a clean GitHub-hosted machine.
+#
+# It runs the very script releases are cut with locally, tools/release.ps1,
+# so the installer and the update zip here are built the same way as the ones
+# published so far. Everything the script does not build itself is pinned and
+# checked against a SHA-256 before use:
+#   - Flutter SDK            (FLUTTER_VERSION)
+#   - sing-box and Xray      (official release archives of SagerNet/sing-box
+#                             and XTLS/Xray-core; only the two .exe files are
+#                             taken, exactly as the local setup does)
+#   - Inno Setup             (official release of jrsoftware/issrc)
+#
+# Code signing (SignPath) is NOT wired yet: it needs the organisation and
+# project IDs SignPath issues after the project is approved. The two places
+# where it goes are marked "SIGNPATH" below.
+
+name: Windows build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: "3.44.8"
+  SING_BOX_VERSION: "1.14.2"
+  SING_BOX_SHA256: "c2d8bfff918755808781dfdeeb8581b6c91eb3a243d9a7b55483cfc0c0684d32"
+  XRAY_VERSION: "26.9.9"
+  XRAY_SHA256: "244deaba2098c2964e49bba90df3707777e5f5f428a82d2f29604015f24beec2"
+  INNO_VERSION: "6.7.3"
+  INNO_TAG: "is-6_7_3"
+  INNO_SHA256: "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732"
+
+jobs:
+  build:
+    # Windows Server 2025 with Visual Studio 2026 - the same Visual Studio
+    # generation the releases so far were built with.
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        # Windows PowerShell 5.1: the edition tools/release.ps1 is written for.
+        shell: powershell
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the version
+        id: version
+        run: |
+          $iss = Get-Content "installer\multik_sila.iss" -Raw -Encoding UTF8
+          $ver = [regex]::Match($iss, '#define\s+AppVersion\s+"([^"]+)"').Groups[1].Value
+          if (-not $ver) { throw "AppVersion not found in installer\multik_sila.iss" }
+          # A tag build must be the version it is named after, or the release
+          # page and the files on it would disagree.
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$ver") {
+            throw "tag $env:GITHUB_REF_NAME does not match version $ver"
+          }
+          # Shown on the About screen: when the commit was made and which one.
+          $when = [DateTimeOffset]::FromUnixTimeSeconds([long](git log -1 --format=%ct)).UtcDateTime
+          $stamp = "{0:yyyy-MM-dd HH:mm} UTC, {1}" -f $when, $env:GITHUB_SHA.Substring(0, 7)
+          # Not ">>": in Windows PowerShell it writes UTF-16, which the runner
+          # does not read.
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "version=$ver`nstamp=$stamp`n")
+          Write-Host "version $ver, build stamp '$stamp'"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Fetch sing-box and Xray
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Get-Pinned([string]$Url, [string]$Sha256, [string]$OutFile) {
+            & curl.exe -fsSL --retry 3 -o $OutFile $Url
+            if ($LASTEXITCODE -ne 0) { throw "download failed: $Url" }
+            $actual = (Get-FileHash $OutFile -Algorithm SHA256).Hash
+            if ($actual -ne $Sha256) { throw "$Url`: SHA-256 $actual, expected $Sha256" }
+            Write-Host "verified $Url"
+          }
+          $tmp = $env:RUNNER_TEMP
+          $sb = "sing-box-$env:SING_BOX_VERSION-windows-amd64"
+          Get-Pinned "https://github.com/SagerNet/sing-box/releases/download/v$env:SING_BOX_VERSION/$sb.zip" `
+            $env:SING_BOX_SHA256 "$tmp\sing-box.zip"
+          Get-Pinned "https://github.com/XTLS/Xray-core/releases/download/v$env:XRAY_VERSION/Xray-windows-64.zip" `
+            $env:XRAY_SHA256 "$tmp\xray.zip"
+          Expand-Archive "$tmp\sing-box.zip" "$tmp\sing-box" -Force
+          Expand-Archive "$tmp\xray.zip" "$tmp\xray" -Force
+          # The repository root is where windows/CMakeLists.txt picks them up
+          # and installs them next to the app's exe.
+          Copy-Item "$tmp\sing-box\$sb\sing-box.exe" "sing-box.exe"
+          Copy-Item "$tmp\xray\xray.exe" "xray.exe"
+          & .\sing-box.exe version | Select-Object -First 1
+          & .\xray.exe version | Select-Object -First 1
+
+      - name: Install Inno Setup
+        run: |
+          $ErrorActionPreference = "Stop"
+          $setup = "$env:RUNNER_TEMP\innosetup-$env:INNO_VERSION.exe"
+          & curl.exe -fsSL --retry 3 -o $setup `
+            "https://github.com/jrsoftware/issrc/releases/download/$env:INNO_TAG/innosetup-$env:INNO_VERSION.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup download failed" }
+          $actual = (Get-FileHash $setup -Algorithm SHA256).Hash
+          if ($actual -ne $env:INNO_SHA256) { throw "Inno Setup: SHA-256 $actual, expected $env:INNO_SHA256" }
+          # Into tools\innosetup, where tools/release.ps1 looks for it (locally
+          # it is a copy of the same version). The runner image has its own,
+          # older Inno Setup; per-user mode keeps this one apart from it.
+          $dir = Join-Path $env:GITHUB_WORKSPACE "tools\innosetup"
+          $p = Start-Process $setup -Wait -PassThru -ArgumentList `
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER", "/NOICONS", "/DIR=`"$dir`""
+          if ($p.ExitCode -ne 0) { throw "Inno Setup install failed with exit code $($p.ExitCode)" }
+          $iscc = Join-Path $dir "ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe did not land in $dir" }
+          $installed = (Get-Item $iscc).VersionInfo.ProductVersion
+          Write-Host "ISCC $installed"
+          if (-not $installed.StartsWith($env:INNO_VERSION)) { throw "expected Inno Setup $env:INNO_VERSION, got $installed" }
+
+      - name: Show the toolchain
+        run: |
+          flutter --version
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -format text |
+            Select-String "^(displayName|installationVersion):"
+
+      - name: Build the app
+        env:
+          BUILD_STAMP: ${{ steps.version.outputs.stamp }}
+        run: |
+          & .\tools\release.ps1 -Root $env:GITHUB_WORKSPACE -Stage build -BuildStamp $env:BUILD_STAMP
+
+      # ---------------------------------------------------------------------
+      # SIGNPATH, step 1 of 2 (not wired yet): sign the app's own exe,
+      #   build\windows\x64\runner\Release\proxy_app_test.exe,
+      # BEFORE packaging, so the installer and the update zip both carry the
+      # signed one. Outline: upload the exe with actions/upload-artifact, pass
+      # its artifact id to signpath/github-action-submit-signing-request
+      # (organization-id, project-slug, signing-policy-slug,
+      # wait-for-completion: true), then copy the signed exe back over the
+      # unsigned one. Only proxy_app_test.exe is ours to sign: sing-box.exe,
+      # xray.exe, flutter_windows.dll and the plugin DLLs are upstream builds
+      # and go in unsigned. Each request waits for manual approval.
+      # ---------------------------------------------------------------------
+
+      - name: Package the installer and the update zip
+        run: |
+          & .\tools\release.ps1 -Root $env:GITHUB_WORKSPACE -Stage package
+
+      # ---------------------------------------------------------------------
+      # SIGNPATH, step 2 of 2 (not wired yet): sign
+      #   installer\output\MultikSila-<version>-setup.exe
+      # the same way. This is the file SmartScreen judges on download.
+      # ---------------------------------------------------------------------
+
+      - name: Record checksums
+        run: |
+          $sums = Get-ChildItem "installer\output" -File |
+            Where-Object { $_.Name -like "*-setup.exe" -or $_.Name -like "*-windows-x64.zip" } |
+            ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name }
+          # ASCII, not the UTF-16 Tee-Object/Out-File write here: sha256sum -c
+          # has to be able to read it.
+          $sums | Set-Content "installer\output\SHA256SUMS.txt" -Encoding ascii
+          $sums
+
+      - name: Upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: MultikSila-${{ steps.version.outputs.version }}-windows
+          path: |
+            installer/output/MultikSila-*-setup.exe
+            installer/output/MultikSila-*-windows-x64.zip
+            installer/output/SHA256SUMS.txt
+          if-no-files-found: error

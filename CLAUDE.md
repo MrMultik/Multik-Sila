@@ -1233,6 +1233,32 @@ Windows укладывается в полторы минуты, Android — в 
 Отсюда же вывод для фоновых сборок: запускать `flutter` из двух мест
 одновременно (например, Windows-сборку и APK) нельзя — второй встанет.
 
+## Сборка в GitHub Actions (`.github/workflows/windows-build.yml`)
+
+Нужна для SignPath («Binary artifacts must be built from source code in a
+verifiable way»). Запускается на теги `v*` и вручную, собирает ТЕМ ЖЕ
+`tools/release.ps1` в две половины: `-Stage build`, затем `-Stage package` —
+между ними место под подпись .exe (помечено `SIGNPATH`), вторая пометка — под
+подпись установщика. Подпись пока не подключена: нужны ID организации и
+проекта от SignPath после одобрения.
+
+- Всё внешнее закреплено версией и SHA-256 в `env:` workflow: Flutter,
+  sing-box (`...-windows-amd64.zip`, берётся только `sing-box.exe`, без
+  `libcronet.dll` — ровно как локально), Xray (`Xray-windows-64.zip`, только
+  `xray.exe`), Inno Setup (официальный релиз jrsoftware/issrc, ставится в
+  `tools\innosetup`, куда смотрит release.ps1; на образе раннера своя, старее).
+  **Обновил вшитые ядра или Flutter — обнови пины в workflow**, иначе CI
+  соберёт не то, что лежит локально. SHA-256 ассетов — `gh api
+  repos/<owner>/<repo>/releases/tags/<tag> --jq '.assets[]|.name+" "+.digest'`.
+- Раннер `windows-2025` = Visual Studio 2026, как на машине пользователя.
+  Shell — `powershell` (5.1), под него написан release.ps1. В 5.1 `>>` и
+  `Tee-Object` пишут UTF-16: в `GITHUB_OUTPUT` — только `AppendAllText`.
+- На теге сборка падает, если тег не равен `v<AppVersion из .iss>`.
+- Проверено 2026-09-26 прогоном всех шагов (кроме установки Inno) на чистом
+  клоне в обёртке, повторяющей `shell: powershell` GitHub: ядра совпали с
+  локальными побайтово, установщик — 24 файла, 3 набора правил, без рабочих
+  файлов. Сам workflow на GitHub ещё не запускался.
+
 ## Тестовые данные
 
 Ссылка на подписку и хост прокси-сервера — в `TESTDATA.local.md` рядом с этим

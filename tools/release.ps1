@@ -19,11 +19,20 @@
 # cores on its own schedule and may already hold a newer build than the one
 # bundled here; overwriting them on every app update would roll them back.
 #
+# The same script builds the release on GitHub Actions
+# (.github/workflows/windows-build.yml), so what is published can be traced
+# back to the source. CI runs it in two halves, -Stage build and then
+# -Stage package, because the app's exe has to be code-signed in between:
+# the installer and the update zip must carry the signed one.
+#
 # ASCII only: PowerShell 5.1 reads a BOM-less .ps1 as ANSI and chokes on Cyrillic.
 param(
   [switch]$Publish,          # without it: build and package only, no upload
   [string]$Notes,            # release notes written from tools\release_notes.md
-  [string]$Root = "C:\dev\proxy_app_test"
+  [string]$Root = "C:\dev\proxy_app_test",
+  [ValidateSet("all", "build", "package")]
+  [string]$Stage = "all",    # build = clean + flutter build; package = installer + zip (+ publish)
+  [string]$BuildStamp = (Get-Date -Format "yyyy-MM-dd HH:mm")
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,24 +58,29 @@ if ($Notes) {
 
 $rel = "build\windows\x64\runner\Release"
 
-# The Release folder doubles as the app's working directory when it is run from
-# the build, so it accumulates configs with real server addresses, logs and
-# rule-set caches. None of that may end up in a published artefact.
-Write-Host "cleaning working files out of the build folder"
-foreach ($f in @("config.json", "xray_config.json", "app_log.txt", "app_log.txt.prev.txt",
-                 "capture.txt", "tundiag.txt", "tundebug.txt")) {
-  Remove-Item (Join-Path $rel $f) -Force -ErrorAction SilentlyContinue
-}
-Get-ChildItem $rel -Filter "xray_bridge_*.json" -ErrorAction SilentlyContinue | Remove-Item -Force
-Get-ChildItem $rel -Filter "*_probe.json" -ErrorAction SilentlyContinue | Remove-Item -Force
-Get-ChildItem $rel -Filter "rulesets" -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
+if ($Stage -ne "package") {
+  # The Release folder doubles as the app's working directory when it is run from
+  # the build, so it accumulates configs with real server addresses, logs and
+  # rule-set caches. None of that may end up in a published artefact.
+  Write-Host "cleaning working files out of the build folder"
+  foreach ($f in @("config.json", "xray_config.json", "app_log.txt", "app_log.txt.prev.txt",
+                   "capture.txt", "tundiag.txt", "tundebug.txt")) {
+    Remove-Item (Join-Path $rel $f) -Force -ErrorAction SilentlyContinue
+  }
+  Get-ChildItem $rel -Filter "xray_bridge_*.json" -ErrorAction SilentlyContinue | Remove-Item -Force
+  Get-ChildItem $rel -Filter "*_probe.json" -ErrorAction SilentlyContinue | Remove-Item -Force
+  Get-ChildItem $rel -Filter "rulesets" -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
 
-Write-Host "building"
-# The build stamp is what tells two builds of the same version apart on the
-# About screen. Without it a published build and a local one look identical,
-# and asking someone which of the two they are running is not diagnosis.
-$stamp = Get-Date -Format "yyyy-MM-dd HH:mm"
-& flutter build windows --release "--dart-define=BUILD_STAMP=$stamp" | Select-Object -Last 1
+  Write-Host "building"
+  # The build stamp is what tells two builds of the same version apart on the
+  # About screen. Without it a published build and a local one look identical,
+  # and asking someone which of the two they are running is not diagnosis.
+  & flutter build windows --release "--dart-define=BUILD_STAMP=$BuildStamp" | Select-Object -Last 1
+  # Stop does not cover native commands: without this a failed build went on to
+  # package whatever an earlier build had left in the Release folder.
+  if ($LASTEXITCODE -ne 0) { throw "flutter build failed with exit code $LASTEXITCODE" }
+  if ($Stage -eq "build") { Write-Host "built only (stage build)"; exit }
+}
 
 Write-Host "compiling installer"
 Get-ChildItem "installer\output" -Filter *.exe -ErrorAction SilentlyContinue | Remove-Item -Force
