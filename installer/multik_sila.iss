@@ -9,7 +9,7 @@
 ; автоматически, и разъехавшиеся номера сломают самообновление приложения.
 
 #define AppName "Multik Sila"
-#define AppVersion "1.0.10"
+#define AppVersion "1.0.11"
 #define AppExeName "proxy_app_test.exe"
 #define BuildDir "..\build\windows\x64\runner\Release"
 
