@@ -728,6 +728,69 @@ const Map<String, Map<String, String>> _strings = {
   },
   'diag.speedRun': {'ru': 'Измерить скорость', 'en': 'Measure speed'},
   'diag.speedRunning': {'ru': 'Качаю…', 'en': 'Downloading…'},
+  'rc.title': {'ru': 'Куда пойдёт адрес', 'en': 'Where an address goes'},
+  'rc.open': {'ru': 'Проверить, куда пойдёт адрес', 'en': 'Check where an address goes'},
+  'rc.intro': {
+    'ru': 'Введите домен или IP. Приложение откроет к нему пробное соединение через '
+        'работающее ядро и покажет, куда ядро его отправило и по какому правилу. '
+        'Соединение сразу закрывается.',
+    'en': 'Enter a domain or an IP. The app opens a test connection to it through the '
+        'running core and shows where the core sent it and by which rule. The connection '
+        'is closed right away.',
+  },
+  'rc.input': {'ru': 'Домен или IP-адрес', 'en': 'Domain or IP address'},
+  'rc.hint': {'ru': 'например, youtube.com или 1.1.1.1', 'en': 'e.g. youtube.com or 1.1.1.1'},
+  'rc.check': {'ru': 'Проверить', 'en': 'Check'},
+  'rc.checking': {'ru': 'Проверяю…', 'en': 'Checking…'},
+  'rc.needCore': {
+    'ru': 'Сначала подключитесь: ответ даёт само ядро по действующим правилам.',
+    'en': 'Connect first: the answer comes from the core itself, by the rules in effect.',
+  },
+  'rc.badInput': {
+    'ru': 'Не похоже на домен или IP-адрес.',
+    'en': 'This does not look like a domain or an IP address.',
+  },
+  'rc.route': {'ru': 'Маршрут', 'en': 'Route'},
+  'rc.rule': {'ru': 'Правило', 'en': 'Rule'},
+  'rc.direct': {'ru': 'Напрямую, мимо VPN', 'en': 'Direct, outside the VPN'},
+  'rc.viaServer': {'ru': 'Через VPN — сервер «{name}»', 'en': 'Through the VPN — server "{name}"'},
+  'rc.blocked': {'ru': 'Заблокировано', 'en': 'Blocked'},
+  'rc.ruleFinal': {
+    'ru': 'Ни одно правило не подошло — выход по умолчанию',
+    'en': 'No rule matched — the default route',
+  },
+  'rc.ruleSet': {'ru': 'Набор правил: {names}', 'en': 'Rule set: {names}'},
+  'rc.setRuSites': {'ru': 'российские сайты', 'en': 'Russian sites'},
+  'rc.setRuIp': {'ru': 'российские IP-адреса', 'en': 'Russian IP addresses'},
+  'rc.setAds': {'ru': 'реклама', 'en': 'ads'},
+  'rc.rulePrivate': {'ru': 'Локальная сеть', 'en': 'Local network'},
+  'rc.ruleList': {
+    'ru': 'Список доменов или адресов: свои правила, правила сервисов или локальные имена',
+    'en': 'A list of domains or addresses: custom rules, service rules or local names',
+  },
+  'rc.ruleApp': {'ru': 'Правило для программы', 'en': 'A per-app rule'},
+  'rc.whyUserBlock': {'ru': 'Ваш список «Блокировать»', 'en': 'Your "Block" list'},
+  'rc.whyService': {
+    'ru': 'Сервис «{name}» — «Блокировать»',
+    'en': 'Service "{name}" is set to "Block"',
+  },
+  'rc.whyAds': {'ru': 'Блокировка рекламы', 'en': 'Ad blocking'},
+  'rc.whyIpv6': {
+    'ru': 'IPv6 отключён (DNS: «Только IPv4»)',
+    'en': 'IPv6 is off (DNS: "IPv4 only")',
+  },
+  'rc.noConnection': {
+    'ru': 'Ядро не установило соединение: адрес недоступен или его отклонило правило '
+        'блокировки.',
+    'en': 'The core did not establish the connection: the address is unreachable or a '
+        'blocking rule rejected it.',
+  },
+  'rc.noAnswer': {'ru': 'Локальный прокси не ответил', 'en': 'The local proxy did not answer'},
+  'rc.notSeen': {
+    'ru': 'Соединение открылось, но ядро его пока не показало. Попробуйте ещё раз.',
+    'en': 'The connection opened, but the core has not listed it yet. Try again.',
+  },
+  'rc.apiError': {'ru': 'Не удалось спросить ядро: {e}', 'en': 'Could not ask the core: {e}'},
   'diag.mbits': {'ru': 'Мбит/с', 'en': 'Mbit/s'},
   'diag.mb': {'ru': 'МБ', 'en': 'MB'},
   'diag.sec': {'ru': 'с', 'en': 's'},

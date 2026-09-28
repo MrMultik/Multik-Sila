@@ -18,6 +18,7 @@ import 'legacy_data.dart';
 import 'onboarding.dart';
 import 'platform_env.dart';
 import 'prefs_keys.dart';
+import 'route_check.dart';
 import 'qr_import.dart';
 import 'system_proxy.dart';
 import 'package:http/http.dart' as http;
@@ -8709,6 +8710,45 @@ del "%~f0"
                     MaterialPageRoute(builder: (_) => CustomRulesScreen(initial: _settings)),
                   );
                   if (updated != null) await _saveSettings(updated);
+                },
+              ),
+            // Только там, где ядро — отдельный процесс: на Android приложение
+            // исключено из своего VPN, и пробное соединение прошло бы мимо ядра
+            // (см. RouteCheckScreen).
+            if (_tab == 2 && Env.coreRunsAsProcess) const SizedBox(height: 8),
+            if (_tab == 2 && Env.coreRunsAsProcess)
+              OutlinedButton.icon(
+                icon: const Icon(Icons.alt_route, size: 18),
+                label: Text(t('rc.open')),
+                onPressed: () {
+                  final adsPath = _ruleSetPath(_rsAds);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => RouteCheckScreen(
+                        coreRunning: _runningEngine != null,
+                        prober: RouteProber(
+                          apiBase: _clashApiBase,
+                          localPort: _settings.localPort,
+                          tunMode: _tunMode,
+                          tagNames: {
+                            for (final s in _servers) s.outbound['tag'] as String: s.name,
+                          },
+                          customBlock: _settings.customBlock,
+                          blockedServices: {
+                            for (final e in _settings.serviceRules.entries)
+                              if (e.value == 'block' &&
+                                  AppSettings.serviceDomains[e.key] != null)
+                                e.key: AppSettings.serviceDomains[e.key]!,
+                          },
+                          adsRuleSetPath:
+                              _blockAds && File(adsPath).existsSync() ? adsPath : null,
+                          singBoxPath: _singBoxPath,
+                          ipv4Only: _settings.dnsStrategy == 'ipv4_only',
+                        ),
+                      ),
+                    ),
+                  );
                 },
               ),
             if (_tab == 0) const SizedBox(height: 8),
