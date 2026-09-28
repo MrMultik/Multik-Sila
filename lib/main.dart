@@ -6013,6 +6013,17 @@ del "%~f0"
           "strict_route": _settings.strictRoute,
           "stack": tunStack,
           "mtu": _settings.tunMtu,
+          // На Android «эта программа — напрямую» = программа ВНЕ VPN целиком,
+          // а не только правило маршрута. Иначе банк, Госуслуги, маркетплейс
+          // видят VPN всё равно: Android сообщает о нём любой программе
+          // (TRANSPORT_VPN у сети), куда бы ни шёл её трафик, — и отказываются
+          // работать. Так же делает экран «Per-app proxy» в Karing. Список
+          // уходит в SilaVpnService как excludePackage ->
+          // addDisallowedApplication. Правило package_name -> direct ниже
+          // остаётся: программе, которую система всё же пустит в туннель
+          // (например, пакет не найден), оно даст тот же маршрут.
+          if (!Env.appRulesUsePaths && appsByAction['direct'] != null)
+            "exclude_package": appsByAction['direct'],
         }
       ];
       // Свой xray.exe (мосты для xhttp-серверов) ходит до прокси-сервера как
