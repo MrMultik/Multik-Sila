@@ -5213,6 +5213,32 @@ del "%~f0"
   // выставлен «как у Karing», а тот раздаёт собственную сборку ядра.
   bool? _coreHasGvisor;
 
+  // Нужен ли ядру ключ `independent_cache` (см. _writeConfig): только до 1.14.
+  // Спрашиваем один раз за запуск, как и про gVisor: подмена ядра (.new)
+  // случается только при старте приложения, до первого подключения.
+  //
+  // Версия неизвестна (самосборный sing-box отвечает «version unknown») —
+  // ключ НЕ ставим. Ошибиться в эту сторону — это смешанный кэш у FakeIP на
+  // старом ядре; в обратную — ядро 1.16+, которое с этим ключом не стартует.
+  bool? _independentCacheNeeded;
+
+  Future<bool> _singboxNeedsIndependentCache() async {
+    if (_independentCacheNeeded != null) return _independentCacheNeeded!;
+    String? version;
+    if (Env.coreRunsAsProcess) {
+      version = await _installedCoreVersion(_singBoxPath);
+    } else {
+      try {
+        version = RegExp(r'\d+\.\d+\.\d+')
+            .firstMatch((await AndroidVpn.coreVersions()).singbox)
+            ?.group(0);
+      } catch (_) {}
+    }
+    _independentCacheNeeded =
+        version != null && _compareVersions(version, '1.14.0') < 0;
+    return _independentCacheNeeded!;
+  }
+
   Future<bool> _coreSupportsGvisor() async {
     if (_coreHasGvisor != null) return _coreHasGvisor!;
     // На Android спрашивать не у кого и незачем: ядро там не отдельный файл,
@@ -5843,7 +5869,17 @@ del "%~f0"
       "strategy": _settings.dnsStrategy,
       // Раздельный кэш обязателен при FakeIP: иначе выдуманные и настоящие
       // ответы для одного домена перемешиваются в общем кэше.
-      if (_settings.dnsFakeIp) "independent_cache": true,
+      //
+      // Но только для ядер ДО 1.14: там кэш общий, и развести его можно
+      // только этим ключом. С 1.14 сервер входит в ключ кэша всегда
+      // (`transportTag` в dnsCacheKey, dns/client.go v1.14.2), ключ стал
+      // пустым и объявлен устаревшим, а в 1.16 его уберут — и конфиг с ним
+      // перестанет приниматься. Автообновление ядра проверяет конфиг перед
+      // подменой, так что 1.16 просто не встал бы, и приложение застряло бы
+      // на старом ядре. Обе версии живут одновременно: Windows на 1.14.2,
+      // ядро Android собрано из 1.13.16 (mobile/go.mod).
+      if (_settings.dnsFakeIp && await _singboxNeedsIndependentCache())
+        "independent_cache": true,
       if (_settings.dnsClientSubnet.trim().isNotEmpty)
         "client_subnet": _settings.dnsClientSubnet.trim(),
     };
