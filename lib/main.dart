@@ -2378,7 +2378,6 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   bool _testingLatency = false;
 
   Process? _coreProcess; // sing-box
-  Process? _xrayProcess; // xray — обычный режим (не-TUN), единственный процесс на 1337
   // TUN-режим: у каждого xhttp-сервера СВОЙ постоянный мост на своём порту,
   // поднятый заранее и живущий весь сеанс TUN — переключение между ними тогда
   // чистый Clash API selector switch без убийства процессов (см. историю
@@ -2658,7 +2657,7 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
 
   /// Опрос Clash API под состояние ядра.
   ///
-  /// На Windows таймер заводится прямо в `_startSingboxCore`/`_startXrayCore` —
+  /// На Windows таймер заводится прямо в `_startSingboxCore` —
   /// там момент старта ядра известен точно. На Android ядро поднимает служба, и
   /// «поднялось» приезжает отдельным событием ПОЗЖЕ возврата из `_startCore`.
   /// Таймер там не заводился вообще, и панель статистики навсегда оставалась с
@@ -2668,10 +2667,6 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     _statsTimer?.cancel();
     _statsTimer = null;
     _statsFails = 0;
-    // У Xray нет Clash API вообще, спрашивать не у кого. Подпись об этом ставит
-    // сам `_startXrayCore`, и затирать её ошибкой опроса — врать про поломку
-    // там, где просто нечего опрашивать.
-    if (_runningEngineValue == 'xray') return;
     if (_runningEngineValue != null) {
       _statsTimer =
           Timer.periodic(const Duration(seconds: 2), (_) => _fetchStats());
@@ -3400,13 +3395,12 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // <файл>.new. Подменять работающий бинарь на ходу нельзя, поэтому замена
   // отложена до следующего старта приложения — тот же приём, что с наборами
   // правил. Возвращает true, если обновление подготовлено.
-  /// Любой из конфигов, которые приложение отдаёт Xray: основной
-  /// (`xray_config.json`, обычный режим) или мост TUN (`xray_bridge_*.json`).
+  /// Любой из конфигов, которые приложение отдаёт Xray, — конфиг моста
+  /// (`xray_bridge_*.json`; других у Xray с 2026-09-28 нет, см. _startCore).
   /// Нужен, чтобы проверить скачанный Xray на ЕГО конфиге, а не на чужом.
   /// Нет ни одного — значит Xray ещё ни разу не запускался, и проверять
   /// нечем; тогда обновление принимается по одной лишь версии, как раньше.
   String? _anyXrayConfigPath() {
-    if (File(_xrayConfigPath).existsSync()) return _xrayConfigPath;
     try {
       final bridges = Directory(_workDir)
           .listSync()
@@ -5041,7 +5035,7 @@ del "%~f0"
     } catch (_) {}
   }
 
-  String get _xrayConfigPath => '$_workDir${Platform.pathSeparator}xray_config.json';
+  String get _legacyXrayConfigPath => '$_workDir${Platform.pathSeparator}xray_config.json';
 
   // У каждого постоянного моста TUN-режима свой файл конфига — процессы
   // теперь работают одновременно, общий файл конфига им не подходит.
@@ -5355,9 +5349,9 @@ del "%~f0"
     }
   }
 
-  // Серверы с engine == 'xray' (xhttp-транспорт) sing-box поднять сам не может —
-  // в обычном режиме они просто не попадают в его конфиг (см. _startXrayCore).
-  // В TUN-режиме для них добавляется bridge-outbound на локальный Xray.
+  // Серверы с engine == 'xray' (xhttp, REALITY) sing-box поднять сам не может —
+  // для них в конфиг идёт bridge-outbound на локальный Xray, в обоих режимах
+  // (почему не одиночный Xray в обычном режиме — см. _startCore).
   // Все sing-box-совместимые серверы грузятся разом, обёрнутые в один
   // selector-outbound с тегом "proxy" — это даёт Clash API возможность
   // тестировать задержку и переключать активный сервер (PUT /proxies/proxy)
@@ -5406,7 +5400,7 @@ del "%~f0"
 
   Future<void> _writeConfig() async {
     final singboxServers = _servers.where((s) => s.engine == 'singbox').toList();
-    final xraySeversForBridge = _tunMode ? _servers.where((s) => s.engine == 'xray').toList() : <ParsedServer>[];
+    final xraySeversForBridge = _servers.where((s) => s.engine == 'xray').toList();
 
     // socks, а не http — HTTP-прокси в принципе не переносит UDP, а браузеры
     // часто сначала пробуют HTTP/3 (QUIC поверх UDP). VLESS сам по себе UDP
@@ -6099,11 +6093,9 @@ del "%~f0"
     await file.writeAsString(const JsonEncoder.withIndent('  ').convert(config));
   }
 
-  // В обычном (не-TUN) режиме переключение серверов на движке Xray идёт через
-  // полный рестарт процесса на порту 1337 — протокол http, т.к. это системная
-  // настройка HTTP-прокси в Windows. В TUN-режиме конфиг пишется для
-  // постоянного моста конкретного сервера — protocol socks+udp (см. _writeConfig
-  // про то, почему не http) на его собственный выделенный порт и свой файл.
+  // Конфиг Xray всегда пишется для постоянного моста конкретного сервера —
+  // protocol socks+udp (см. _writeConfig про то, почему не http) на его
+  // собственный выделенный порт и в свой файл. Впереди всегда стоит sing-box.
   // Копия outbound'а с sockopt.dialerProxy на фрагментирующий freedom.
   // Именно копия: тот же объект используют тест задержки и другие мосты.
   Map<String, dynamic> _xrayOutboundViaFragment(Map<String, dynamic> outbound) {
@@ -6116,7 +6108,7 @@ del "%~f0"
     return copy;
   }
 
-  Future<void> _writeXrayConfig(ParsedServer server, {required int port, required bool isBridge, required String configPath}) async {
+  Future<void> _writeXrayConfig(ParsedServer server, {required int port, required String configPath}) async {
     // Адрес сервера — заранее отрезолвленным IP, а не именем. Под TUN спросить
     // DNS в момент подключения уже нельзя, запрос уедет в туннель (см.
     // _bakeXrayServerIp). Делаем это ДО сборки config: значения копируются в
@@ -6130,8 +6122,8 @@ del "%~f0"
         {
           "listen": "127.0.0.1",
           "port": port,
-          "protocol": isBridge ? "socks" : "http",
-          if (isBridge) "settings": {"auth": "noauth", "udp": true},
+          "protocol": "socks",
+          "settings": {"auth": "noauth", "udp": true},
         }
       ],
       // Xray фрагментирует не полем в tls, а отдельным freedom-outbound:
@@ -6197,7 +6189,6 @@ del "%~f0"
     final ours = <String>{
       for (final p in _xrayBridgeProcesses.values) '${p.pid}',
       if (_coreProcess != null) '${_coreProcess!.pid}',
-      if (_xrayProcess != null) '${_xrayProcess!.pid}',
     };
     for (final exe in [_singBoxPath, _xrayPath]) {
       try {
@@ -6241,7 +6232,6 @@ del "%~f0"
       final ours = <String>{
         for (final p in _xrayBridgeProcesses.values) '${p.pid}',
         if (_coreProcess != null) '${_coreProcess!.pid}',
-        if (_xrayProcess != null) '${_xrayProcess!.pid}',
       };
       final pids = <String>{};
       for (final line in (result.stdout as String).split('\n')) {
@@ -6282,7 +6272,7 @@ del "%~f0"
       if (_stopRequested || _runningEngine == null) return;
       // Убедимся, что умер именно тот процесс, за которым следим: за время
       // ожидания могли успеть перезапустить ядро вручную.
-      if (!identical(process, _coreProcess) && !identical(process, _xrayProcess)) return;
+      if (!identical(process, _coreProcess)) return;
       if (!_settings.autoRestartCore) {
         _appendLog(tp('log.coreExitedNoRestart', {'code': code}));
         return;
@@ -6477,16 +6467,21 @@ del "%~f0"
       return;
     }
 
-    if (!_tunMode && _selectedServer!.engine == 'xray') {
-      // обычный режим: Xray сам держит локальный прокси на 1337, sing-box не нужен
-      await _startXrayCore(_selectedServer!);
-      return;
-    }
-
-    // TUN-режим: sing-box всегда держит адаптер. Поднимаем мосты для ВСЕХ
-    // xhttp-серверов профиля заранее (если ещё не подняты) — тогда любое
-    // последующее переключение между ними уже не требует рестарта процессов.
-    if (_tunMode && _servers.any((s) => s.engine == 'xray')) {
+    // sing-box впереди в ОБОИХ режимах: он держит адаптер (TUN) или локальный
+    // прокси (обычный режим), а Xray-серверы (xhttp, REALITY) идут через мосты.
+    //
+    // Раньше в обычном режиме Xray-сервер запускался ВМЕСТО sing-box — один
+    // xray.exe на порту прокси с единственным outbound'ом, без правил вовсе:
+    // российские сайты шли через сервер, реклама не резалась, свои правила
+    // молчали. Пока через Xray ходили только xhttp-серверы, это касалось двух
+    // серверов рабочей подписки из девяти; с переводом REALITY на Xray
+    // (1.0.11) — пяти. Заодно такие серверы получили статистику, список соединений и
+    // переключение без рестарта, которых у одиночного Xray не было.
+    //
+    // Мосты для ВСЕХ Xray-серверов профиля поднимаем заранее (если ещё не
+    // подняты) — тогда любое последующее переключение между серверами уже
+    // не требует рестарта процессов.
+    if (_servers.any((s) => s.engine == 'xray')) {
       _resetLog(t('log.bridgesStarting'));
       await _ensureAllXrayBridgesRunning();
     }
@@ -6521,7 +6516,7 @@ del "%~f0"
       final tag = server.outbound['tag'] as String;
       final path = '$_workDir${Platform.pathSeparator}xray_bridge_$tag.json';
       await _writeXrayConfig(server,
-          port: _bridgePortFor(tag), isBridge: true, configPath: path);
+          port: _bridgePortFor(tag), configPath: path);
       bridges.add(await File(path).readAsString());
     }
     if (bridges.isNotEmpty) {
@@ -6536,7 +6531,7 @@ del "%~f0"
 
   Future<void> _startSingboxCore() async {
     final singboxServers = _servers.where((s) => s.engine == 'singbox').toList();
-    final hasBridgeCandidate = _tunMode && _servers.any((s) => s.engine == 'xray');
+    final hasBridgeCandidate = _servers.any((s) => s.engine == 'xray');
     if (singboxServers.isEmpty && !hasBridgeCandidate) {
       _resetLog(t('log.noSingboxServers'));
       return;
@@ -6544,22 +6539,27 @@ del "%~f0"
 
     // Предыдущее ядро гасим ПЕРЕД киллерами и сразу обнуляем ссылки.
     //
-    // Оба киллера намеренно пропускают PID'ы из _coreProcess/_xrayProcess —
+    // Оба киллера намеренно пропускают PID'ы из _coreProcess и мостов —
     // иначе они расстреливали бы собственные мосты. Но пока ссылка указывает
     // на ещё ЖИВОЕ старое ядро, эта защита работает против нас: старый
     // процесс остаётся сидеть на порту 1337 (и на Clash API, и на адаптере
     // SilaTUN), новое ядро на них не встаёт и умирает, а UI при этом
     // рапортует «подключено» — трафик продолжает идти через прежний сервер.
-    // Путь: _switchServer зовёт _startCore БЕЗ остановки — то есть при любой
-    // смене движка (xhttp <-> sing-box) и при недоступном Clash API.
-    // Валим только зависший sing-box — мост на Xray (если только что подняли
-    // для TUN-режима) трогать нельзя, иначе он погибнет вместе с ним.
+    // Путь: _switchServer зовёт _startCore БЕЗ остановки, когда Clash API
+    // недоступен.
+    // Валим только зависший sing-box — мосты на Xray (если только что подняли)
+    // трогать нельзя, иначе они погибнут вместе с ним.
     _coreProcess?.kill();
-    _xrayProcess?.kill();
     _coreProcess = null;
-    _xrayProcess = null;
     await _killStrayOnOurPorts();
     await _killOurProcessesByPath();
+
+    // Конфиг одиночного Xray прежних версий больше не пишется (см. _startCore).
+    // Оставшийся файл экран «Конфиги ядер» показывал бы как действующий, а в
+    // нём адрес и ключи сервера — убираем.
+    try {
+      File(_legacyXrayConfigPath).deleteSync();
+    } catch (_) {}
 
     _resetLog(t('log.generatingConfig'));
     await _writeConfig();
@@ -6585,42 +6585,6 @@ del "%~f0"
     // Таймер статистики здесь НЕ заводится: его завёл сеттер `_runningEngine`
     // выше. Второе место завода — это ровно то, чего мы избавились: одно из
     // них однажды и забыли.
-  }
-
-  Future<void> _startXrayCore(ParsedServer server) async {
-    // То же, что и в _startSingboxCore: сначала гасим предыдущее ядро и
-    // обнуляем ссылки, и только потом зовём киллеров — иначе они пропустят
-    // ещё живой процесс как «свой», и Xray не сможет занять порт.
-    _coreProcess?.kill();
-    _xrayProcess?.kill();
-    _coreProcess = null;
-    _xrayProcess = null;
-    await _killStrayOnOurPorts();
-    await _killOurProcessesByPath();
-
-    _resetLog(tp('log.generatingXrayConfig', {'name': server.name}));
-    await _writeXrayConfig(server, port: _settings.localPort, isBridge: false, configPath: _xrayConfigPath);
-
-    _appendLog(t('log.startingXray'));
-
-    final process = await Process.start(_xrayPath, ['run', '-c', _xrayConfigPath]);
-    _xrayProcess = process;
-    _runningEngine = 'xray';
-    _rescheduleHealthCheck();
-    _refreshTrayMenu();
-    _enableSystemProxy();
-    _watchCore(process);
-
-    process.stdout.transform(SystemEncoding().decoder).listen((data) {
-      _appendLog(data);
-    });
-    process.stderr.transform(SystemEncoding().decoder).listen((data) {
-      _appendLog('[stderr] $data');
-    });
-
-    // Опрос уже выключен сеттером `_runningEngine` (у Xray Clash API нет),
-    // остаётся только сказать об этом на экране.
-    setState(() => _statsText = () => tp('stats.xrayNoApi', {'name': server.name}));
   }
 
   // Ждём, пока порт реально начнёт принимать соединения — вместо того чтобы
@@ -6673,7 +6637,7 @@ del "%~f0"
     }
 
     final configPath = _xrayBridgeConfigPath(tag);
-    await _writeXrayConfig(server, port: port, isBridge: true, configPath: configPath);
+    await _writeXrayConfig(server, port: port, configPath: configPath);
     final process = await Process.start(_xrayPath, ['run', '-c', configPath]);
     _xrayBridgeProcesses[tag] = process;
 
@@ -6746,7 +6710,6 @@ del "%~f0"
       return;
     }
     _coreProcess?.kill();
-    _xrayProcess?.kill();
     _stopAllXrayBridges();
     _runningEngine = null;
     // Метки «плохой сервер» живут в пределах сеанса: причина могла быть
@@ -6809,44 +6772,15 @@ del "%~f0"
 
     _appendLog(tp('log.switching', {'name': newServer.name}));
 
-    if (_tunMode) {
-      // TUN держит sing-box с адаптером живым постоянно, а мосты для ВСЕХ
-      // xhttp-серверов уже подняты заранее (см. _startCore) — переключение
-      // между ЛЮБЫМИ серверами идёт через Clash API selector, без единого
-      // рестарта процессов. Эта проверка — просто подстраховка на случай,
-      // если конкретный мост почему-то не поднялся или упал.
-      if (newServer.engine == 'xray') {
-        await _ensureXrayBridge(newServer);
-      }
-      if (_runningEngine == 'singbox' && _coreIsLive) {
-        final tag = newServer.outbound['tag'] as String;
-        try {
-          final resp = await http
-              .put(
-                Uri.parse('$_clashApiBase/proxies/proxy'),
-                headers: {'Content-Type': 'application/json'},
-                body: jsonEncode({'name': tag}),
-              )
-              .timeout(const Duration(seconds: 3));
-          if (resp.statusCode == 204 || resp.statusCode == 200) {
-            _appendLog(tp('log.active', {'name': newServer.name}));
-            _verifyConnection();
-            return;
-          }
-          _appendLog(tp('log.clashApiStatus', {'code': resp.statusCode}));
-        } catch (e) {
-          _appendLog(tp('log.clashApiUnreachable', {'e': e}));
-        }
-      }
-      await _startCore();
-      _verifyConnection();
-      return;
+    // sing-box работает постоянно в обоих режимах, а мосты для ВСЕХ
+    // Xray-серверов уже подняты заранее (см. _startCore) — переключение между
+    // ЛЮБЫМИ серверами идёт через Clash API selector, без единого рестарта
+    // процессов. Эта проверка — просто подстраховка на случай, если
+    // конкретный мост почему-то не поднялся или упал.
+    if (newServer.engine == 'xray') {
+      await _ensureXrayBridge(newServer);
     }
-
-    // мгновенное переключение через Clash API работает только когда уже
-    // крутится sing-box и новый сервер тоже на sing-box — иначе (первый
-    // запуск, переход между движками) нужен полный рестарт нужного ядра
-    if (_runningEngine == 'singbox' && newServer.engine == 'singbox' && _coreIsLive) {
+    if (_runningEngine == 'singbox' && _coreIsLive) {
       final tag = newServer.outbound['tag'] as String;
       try {
         final resp = await http
@@ -8187,7 +8121,6 @@ del "%~f0"
     appLang.removeListener(_refreshTrayMenu);
     appLang.removeListener(_rebuildForLanguage);
     _coreProcess?.kill();
-    _xrayProcess?.kill();
     _stopAllXrayBridges();
     // Подписку на состояние службы снимаем обязательно: служба переживает
     // экран, и оставленный слушатель дёргал бы setState у мёртвого виджета.

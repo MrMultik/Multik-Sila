@@ -57,7 +57,6 @@ class _ConfigViewScreenState extends State<ConfigViewScreen> {
         // этом уже сгорел разбор: туннель поднят, пакеты в него идут, наружу не
         // выходит ничего, и ни одной строки о причине.
         if (name == 'config.json' ||
-            name == 'xray_config.json' ||
             name == 'core_log.txt' ||
             name == 'core_panic.txt' ||
             name.startsWith('xray_bridge_')) {

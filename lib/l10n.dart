@@ -1104,10 +1104,6 @@ const Map<String, Map<String, String>> _strings = {
   'unit.m': {'ru': 'м', 'en': 'm'},
 
   'dlg.importName': {'ru': 'Импорт', 'en': 'Import'},
-  'stats.xrayNoApi': {
-    'ru': 'Сервер: {name}\n(ядро Xray — статистика соединений недоступна)',
-    'en': 'Server: {name}\n(Xray core — connection statistics are unavailable)',
-  },
   'stats.apiDown': {'ru': 'API недоступен: {e}', 'en': 'API unavailable: {e}'},
   'lat.failed': {'ru': 'замер не удался', 'en': 'measurement failed'},
   'dns.pickNoReply': {
@@ -1657,14 +1653,6 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'Generating config.json...',
   },
   'log.startingSingbox': {'ru': 'Запускаю sing-box...', 'en': 'Starting sing-box...'},
-  'log.generatingXrayConfig': {
-    'ru': 'Генерирую конфиг для Xray ({name})...',
-    'en': 'Generating the Xray config ({name})...',
-  },
-  'log.startingXray': {
-    'ru': 'Запускаю xray (движок для серверов xhttp и REALITY)...',
-    'en': 'Starting xray (the engine for xhttp and REALITY servers)...',
-  },
   'log.bridgeDied': {
     'ru': 'Мост Xray для {name} завершился (код {code})',
     'en': 'The Xray bridge for {name} exited (code {code})',
