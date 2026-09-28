@@ -779,6 +779,13 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Не даёт трафику утекать мимо туннеля',
     'en': 'Prevents traffic from leaking outside the tunnel',
   },
+  'set.blockQuic': {'ru': 'Блокировать QUIC', 'en': 'Block QUIC'},
+  'hint.blockQuic': {
+    'ru': 'Браузеры и YouTube переходят на обычный HTTPS — видео через туннель '
+        'идёт ровнее, без подвисаний. Сайты открываются как раньше.',
+    'en': 'Browsers and YouTube fall back to regular HTTPS, so video through the '
+        'tunnel plays more smoothly, without stalls. Sites open as before.',
+  },
   'hint.autoOnConnect': {
     'ru': 'Если задержки ещё не измерены — тест запустится сам. Когда цифры уже есть, '
         'повторно не гоняется.',

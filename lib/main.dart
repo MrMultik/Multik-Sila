@@ -635,6 +635,8 @@ class AppSettings {
   String tunStack;
   int tunMtu;
   bool strictRoute;
+  /// Отбрасывать QUIC (UDP на порт 443), см. правило в _writeConfig.
+  bool blockQuic;
   // Блок «включил и забыл»: автозапуск с системой, автоподключение,
   // сворачивание в трей вместо выхода.
   bool launchAtStartup;
@@ -850,6 +852,7 @@ class AppSettings {
     // явно, а не оставлено дефолтным.
     this.tunMtu = 4064,
     this.strictRoute = true,
+    this.blockQuic = true,
     this.launchAtStartup = false,
     // ВЫКЛЮЧЕНО по умолчанию, и это исправление, а не смена вкуса.
     //
@@ -1175,6 +1178,7 @@ class AppSettings {
         'tunStack': tunStack,
         'tunMtu': tunMtu,
         'strictRoute': strictRoute,
+        'blockQuic': blockQuic,
         'launchAtStartup': launchAtStartup,
         'autoConnectAfterLaunch': autoConnectAfterLaunch,
         'hideAfterLaunch': hideAfterLaunch,
@@ -1284,6 +1288,7 @@ class AppSettings {
         return v == 9000 ? d.tunMtu : v;
       }(),
       strictRoute: j['strictRoute'] as bool? ?? d.strictRoute,
+      blockQuic: j['blockQuic'] as bool? ?? d.blockQuic,
       launchAtStartup: j['launchAtStartup'] as bool? ?? d.launchAtStartup,
       autoConnectAfterLaunch: j['autoConnectAfterLaunch'] as bool? ?? d.autoConnectAfterLaunch,
       hideAfterLaunch: j['hideAfterLaunch'] as bool? ?? d.hideAfterLaunch,
@@ -6072,6 +6077,19 @@ del "%~f0"
               if (proxyPorts.isNotEmpty) "port": proxyPorts.toList()..sort(),
               "outbound": "direct",
             },
+          // QUIC (HTTP/3 у браузеров, YouTube) — отказ, и браузер тут же
+          // переходит на обычный HTTPS по TCP. Через туннель поверх TCP QUIC
+          // ведёт себя плохо: на сервере это выглядело как ~50 с почти нуля и
+          // потом рывок до 20 Мбит/с, а у человека — подвисающее видео; с
+          // выключенным в браузере QUIC подвисания пропали.
+          //
+          // По протоколу, а не «UDP на 443»: sniff выше распознаёт QUIC, и
+          // другой UDP на 443 (DTLS, чужие VPN внутри туннеля) не страдает.
+          // Строго ПОСЛЕ двух правил выше: наши мосты ходят к серверу xhttp
+          // и по HTTP/3, то есть тем же QUIC, и должны уйти напрямую раньше.
+          // reject, а не тишина: ответ «порт недоступен» переводит браузер на
+          // TCP сразу, молчание — только после таймаута.
+          if (_settings.blockQuic) {"protocol": "quic", "action": "reject"},
           ...splitRules(),
         ],
         "final": "proxy",
@@ -9049,6 +9067,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late bool _allowLan;
   late bool _ipv6Enabled;
   late bool _strictRoute;
+  late bool _blockQuic;
   late bool _launchAtStartup;
   late bool _autoConnect;
   late bool _hideAfterLaunch;
@@ -9120,6 +9139,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _allowLan = s.allowLan;
     _ipv6Enabled = s.tunIpv6Enabled;
     _strictRoute = s.strictRoute;
+    _blockQuic = s.blockQuic;
     _launchAtStartup = s.launchAtStartup;
     _autoConnect = s.autoConnectAfterLaunch;
     _hideAfterLaunch = s.hideAfterLaunch;
@@ -9168,6 +9188,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         tunStack: _stack,
         tunMtu: int.tryParse(_tunMtu.text.trim()) ?? s.tunMtu,
         strictRoute: _strictRoute,
+        blockQuic: _blockQuic,
         latencyMode: _latencyMode,
         latencyUrl: _textOr(_latencyUrl, s.latencyUrl),
         latencyTimeoutMs: _intOr(_latencyTimeout, s.latencyTimeoutMs),
@@ -9893,6 +9914,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 style: TextStyle(fontSize: 12)),
             value: _strictRoute,
             onChanged: (v) => setState(() => _strictRoute = v),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: Text(t('set.blockQuic')),
+            subtitle: Text(t('hint.blockQuic'),
+                style: TextStyle(fontSize: 12)),
+            value: _blockQuic,
+            onChanged: (v) => setState(() => _blockQuic = v),
           ),
           ],
           if (_openSection == 'mux') ...[
