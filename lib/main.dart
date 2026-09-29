@@ -567,6 +567,82 @@ ParsedServer realityViaXray(ParsedServer s) {
     ..link = s.link;
 }
 
+/// Адрес сервера в Xray-outbound: у vless/vmess он в settings.vnext[],
+/// у trojan/shadowsocks — в settings.servers[].
+String? xrayOutboundAddress(Map<String, dynamic> outbound) {
+  final settings = outbound['settings'];
+  if (settings is! Map) return null;
+  for (final key in const ['vnext', 'servers']) {
+    final list = settings[key];
+    if (list is List && list.isNotEmpty && list.first is Map) {
+      final address = (list.first as Map)['address'];
+      if (address is String && address.isNotEmpty) return address;
+    }
+  }
+  return null;
+}
+
+/// VLESS без TLS и без собственного шифрования — открытым текстом.
+///
+/// Xray 26.x такой outbound на публичный IP не собирает вовсе: «vless without
+/// TLS or other encryption is prohibited unless the server address is a
+/// private IP or domain». Домен — можно, поэтому такому серверу нельзя
+/// подменять имя на IP (см. _bakeXrayServerIp): подмена сама сделала бы его
+/// запрещённым.
+bool isPlainVlessOutbound(Map<String, dynamic> outbound) {
+  if (outbound['protocol'] != 'vless') return false;
+  final stream = outbound['streamSettings'];
+  final security = stream is Map ? '${stream['security'] ?? ''}' : '';
+  if (security.isNotEmpty && security != 'none') return false;
+  final vnext = (outbound['settings'] as Map?)?['vnext'];
+  final user = vnext is List && vnext.isNotEmpty ? ((vnext.first as Map)['users'] as List?)?.first : null;
+  final encryption = user is Map ? '${user['encryption'] ?? ''}' : '';
+  return encryption.isEmpty || encryption == 'none';
+}
+
+/// Откажется ли Xray собирать этот outbound (известное заранее правило, см.
+/// [isPlainVlessOutbound]). Такие серверы встречаются в бесплатных
+/// подписках: в списке igareck их два из 89 — и один такой сервер в общем
+/// конфиге роняет его целиком.
+bool xrayRejectsOutbound(Map<String, dynamic> outbound) {
+  if (!isPlainVlessOutbound(outbound)) return false;
+  final ip = InternetAddress.tryParse(xrayOutboundAddress(outbound) ?? '');
+  if (ip == null) return false; // домен — разрешён
+  return !(ip.isLoopback || ip.isLinkLocal || _isPrivateIp(ip));
+}
+
+bool _isPrivateIp(InternetAddress ip) {
+  final b = ip.rawAddress;
+  if (ip.type == InternetAddressType.IPv4) {
+    return b[0] == 10 ||
+        (b[0] == 172 && b[1] >= 16 && b[1] <= 31) ||
+        (b[0] == 192 && b[1] == 168) ||
+        (b[0] == 100 && b[1] >= 64 && b[1] <= 127);
+  }
+  return (b[0] & 0xfe) == 0xfc; // fc00::/7
+}
+
+/// Какой сервер Xray отверг при сборке конфига — из текста ошибки ядра:
+/// `...failed to build outbound config with tag srv_53 > infra/conf: <причина>`.
+/// Так же она приходит и из `xray run -test`, и из встроенного ядра Android.
+({String tag, String reason})? xrayConfigRejection(String output) {
+  final m = RegExp(r'outbound config with tag (\S+?)\s*>\s*(?:[\w/]+:\s*)?(.*)')
+      .firstMatch(output);
+  if (m == null) return null;
+  return (tag: m.group(1)!, reason: m.group(2)!.trim());
+}
+
+/// Убирает из общего конфига Xray всё, что относится к серверу [tag]: его
+/// outbound, его вход (`in_<tag>` у мостов, `probe_in_<tag>` у замера) и
+/// правило маршрутизации. Остальные серверы продолжают работать.
+void dropFromXrayConfig(Map<String, dynamic> config, String tag) {
+  (config['outbounds'] as List).removeWhere((o) => o is Map && o['tag'] == tag);
+  (config['inbounds'] as List).removeWhere(
+      (i) => i is Map && (i['tag'] == 'in_$tag' || i['tag'] == 'probe_in_$tag'));
+  final rules = (config['routing'] as Map?)?['rules'];
+  if (rules is List) rules.removeWhere((r) => r is Map && r['outboundTag'] == tag);
+}
+
 // Режим маршрутизации. global — всё в туннель (как было всегда).
 // bypassRu — российские домены и IP идут напрямую, мимо VPN: и быстрее,
 // и банки/госуслуги не видят иностранный IP.
@@ -2384,11 +2460,22 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   bool _testingLatency = false;
 
   Process? _coreProcess; // sing-box
-  // TUN-режим: у каждого xhttp-сервера СВОЙ постоянный мост на своём порту,
-  // поднятый заранее и живущий весь сеанс TUN — переключение между ними тогда
-  // чистый Clash API selector switch без убийства процессов (см. историю
-  // с "connection refused"/"forcibly closed" при попытке шарить один порт).
-  final Map<String, Process> _xrayBridgeProcesses = {};
+  // Мосты для Xray-серверов (xhttp, REALITY): у каждого сервера СВОЙ
+  // постоянный порт, поднятый заранее и живущий весь сеанс, — переключение
+  // между ними тогда чистый Clash API selector switch без убийства процессов
+  // (см. историю с "connection refused"/"forcibly closed" при попытке шарить
+  // один порт).
+  //
+  // Но порты — в ОДНОМ процессе Xray, а не по процессу на сервер. Раньше было
+  // по процессу, и на бесплатной подписке из igareck/vpn-configs-for-russia
+  // (150 серверов, 89 из них идут через Xray) это было 87 процессов и 2034 МБ
+  // памяти против 25 МБ у одного процесса со всеми входами (замер на Windows,
+  // все порты готовы за 0,3 с). На Android — 89 экземпляров Xray внутри
+  // приложения. Karing такие подписки держит, мы — падали.
+  Process? _xrayBridgeProcess;
+  // Серверы, которые Xray отказался принимать (см. xrayConfigRejection):
+  // в общем мосте их нет, и выбрать их нельзя.
+  final Set<String> _xrayRejected = {};
   static const int _xrayBridgeBasePort = 1338;
   // 'singbox' | 'xray' | null — какое ядро сейчас реально держит порт 1337.
   //
@@ -3678,6 +3765,43 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     }
   }
 
+  /// Android: качает APK новой версии и отдаёт его системному установщику.
+  /// Возвращает "started" (окно установки открыто), "permission" (Android
+  /// сначала просит разрешить установку из этого источника — переключатель
+  /// уже открыт) или "" при неудаче.
+  ///
+  /// Потоком прямо в файл, а не в память: APK — это под сотню мегабайт, и
+  /// держать их целиком в памяти телефона ради записи на диск незачем.
+  /// Качается мимо туннеля — приложение исключено из своего VPN, — то есть
+  /// так же, как человек скачал бы файл сам.
+  Future<String> _runApkUpdate(String version, String url) async {
+    final client = http.Client();
+    try {
+      _appendLog(tp('log.appDownloading', {'v': version}));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tp('log.appDownloading', {'v': version}))),
+        );
+      }
+      final path = await AndroidVpn.updateApkPath();
+      final resp = await client
+          .send(http.Request('GET', Uri.parse(url)))
+          .timeout(const Duration(minutes: 1));
+      if (resp.statusCode != 200) throw 'HTTP ${resp.statusCode}';
+      await resp.stream.pipe(File(path).openWrite()).timeout(const Duration(minutes: 15));
+      final size = await File(path).length();
+      // Меньше мегабайта — не APK, а страница ошибки или обрывок.
+      if (size < 1024 * 1024) throw '$size ${t('unit.b')}';
+      _appendLog(tp('log.apkReady', {'v': version}));
+      return await AndroidVpn.installApk(path);
+    } catch (e) {
+      _appendLog(tp('log.appUpdateFailed', {'e': e}));
+      return '';
+    } finally {
+      client.close();
+    }
+  }
+
   /// Качает установщик и отдаёт ему работу.
   ///
   /// Установщик кладётся во ВРЕМЕННУЮ папку, а не рядом с приложением: он
@@ -3765,43 +3889,6 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     // разваливается пополам:
     //
     //   "C:\Users\Абилова " не является внутренней или внешней командой
-  /// Android: качает APK новой версии и отдаёт его системному установщику.
-  /// Возвращает "started" (окно установки открыто), "permission" (Android
-  /// сначала просит разрешить установку из этого источника — переключатель
-  /// уже открыт) или "" при неудаче.
-  ///
-  /// Потоком прямо в файл, а не в память: APK — это под сотню мегабайт, и
-  /// держать их целиком в памяти телефона ради записи на диск незачем.
-  /// Качается мимо туннеля — приложение исключено из своего VPN, — то есть
-  /// так же, как человек скачал бы файл сам.
-  Future<String> _runApkUpdate(String version, String url) async {
-    final client = http.Client();
-    try {
-      _appendLog(tp('log.appDownloading', {'v': version}));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(tp('log.appDownloading', {'v': version}))),
-        );
-      }
-      final path = await AndroidVpn.updateApkPath();
-      final resp = await client
-          .send(http.Request('GET', Uri.parse(url)))
-          .timeout(const Duration(minutes: 1));
-      if (resp.statusCode != 200) throw 'HTTP ${resp.statusCode}';
-      await resp.stream.pipe(File(path).openWrite()).timeout(const Duration(minutes: 15));
-      final size = await File(path).length();
-      // Меньше мегабайта — не APK, а страница ошибки или обрывок.
-      if (size < 1024 * 1024) throw '$size ${t('unit.b')}';
-      _appendLog(tp('log.apkReady', {'v': version}));
-      return await AndroidVpn.installApk(path);
-    } catch (e) {
-      _appendLog(tp('log.appUpdateFailed', {'e': e}));
-      return '';
-    } finally {
-      client.close();
-    }
-  }
-
     //
     // `%~dp0` берётся из того, что cmd и так знает о запущенном файле, минуя
     // и разбор кавычек, и перекодировку. Единственное, что осталось внутри
@@ -3860,6 +3947,7 @@ del "%~f0"
     if (!mounted) return;
     // Обновление приложения перезапускает его и рвёт соединение, поэтому
     // молча этого не делаем НИКОГДА — только с явного согласия.
+    final isApk = url.toLowerCase().endsWith('.apk');
     final agreed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -3875,6 +3963,30 @@ del "%~f0"
       ),
     );
     if (agreed != true) return;
+    if (isApk) {
+      final outcome = await _runApkUpdate(version, url);
+      if (!mounted) return;
+      if (outcome == 'permission') {
+        // Переключатель «разрешить установку» уже открыт системой. Сказать,
+        // что делать ПОСЛЕ него, обязательно: сам Android назад не вернёт и
+        // установку не продолжит.
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: Text(t('app.updateTitle')),
+            content: Text(t('app.apkPermission')),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: Text(t('common.ok'))),
+            ],
+          ),
+        );
+      } else if (outcome != 'started') {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t('app.updateFailedApk'))),
+        );
+      }
+      return;
+    }
     // Установщик — обычный путь, zip — запасной.
     if (url.toLowerCase().endsWith('.exe')) {
       if (await _runInstallerUpdate(version, url)) return;
@@ -3948,7 +4060,6 @@ del "%~f0"
 
     if (found.isNotEmpty) {
       // Текст зависит от того, дойдут ли руки у автообновления. Оно пропускает
-    final isApk = url.toLowerCase().endsWith('.apk');
       // ядро, версию которого не удаётся прочитать (сравнивать не с чем), и
       // обещать в этом случае «обновится само» — значит соврать: человек будет
       // ждать, а ничего не произойдёт.
@@ -3963,30 +4074,6 @@ del "%~f0"
           duration: const Duration(seconds: 8),
         ));
       }
-    if (isApk) {
-      final outcome = await _runApkUpdate(version, url);
-      if (!mounted) return;
-      if (outcome == 'permission') {
-        // Переключатель «разрешить установку» уже открыт системой. Сказать,
-        // что делать ПОСЛЕ него, обязательно: сам Android назад не вернёт и
-        // установку не продолжит.
-        await showDialog<void>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: Text(t('app.updateTitle')),
-            content: Text(t('app.apkPermission')),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx), child: Text(t('common.ok'))),
-            ],
-          ),
-        );
-      } else if (outcome != 'started') {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(t('app.updateFailedApk'))),
-        );
-      }
-      return;
-    }
     } else if (!silent && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(t('core.upToDate'))),
@@ -5119,9 +5206,11 @@ del "%~f0"
 
   String get _legacyXrayConfigPath => '$_workDir${Platform.pathSeparator}xray_config.json';
 
-  // У каждого постоянного моста TUN-режима свой файл конфига — процессы
-  // теперь работают одновременно, общий файл конфига им не подходит.
-  String _xrayBridgeConfigPath(String tag) => '$_workDir${Platform.pathSeparator}xray_bridge_$tag.json';
+  // Конфиг общего моста. Имя подпадает под шаблон xray_bridge_*.json, которым
+  // его уже знают экран «Конфиги ядер», очистка перед релизом, деинсталлятор
+  // и .gitignore; прежние файлы по серверу (xray_bridge_srv_N.json) убираются
+  // при запуске моста.
+  String get _xrayBridgesConfigPath => '$_workDir${Platform.pathSeparator}xray_bridge_all.json';
 
   // Порт локального моста: в TUN-режиме xhttp-серверы (движок Xray, который
   // TUN не умеет вообще) идут через отдельный headless-Xray на этом порту,
@@ -5244,21 +5333,6 @@ del "%~f0"
     return ready;
   }
 
-  // Хост прокси-сервера у Xray-outbound лежит по-разному в зависимости от
-  // протокола: vless/vmess кладут его в settings.vnext[], trojan — в
-  // settings.servers[]. У sing-box-outbound он просто в outbound['server'].
-  String? _xrayOutboundHost(Map<String, dynamic> outbound) {
-    final settings = outbound['settings'];
-    if (settings is! Map) return null;
-    for (final key in const ['vnext', 'servers']) {
-      final list = settings[key];
-      if (list is List && list.isNotEmpty && list.first is Map) {
-        final address = (list.first as Map)['address'];
-        if (address is String && address.isNotEmpty) return address;
-      }
-    }
-    return null;
-  }
 
   // Резолвим адреса прокси-серверов заранее, на этапе генерации конфига:
   // когда TUN уже поднят, спрашивать DNS поздно — запрос сам поедет в туннель.
@@ -5414,9 +5488,13 @@ del "%~f0"
   /// Имя не теряется: оно нужно REALITY и TLS для SNI, и проставляется в
   /// `serverName` перед подменой — ровно по той же причине, что и у sing-box.
   Future<void> _bakeXrayServerIp(Map<String, dynamic> outbound) async {
-    final host = _xrayOutboundHost(outbound);
+    final host = xrayOutboundAddress(outbound);
     if (host == null || host.isEmpty) return;
     if (RegExp(r'^[\d.]+$').hasMatch(host) || host.contains(':')) return;
+    // VLESS открытым текстом Xray пускает только на домен или частный адрес:
+    // подмена имени на публичный IP сделала бы сервер отвергнутым целиком
+    // (см. isPlainVlessOutbound).
+    if (isPlainVlessOutbound(outbound)) return;
 
     if (!_hostIpCache.containsKey(host)) {
       try {
@@ -5542,7 +5620,7 @@ del "%~f0"
     // а после подмены в outbound'ах лежат уже адреса.
     final proxyHostNames = <String>{
       ...singboxServers.map((s) => s.outbound['server'] as String),
-      ...xraySeversForBridge.map((s) => _xrayOutboundHost(s.outbound)).whereType<String>(),
+      ...xraySeversForBridge.map((s) => xrayOutboundAddress(s.outbound)).whereType<String>(),
     };
 
     // Порты самих серверов — чтобы страховка от петли (правило «адрес сервера
@@ -6260,28 +6338,53 @@ del "%~f0"
     return copy;
   }
 
-  Future<void> _writeXrayConfig(ParsedServer server, {required int port, required String configPath}) async {
+  /// Конфиг ОДНОГО Xray, который держит мосты всех Xray-серверов профиля:
+  /// у каждого сервера свой вход (socks с UDP на его порту, `in_<тег>`) и
+  /// правило «этот вход — в этот outbound». Для sing-box это те же порты, что
+  /// и при мостах по процессу на сервер, — его конфиг не меняется.
+  ///
+  /// Серверы, которые Xray заведомо не соберёт ([xrayRejectsOutbound]), в
+  /// конфиг не попадают: один такой роняет весь общий конфиг. Остальные
+  /// отказы ловятся уже по ответу самого ядра (см. _dropRejectedByXray и
+  /// startXrayBridge в SilaVpnService.kt).
+  Future<Map<String, dynamic>> _buildXrayBridgesConfig(List<ParsedServer> servers) async {
     // Адрес сервера — заранее отрезолвленным IP, а не именем. Под TUN спросить
     // DNS в момент подключения уже нельзя, запрос уедет в туннель (см.
     // _bakeXrayServerIp). Делаем это ДО сборки config: значения копируются в
     // него ниже, и правка после этой строки в готовый JSON не попадёт — на
-    // том же месте в `_writeConfig` однажды уже наступили.
-    await _bakeXrayServerIp(server.outbound);
+    // том же месте в `_writeConfig` однажды уже наступили. Параллельно: в
+    // бесплатных подписках у каждого сервера своё имя, и по очереди это
+    // были бы десятки последовательных запросов DNS.
+    await Future.wait(servers.map((s) => _bakeXrayServerIp(s.outbound)));
 
-    final config = {
+    final accepted = <ParsedServer>[];
+    for (final s in servers) {
+      if (xrayRejectsOutbound(s.outbound)) {
+        if (_xrayRejected.add(s.outbound['tag'] as String)) {
+          _appendLog(tp('log.xrayRejected',
+              {'name': s.name, 'reason': t('log.xrayPlainVless')}));
+        }
+      } else {
+        accepted.add(s);
+      }
+    }
+    return {
       "log": {"loglevel": "warning"},
       "inbounds": [
-        {
-          "listen": "127.0.0.1",
-          "port": port,
-          "protocol": "socks",
-          "settings": {"auth": "noauth", "udp": true},
-        }
+        for (final s in accepted)
+          {
+            "tag": "in_${s.outbound['tag']}",
+            "listen": "127.0.0.1",
+            "port": _bridgePortFor(s.outbound['tag'] as String),
+            "protocol": "socks",
+            "settings": {"auth": "noauth", "udp": true},
+          }
       ],
       // Xray фрагментирует не полем в tls, а отдельным freedom-outbound:
       // основной outbound дозванивается «через» него (sockopt.dialerProxy).
       "outbounds": [
-        if (_settings.tlsFragment) _xrayOutboundViaFragment(server.outbound) else server.outbound,
+        for (final s in accepted)
+          _settings.tlsFragment ? _xrayOutboundViaFragment(s.outbound) : s.outbound,
         if (_settings.tlsFragment)
           {
             "protocol": "freedom",
@@ -6298,9 +6401,49 @@ del "%~f0"
             }
           },
       ],
+      "routing": {
+        "rules": [
+          for (final s in accepted)
+            {
+              "type": "field",
+              "inboundTag": ["in_${s.outbound['tag']}"],
+              "outboundTag": s.outbound['tag'],
+            }
+        ]
+      },
     };
-    final file = File(configPath);
-    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(config));
+  }
+
+  /// Проверяет общий конфиг самим ядром (`xray run -test`) и выкидывает из
+  /// него серверы, на которых оно спотыкается, — по одному, пока конфиг не
+  /// будет принят. Пишет итог в [path].
+  ///
+  /// Заранее известное правило ([xrayRejectsOutbound]) ловит не всё: в
+  /// бесплатных списках бывает и битый ключ REALITY, и что угодно ещё, а
+  /// ядро в ответ отказывается читать ВЕСЬ конфиг. Проверка быстрая —
+  /// конфиг собирается без подключений, — и называет виновника по тегу.
+  /// Только Windows: на Android то же делает сама служба при запуске моста.
+  Future<void> _dropRejectedByXray(Map<String, dynamic> config, String path) async {
+    final names = {for (final s in _servers) s.outbound['tag'] as String: s.name};
+    // Уже отвергнутых выкидываем сразу: замер задержки идёт каждые четверть
+    // часа, и спрашивать ядро про те же серверы заново незачем.
+    for (final tag in _xrayRejected) {
+      dropFromXrayConfig(config, tag);
+    }
+    for (var attempt = 0; attempt < 64; attempt++) {
+      await File(path).writeAsString(const JsonEncoder.withIndent('  ').convert(config));
+      final r = await Process.run(_xrayPath, ['run', '-test', '-c', path])
+          .timeout(const Duration(seconds: 20));
+      if (r.exitCode == 0) return;
+      final rejection = xrayConfigRejection('${r.stdout}\n${r.stderr}');
+      // Не про конкретный сервер — выкидывать нечего; запуск скажет сам.
+      if (rejection == null) return;
+      if (_xrayRejected.add(rejection.tag)) {
+        _appendLog(tp('log.xrayRejected',
+            {'name': names[rejection.tag] ?? rejection.tag, 'reason': rejection.reason}));
+      }
+      dropFromXrayConfig(config, rejection.tag);
+    }
   }
 
   // Порты, которые занимает НАШЕ хозяйство: локальный прокси, Clash API и
@@ -6339,7 +6482,7 @@ del "%~f0"
     // расстрелять только что поднятые мосты — см. комментарий в
     // _killStrayOnOurPorts про самоубийство на портах 1338+.
     final ours = <String>{
-      for (final p in _xrayBridgeProcesses.values) '${p.pid}',
+      if (_xrayBridgeProcess != null) '${_xrayBridgeProcess!.pid}',
       if (_coreProcess != null) '${_coreProcess!.pid}',
     };
     for (final exe in [_singBoxPath, _xrayPath]) {
@@ -6382,7 +6525,7 @@ del "%~f0"
       // переключении на любой xhttp-сервер всё падало с
       // `dial tcp 127.0.0.1:134x: connection refused`.
       final ours = <String>{
-        for (final p in _xrayBridgeProcesses.values) '${p.pid}',
+        if (_xrayBridgeProcess != null) '${_xrayBridgeProcess!.pid}',
         if (_coreProcess != null) '${_coreProcess!.pid}',
       };
       final pids = <String>{};
@@ -6642,7 +6785,7 @@ del "%~f0"
 
   /// Запуск туннеля на Android.
   ///
-  /// Конфиги — те же самые. Их собирает `_writeConfig` и `_writeXrayConfig`,
+  /// Конфиги — те же самые. Их собирает `_writeConfig` и `_buildXrayBridgesConfig`,
   /// общие с Windows-версией: генератор один, и разойтись поведению двух
   /// платформ неоткуда. Отличие в том, куда эти конфиги едут: не в командную
   /// строку дочернего процесса, а в службу через канал, потому что ядро здесь
@@ -6660,19 +6803,22 @@ del "%~f0"
     await _writeConfig();
     final config = await File(_configPath).readAsString();
 
-    // Мосты для xhttp-серверов. Порты берём той же функцией `_bridgePortFor`,
-    // которой пользовался `_writeConfig`, — иначе socks-outbound'ы в конфиге
-    // ядра указывали бы на порты, которых никто не слушает.
+    // Мосты для Xray-серверов — ОДИН экземпляр Xray на все (см.
+    // _xrayBridgeProcess), а не по экземпляру на сервер: на бесплатной
+    // подписке это 89 экземпляров внутри приложения. Порты берутся той же
+    // функцией `_bridgePortFor`, которой пользовался `_writeConfig`, — иначе
+    // socks-outbound'ы ядра указывали бы на порты, которых никто не слушает.
+    // Что ядро Xray всё же не примет, служба выкинет сама (startXrayBridge).
     final bridges = <String>[];
-    for (final server in _servers.where((s) => s.engine == 'xray')) {
-      final tag = server.outbound['tag'] as String;
-      final path = '$_workDir${Platform.pathSeparator}xray_bridge_$tag.json';
-      await _writeXrayConfig(server,
-          port: _bridgePortFor(tag), configPath: path);
-      bridges.add(await File(path).readAsString());
-    }
-    if (bridges.isNotEmpty) {
-      _appendLog(tp('log.androidBridges', {'n': bridges.length}));
+    final xrayServers = _servers.where((s) => s.engine == 'xray').toList();
+    _xrayRejected.clear();
+    if (xrayServers.isNotEmpty) {
+      final bridgesConfig = await _buildXrayBridgesConfig(xrayServers);
+      final text = const JsonEncoder.withIndent('  ').convert(bridgesConfig);
+      await File(_xrayBridgesConfigPath).writeAsString(text);
+      bridges.add(text);
+      _appendLog(tp('log.androidBridges',
+          {'n': (bridgesConfig['inbounds'] as List).length}));
     }
 
     await AndroidVpn.start(config: config, bridges: bridges);
@@ -6756,13 +6902,12 @@ del "%~f0"
     return false;
   }
 
-  // Поднимает постоянный мост для ОДНОГО xhttp-сервера (если ещё не поднят) —
-  // не трогает мосты других серверов и не трогает sing-box вообще. Убивает и
-  // поднимает только свой собственный процесс по хендлу, не по имени.
-  // Возвращается только когда порт моста реально готов принимать соединения.
+  // Готов ли мост для этого сервера. Перед переключением на Xray-сервер:
+  // если общий мост умер (или ещё не поднимался), поднимает его заново.
+  // Процесс убивается и поднимается только свой, по хендлу, не по имени.
   Future<void> _ensureXrayBridge(ParsedServer server) async {
     // На Android мостов-процессов не существует: Xray там вкомпилирован в
-    // приложение, и мосты поднимает служба туннеля разом при старте.
+    // приложение, и мост поднимает служба туннеля при старте.
     // `Process.start` здесь не «ничего не делает», а БРОСАЕТ ProcessException —
     // запуск сторонних исполняемых файлов там запрещён. Ловить исключение
     // некому: `_switchServer` зовёт эту функцию первой строкой, и переключение
@@ -6771,67 +6916,84 @@ del "%~f0"
     // заминки сети приложение могло остаться на мёртвом сервере.
     if (!Env.coreRunsAsProcess) return;
     final tag = server.outbound['tag'] as String;
-    final port = _bridgePortFor(tag);
-    final existing = _xrayBridgeProcesses[tag];
-    if (existing != null) {
+    if (_xrayRejected.contains(tag)) {
+      _appendLog(tp('log.xrayRejectedPick', {'name': server.name}));
+      return;
+    }
+    await _ensureAllXrayBridgesRunning();
+  }
+
+  // Поднимает общий мост для ВСЕХ Xray-серверов профиля — перед стартом
+  // sing-box, чтобы дальнейшее переключение между ними было чистым Clash API
+  // selector switch без единого килла. Если мост уже работает, не трогает его.
+  Future<void> _ensureAllXrayBridgesRunning() async {
+    if (!Env.coreRunsAsProcess) return;
+    final xrayServers = _servers.where((s) => s.engine == 'xray').toList();
+    if (xrayServers.isEmpty) return;
+
+    final running = _xrayBridgeProcess;
+    if (running != null) {
       // Наличие объекта Process НЕ значит, что мост жив. Раньше здесь стоял
       // голый `if (existing != null) return`, и умерший мост навсегда
       // оставался «поднятым»: переключение на его сервер молча проходило,
       // а каждое соединение падало с `dial tcp 127.0.0.1:134x: connection
       // refused`. Ровно так в логе легли 8 запросов к Telegram и Microsoft
-      // после переключения на Trojan XR. Спрашиваем порт, а не словарь.
-      if (await _waitForPort(port, timeout: const Duration(milliseconds: 400))) {
-        return;
-      }
-      _appendLog(tp('log.bridgeRestart', {'name': server.name, 'port': port}));
-      existing.kill();
-      _xrayBridgeProcesses.remove(tag);
+      // после переключения на Trojan XR. Спрашиваем порт, а не поле. Все
+      // входы в одном процессе — живой один, живы все.
+      final alive = xrayServers.where((s) => !_xrayRejected.contains(s.outbound['tag']));
+      if (alive.isEmpty) return;
+      final port = _bridgePortFor(alive.first.outbound['tag'] as String);
+      if (await _waitForPort(port, timeout: const Duration(milliseconds: 400))) return;
+      _appendLog(tp('log.bridgeRestart', {'name': 'Xray', 'port': port}));
+      running.kill();
+      _xrayBridgeProcess = null;
     }
 
-    final configPath = _xrayBridgeConfigPath(tag);
-    await _writeXrayConfig(server, port: port, configPath: configPath);
-    final process = await Process.start(_xrayPath, ['run', '-c', configPath]);
-    _xrayBridgeProcesses[tag] = process;
+    _xrayRejected.clear();
+    final config = await _buildXrayBridgesConfig(xrayServers);
+    final path = _xrayBridgesConfigPath;
+    await _dropRejectedByXray(config, path);
+    // Файлы мостов по серверу от прежних версий: они больше не читаются, а
+    // экран «Конфиги ядер» показывал бы их как действующие, с ключами внутри.
+    try {
+      for (final f in Directory(_workDir).listSync().whereType<File>()) {
+        final name = f.uri.pathSegments.last;
+        if (name.startsWith('xray_bridge_srv_') && name.endsWith('.json')) f.deleteSync();
+      }
+    } catch (_) {}
 
-    // Смерть моста должна попадать в лог и в словарь. Без этого падение
-    // проходило совершенно бесшумно: в UI сервер выглядел рабочим, а трафик
-    // до него не доходил вовсе.
+    final inbounds = config['inbounds'] as List;
+    if (inbounds.isEmpty) return;
+    final process = await Process.start(_xrayPath, ['run', '-c', path]);
+    _xrayBridgeProcess = process;
+
+    // Смерть моста должна попадать в лог. Без этого падение проходило
+    // совершенно бесшумно: в UI сервер выглядел рабочим, а трафик до него не
+    // доходил вовсе.
     unawaited(process.exitCode.then((code) {
-      if (!identical(_xrayBridgeProcesses[tag], process)) return;
-      _xrayBridgeProcesses.remove(tag);
-      _appendLog(tp('log.bridgeDied', {'name': server.name, 'code': code}));
+      if (!identical(_xrayBridgeProcess, process)) return;
+      _xrayBridgeProcess = null;
+      _appendLog(tp('log.bridgeDied', {'name': 'Xray', 'code': code}));
     }));
 
     process.stdout.transform(SystemEncoding().decoder).listen((data) {
-      _appendLog('[xray:$tag] $data');
+      _appendLog('[xray] $data');
     });
     process.stderr.transform(SystemEncoding().decoder).listen((data) {
-      _appendLog('[xray:$tag stderr] $data');
+      _appendLog('[xray stderr] $data');
     });
 
-    final ready = await _waitForPort(port);
-    _appendLog(tp(ready ? 'log.bridgeReady' : 'log.bridgeNotReady',
-        {'name': server.name, 'port': port}));
-  }
-
-  // Поднимает мосты для ВСЕХ xhttp-серверов профиля разом — вызывается перед
-  // стартом sing-box в TUN-режиме, чтобы дальнейшее переключение между
-  // xhttp-серверами было чистым Clash API selector switch без единого килла.
-  Future<void> _ensureAllXrayBridgesRunning() async {
-    final xrayServers = _servers.where((s) => s.engine == 'xray').toList();
-    // Параллельно, а не по очереди: с переводом REALITY на Xray мостов стало
-    // вдвое больше (у пользователя ~10), а каждый по очереди — это ~0,3 с
-    // ожидания порта. Гонок нет: порт выводится из тега (_bridgePortFor),
-    // конфиг у каждого в своём файле, а словарь процессов трогает один
-    // поток событий Dart.
-    await Future.wait(xrayServers.map(_ensureXrayBridge));
+    // Все входы открывает один процесс разом — достаточно дождаться первого.
+    final firstPort = (inbounds.first as Map)['port'] as int;
+    final ready = await _waitForPort(firstPort);
+    _appendLog(ready
+        ? tp('log.bridgesReady', {'n': inbounds.length})
+        : tp('log.bridgeNotReady', {'name': 'Xray', 'port': firstPort}));
   }
 
   void _stopAllXrayBridges() {
-    for (final process in _xrayBridgeProcesses.values) {
-      process.kill();
-    }
-    _xrayBridgeProcesses.clear();
+    _xrayBridgeProcess?.kill();
+    _xrayBridgeProcess = null;
   }
 
   // Остановка обязана быть асинхронной и дожидаться возврата прокси.
@@ -7497,8 +7659,22 @@ del "%~f0"
         ]
       },
     };
-    await File(probeConfigPath)
-        .writeAsString(const JsonEncoder.withIndent('  ').convert(config));
+    // Серверы, которые ядро не примет, — долой из общего конфига, иначе из-за
+    // одного такого Xray не читает ВЕСЬ конфиг и замер уходит в медленный
+    // путь по одному серверу (ниже). В бесплатных подписках их хватает.
+    // Отвергнутые показываем недоступными — автовыбор их обойдёт.
+    await _dropRejectedByXray(config, probeConfigPath);
+    final kept = {for (final o in config['outbounds'] as List) (o as Map)['tag']};
+    final rejected = servers.where((s) => !kept.contains(s.outbound['tag'])).toList();
+    if (rejected.isNotEmpty && mounted) {
+      setState(() {
+        for (final s in rejected) {
+          _latencyMs[s.outbound['tag'] as String] = null;
+        }
+      });
+    }
+    servers = servers.where((s) => kept.contains(s.outbound['tag'])).toList();
+    if (servers.isEmpty) return;
 
     Process? probe;
     try {

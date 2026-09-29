@@ -36,6 +36,8 @@ import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import com.multiksila.libbox.NetworkInterface as LibboxNetworkInterface
 import com.multiksila.silaxray.Instance as XrayInstance
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Туннель Multik Sila на Android.
@@ -279,19 +281,64 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         xrayBridges.clear()
     }
 
+    // Мост — ОДИН экземпляр Xray на все Xray-серверы профиля (вход на сервер,
+    // см. _buildXrayBridgesConfig в main.dart). По экземпляру на сервер на
+    // бесплатной подписке выходило 89 экземпляров внутри приложения.
+    //
+    // Обратная сторона общего конфига: сервер, который ядро не принимает,
+    // роняет его целиком. Ядро называет виновника по тегу — выкидываем его и
+    // пробуем снова, остальные серверы продолжают работать. То же на Windows
+    // делает `xray run -test` (_dropRejectedByXray).
     private fun startXrayBridge(bridgeConfig: String) {
-        // Тег вытаскиваем из самого конфига, чтобы не заводить второй канал
-        // передачи и не рассинхронизировать его с содержимым.
-        val tag = Regex("\"tag\"\\s*:\\s*\"([^\"]+)\"").find(bridgeConfig)?.groupValues?.get(1)
-            ?: bridgeConfig.hashCode().toString()
-        try {
-            xrayBridges[tag] = Silaxray.start(bridgeConfig)
-        } catch (e: Exception) {
-            // Мост не поднялся — это потеря одного сервера, а не всего
-            // туннеля. Молчать нельзя: на Windows именно из-за проглоченной
-            // ошибки моста «сервер недоступен» ничего не объяснял.
-            statusListener?.invoke(running.get(), "мост Xray $tag: ${e.message}")
+        var config = bridgeConfig
+        repeat(64) {
+            try {
+                xrayBridges["all"] = Silaxray.start(config)
+                return
+            } catch (e: Exception) {
+                val message = e.message ?: ""
+                val rejected = Regex("outbound config with tag (\\S+?)\\s*>\\s*(?:[\\w/]+:\\s*)?(.*)")
+                    .find(message)
+                if (rejected == null) {
+                    // Не про конкретный сервер — молчать нельзя: на Windows
+                    // именно из-за проглоченной ошибки моста «сервер
+                    // недоступен» ничего не объяснял.
+                    statusListener?.invoke(running.get(), "мосты Xray: $message")
+                    return
+                }
+                val tag = rejected.groupValues[1]
+                statusListener?.invoke(
+                    running.get(),
+                    "Xray не принимает сервер $tag: ${rejected.groupValues[2]}",
+                )
+                config = dropFromXrayConfig(config, tag) ?: return
+            }
         }
+    }
+
+    // Убирает из общего конфига Xray всё, что относится к серверу [tag]:
+    // outbound, его вход in_<tag> и правило маршрутизации. Зеркало
+    // dropFromXrayConfig в main.dart.
+    private fun dropFromXrayConfig(config: String, tag: String): String? = try {
+        val json = JSONObject(config)
+        fun JSONArray.keep(predicate: (JSONObject) -> Boolean): JSONArray {
+            val out = JSONArray()
+            for (i in 0 until length()) {
+                val item = optJSONObject(i)
+                if (item == null || predicate(item)) out.put(opt(i))
+            }
+            return out
+        }
+        json.put("outbounds", json.getJSONArray("outbounds").keep { it.optString("tag") != tag })
+        json.put("inbounds", json.getJSONArray("inbounds").keep { it.optString("tag") != "in_$tag" })
+        json.optJSONObject("routing")?.let { routing ->
+            routing.optJSONArray("rules")?.let { rules ->
+                routing.put("rules", rules.keep { it.optString("outboundTag") != tag })
+            }
+        }
+        json.toString()
+    } catch (_: Exception) {
+        null
     }
 
     // ------------------------------------------------------------------

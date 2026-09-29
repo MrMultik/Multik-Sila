@@ -1744,6 +1744,22 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'Generating config.json...',
   },
   'log.startingSingbox': {'ru': 'Запускаю sing-box...', 'en': 'Starting sing-box...'},
+  'log.bridgesReady': {
+    'ru': 'Мосты Xray готовы: серверов — {n}, один процесс',
+    'en': 'Xray bridges are ready: {n} servers in one process',
+  },
+  'log.xrayRejected': {
+    'ru': 'Сервер «{name}» пропущен — Xray его не принимает: {reason}',
+    'en': 'Server "{name}" skipped — Xray does not accept it: {reason}',
+  },
+  'log.xrayPlainVless': {
+    'ru': 'VLESS без шифрования на публичный адрес',
+    'en': 'VLESS without encryption to a public address',
+  },
+  'log.xrayRejectedPick': {
+    'ru': 'Сервер «{name}» не работает: Xray его не принимает (причина — выше в журнале)',
+    'en': 'Server "{name}" cannot work: Xray does not accept it (the reason is above in the log)',
+  },
   'log.bridgeDied': {
     'ru': 'Мост Xray для {name} завершился (код {code})',
     'en': 'The Xray bridge for {name} exited (code {code})',
