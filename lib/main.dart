@@ -567,6 +567,38 @@ ParsedServer realityViaXray(ParsedServer s) {
     ..link = s.link;
 }
 
+/// Одинаковые имена серверов — различимыми: второй «Germany, Frankfurt»
+/// становится «Germany, Frankfurt (2)», третий — «(3)», как у профилей.
+///
+/// В бесплатной подписке igareck на 150 серверов всего 43 разных имени:
+/// «Germany, Frankfurt am Main» носят десять разных серверов. Мало того что
+/// их не различить в списке — всё, что приложение помнит по имени, било
+/// сразу по всем тёзкам: звёздочка избранного ставилась на все, а проверка
+/// связи, пометив плохим один «Frankfurt», выбрасывала из кандидатов все
+/// десять и быстро оставалась без вариантов.
+List<ParsedServer> dedupeServerNames(List<ParsedServer> servers) {
+  final used = <String>{};
+  final lastSuffix = <String, int>{};
+  final out = <ParsedServer>[];
+  for (final s in servers) {
+    var name = s.name;
+    if (used.contains(name)) {
+      var k = lastSuffix[s.name] ?? 1;
+      do {
+        k++;
+        name = '${s.name} ($k)';
+      } while (used.contains(name));
+      lastSuffix[s.name] = k;
+    }
+    used.add(name);
+    out.add(name == s.name
+        ? s
+        : (ParsedServer(name: name, protocol: s.protocol, outbound: s.outbound, engine: s.engine)
+          ..link = s.link));
+  }
+  return out;
+}
+
 /// Адрес сервера в Xray-outbound: у vless/vmess он в settings.vnext[],
 /// у trojan/shadowsocks — в settings.servers[].
 String? xrayOutboundAddress(Map<String, dynamic> outbound) {
@@ -2735,11 +2767,29 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   void _bindAndroidVpn() {
     _androidVpnSub = AndroidVpn.statusStream().listen((status) {
       if (!mounted) return;
+      final wasRunning = _runningEngine != null;
       // Опрос статистики заводится и гасится сеттером `_runningEngine`.
       setState(() => _runningEngine = status.running ? 'singbox' : null);
       final error = status.error;
       if (error != null && error.isNotEmpty) _appendLog(error);
       _rescheduleHealthCheck();
+      // Туннель только что поднялся — в режиме «Авто» перемеряем серверы
+      // через само ядро и переходим на действительно лучший.
+      //
+      // До подъёма туннеля задержку на Android можно померить только
+      // TCP-рукопожатием (см. _testLatenciesWithoutProbes), и на бесплатных
+      // подписках эта цифра врёт: серверы за Cloudflare отвечают на
+      // рукопожатие за 40 мс, даже когда сами мертвы. Автовыбор вставал
+      // именно на них, проверка связи говорила «не выходит», и приложение
+      // перебирало такие же мёртвые по тем же цифрам. Через ядро замер
+      // сквозной — настоящий запрос через сам протокол.
+      if (!wasRunning && status.running && _autoServerMode && _servers.length > 1) {
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted && _runningEngine != null && !_testingLatency) {
+            _autoSelectBest(silent: true);
+          }
+        });
+      }
     });
     AndroidVpn.isRunning().then((running) {
       if (mounted && running) {
@@ -4400,10 +4450,14 @@ del "%~f0"
       format = () => 'Clash YAML';
     } else {
       format = () => t('sub.formatLinks');
+      // Строки с `#` — комментарии: бесплатные списки (igareck) начинают
+      // файл с `# profile-title:`, `# Date/Time:` и т. п. Считать их
+      // «пропущенными» значило бы писать «пропущено: 5» над списком, где
+      // разобран каждый сервер.
       final lines = decoded
           .split('\n')
           .map((l) => l.trim())
-          .where((l) => l.isNotEmpty)
+          .where((l) => l.isNotEmpty && !l.startsWith('#'))
           .toList();
       for (final line in lines) {
         final server = parseVless(line) ??
@@ -4426,6 +4480,12 @@ del "%~f0"
     for (var i = 0; i < parsed.length; i++) {
       parsed[i] = realityViaXray(parsed[i]);
     }
+    // Тёзки — различимыми (см. dedupeServerNames): избранное и пометки
+    // «плохой сервер» ведутся по имени.
+    final named = dedupeServerNames(parsed);
+    parsed
+      ..clear()
+      ..addAll(named);
 
     // уникальный тег на сервер: нужен, чтобы грузить все серверы профиля
     // в sing-box разом (через selector) и тестировать/переключать их
@@ -7316,7 +7376,7 @@ del "%~f0"
             // пяти падали без единой строки, и на поиск причины ушёл лишний
             // круг — при том что ядро прямо в ответе объясняет, что не так.
             _appendLog(tp('log.latencyError',
-                {'name': tag, 'e': 'HTTP ${resp.statusCode} ${resp.body.trim()}'}));
+                {'name': s.name, 'e': 'HTTP ${resp.statusCode} ${resp.body.trim()}'}));
           }
         } catch (e) {
           _appendLog(tp('log.latencyError', {'name': s.name, 'e': e}));
@@ -7470,6 +7530,8 @@ del "%~f0"
     const probeApiPort = 17391;
     final probeConfigPath = '$_workDir${Platform.pathSeparator}singbox_probe.json';
     final tags = servers.map((s) => s.outbound['tag'] as String).toList();
+    // Для журнала — имя, а не тег: «srv_17» человеку ничего не говорит.
+    final nameOf = {for (final s in servers) s.outbound['tag'] as String: s.name};
 
     final selector = {
       "type": "selector",
@@ -7529,10 +7591,10 @@ del "%~f0"
             // пяти падали без единой строки, и на поиск причины ушёл лишний
             // круг — при том что ядро прямо в ответе объясняет, что не так.
             _appendLog(tp('log.latencyError',
-                {'name': tag, 'e': 'HTTP ${resp.statusCode} ${resp.body.trim()}'}));
+                {'name': nameOf[tag] ?? tag, 'e': 'HTTP ${resp.statusCode} ${resp.body.trim()}'}));
           }
         } catch (e) {
-          _appendLog(tp('log.latencyError', {'name': tag, 'e': e}));
+          _appendLog(tp('log.latencyError', {'name': nameOf[tag] ?? tag, 'e': e}));
         }
       });
     } catch (_) {
