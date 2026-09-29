@@ -1074,6 +1074,20 @@ const Map<String, Map<String, String>> _strings = {
         'no network at all. The rule is bound to the package name. These rules '
         'override all others.',
   },
+  // Android, режим «Российские сайты — напрямую»: kRuDirectApps выводятся
+  // из VPN сами. Без этой строки человек видел бы у Ozon «По общему
+  // правилу» и шёл бы отмечать его руками.
+  'app.ruAuto': {
+    'ru': 'В режиме «Российские сайты — напрямую» российские приложения — банки, '
+        'маркетплейсы, Госуслуги, VK, Яндекс — работают мимо VPN сами, как будто '
+        'его нет: отмечать их не нужно. Чтобы пустить такое приложение через VPN, '
+        'выберите для него «Через VPN».',
+    'en': 'In "Russian sites — direct" mode, Russian apps (banks, marketplaces, '
+        'Gosuslugi, VK, Yandex) bypass the VPN on their own, as if it were off; '
+        'there is no need to mark them. To send one of them through the VPN, '
+        'choose "Through VPN" for it.',
+  },
+  'app.autoDirect': {'ru': 'само мимо VPN', 'en': 'bypasses the VPN by itself'},
   'app.listInstalled': {'ru': 'Показать приложения', 'en': 'Show apps'},
   'app.installed': {'ru': 'Установленные', 'en': 'Installed'},
   'app.exeFiles': {'ru': 'Программы', 'en': 'Programs'},

@@ -680,6 +680,99 @@ void dropFromXrayConfig(Map<String, dynamic> config, String tag) {
 // и банки/госуслуги не видят иностранный IP.
 enum RoutingMode { global, bypassRu }
 
+/// Российские приложения, которые в режиме «РФ напрямую» на Android идут
+/// мимо VPN сами, без настройки.
+///
+/// Маршрутами тут не обойтись. Ozon, банки, Госуслуги спрашивают у Android,
+/// включён ли VPN (TRANSPORT_VPN у сети), и отказываются работать, куда бы ни
+/// шёл их трафик. Тестер поймал ровно это: «в Ozon не зайти, говорит выруби
+/// VPN». Помогает только вывести приложение из туннеля целиком
+/// (`exclude_package` -> addDisallowedApplication), и делать это руками для
+/// каждого банка человек не должен — российское должно работать как без VPN.
+///
+/// Браузеров здесь нет намеренно, даже Яндекс Браузера: через них открывают и
+/// зарубежные сайты. Telegram, WhatsApp, Instagram — тоже нет: им VPN и нужен.
+/// Пакет, которого нет на телефоне, система пропускает (runCatching в
+/// SilaVpnService), так что лишнее имя в списке ничего не ломает.
+const List<String> kRuDirectApps = [
+  // Маркетплейсы и магазины
+  'ru.ozon.app.android', // Ozon
+  'com.wildberries.ru', // Wildberries
+  'com.avito.android', // Авито
+  'ru.beru.android', // Яндекс Маркет
+  'ru.instamart', // Купер
+  'com.lamoda.lamoda', // Lamoda
+  'ru.auto.ara', // Авто.ру
+  // Банки и платежи
+  'ru.sberbankmobile', // СберБанк Онлайн
+  'com.idamob.tinkoff.android', // Т-Банк
+  'ru.alfabank.mobile.android', // Альфа-Банк
+  'ru.vtb24.mobilebanking.android', // ВТБ
+  'ru.gazprombank.android.mobilebank.app', // Газпромбанк
+  'ru.ozon.fintech.finance', // Ozon Банк
+  'ru.letobank.Prometheus', // Почта Банк
+  'ru.rshb.dbo', // Россельхозбанк
+  'ru.nspk.mirpay', // Mir Pay
+  // Государство
+  'ru.rostel', // Госуслуги
+  'ru.fns.lkfl', // Налоги ФЛ
+  'com.gnivts.selfemployed', // Мой налог
+  // VK
+  'com.vkontakte.android', // ВКонтакте
+  'com.vk.vkvideo', // VK Видео
+  'com.uma.musicvk', // VK Музыка
+  'ru.oneme.app', // MAX
+  'ru.ok.android', // Одноклассники
+  'ru.mail.mailapp', // Почта Mail.ru
+  'ru.mail.cloud', // Облако Mail.ru
+  'ru.vk.store', // RuStore
+  // Яндекс
+  'ru.yandex.searchplugin', // Яндекс с Алисой
+  'ru.yandex.taxi', // Яндекс Go
+  'ru.yandex.yandexmaps', // Яндекс Карты
+  'ru.yandex.yandexnavi', // Яндекс Навигатор
+  'ru.yandex.music', // Яндекс Музыка
+  'ru.yandex.mail', // Яндекс Почта
+  'ru.yandex.disk', // Яндекс Диск
+  'ru.foodfox.client', // Яндекс Еда
+  'ru.kinopoisk', // Кинопоиск
+  // Видео
+  'ru.rutube.app', // Rutube
+  'ru.ivi.client', // Иви
+  'ru.more.play', // Okko
+  'ru.zen.android', // Дзен
+  // Связь
+  'ru.mts.mymts', // Мой МТС
+  'ru.megafon.mlk', // МегаФон
+  'ru.beeline.services', // Билайн
+  'ru.tele2.mytele2', // t2
+  // Прочее
+  'ru.dublgis.dgismobile', // 2ГИС
+  'com.octopod.russianpost.client.android', // Почта России
+  'ru.rzd.pass', // РЖД Пассажирам
+  'ru.hh.android', // hh.ru
+];
+
+/// Пакеты, которые на Android выводятся из VPN целиком.
+///
+/// Явные правила пользователя «напрямую» — всегда. В режиме «РФ напрямую» к
+/// ним добавляется [kRuDirectApps], кроме пакетов, для которых человек сам
+/// выбрал что-то другое: «через VPN» или «блокировать» должны работать, а из
+/// туннеля приложение не вернуть никаким правилом маршрута.
+List<String> androidExcludedPackages(
+    Map<String, String> appRules, {required bool ruDirect}) {
+  final out = <String>[
+    for (final e in appRules.entries)
+      if (e.value == 'direct' && e.key.trim().isNotEmpty) e.key,
+  ];
+  if (ruDirect) {
+    for (final p in kRuDirectApps) {
+      if ((appRules[p] ?? 'default') == 'default' && !out.contains(p)) out.add(p);
+    }
+  }
+  return out;
+}
+
 // Готовые бинарные rule-set'ы sing-box (.srs) от SagerNet. Качаем один раз
 // в подпапку rulesets рядом с .exe и подключаем как "type": "local".
 // Именно local, а не remote: remote sing-box тянет сам при каждом старте и
@@ -6218,6 +6311,9 @@ del "%~f0"
         _appendLog(t('log.tunStackFallback'));
         tunStack = 'system';
       }
+      final androidExcluded = Env.appRulesUsePaths
+          ? const <String>[]
+          : androidExcludedPackages(_settings.appRules, ruDirect: ruMode);
       config["inbounds"] = [
         {
           "type": "tun",
@@ -6246,8 +6342,9 @@ del "%~f0"
           // addDisallowedApplication. Правило package_name -> direct ниже
           // остаётся: программе, которую система всё же пустит в туннель
           // (например, пакет не найден), оно даст тот же маршрут.
-          if (!Env.appRulesUsePaths && appsByAction['direct'] != null)
-            "exclude_package": appsByAction['direct'],
+          // В режиме «РФ напрямую» сюда же сами попадают российские
+          // приложения — см. kRuDirectApps.
+          if (androidExcluded.isNotEmpty) "exclude_package": androidExcluded,
         }
       ];
       // Свой xray.exe (мосты для xhttp-серверов) ходит до прокси-сервера как
@@ -9029,7 +9126,9 @@ del "%~f0"
                 onPressed: () async {
                   final updated = await Navigator.push<AppSettings>(
                     context,
-                    MaterialPageRoute(builder: (_) => AppRulesScreen(initial: _settings)),
+                    MaterialPageRoute(builder: (_) => AppRulesScreen(
+                        initial: _settings,
+                        ruAppsAuto: _routingMode == RoutingMode.bypassRu)),
                   );
                   if (updated != null) await _saveSettings(updated);
                 },
@@ -11371,7 +11470,12 @@ class _ShieldPainter extends CustomPainter {
 // Работает и в TUN, и в обычном режиме — проверено запуском (см. CLAUDE.md).
 class AppRulesScreen extends StatefulWidget {
   final AppSettings initial;
-  const AppRulesScreen({super.key, required this.initial});
+
+  /// Включён ли режим «Российские сайты — напрямую»: в нём российские
+  /// приложения на Android выходят из VPN сами (kRuDirectApps), и экран
+  /// должен это показывать.
+  final bool ruAppsAuto;
+  const AppRulesScreen({super.key, required this.initial, this.ruAppsAuto = false});
 
   @override
   State<AppRulesScreen> createState() => _AppRulesScreenState();
@@ -11450,6 +11554,15 @@ class _AppRulesScreenState extends State<AppRulesScreen> {
     setState(() => _rules[file.path] = 'proxy');
   }
 
+  bool get _ruAuto => widget.ruAppsAuto && !Env.appRulesUsePaths;
+
+  // Приложение выйдет из VPN само: оно в kRuDirectApps, а своего правила
+  // у него нет.
+  bool _isAutoDirect(String package) =>
+      _ruAuto &&
+      kRuDirectApps.contains(package) &&
+      (_rules[package] ?? 'default') == 'default';
+
   IconData _iconFor(String action) => switch (action) {
         'proxy' => Icons.vpn_lock,
         'direct' => Icons.call_made,
@@ -11503,6 +11616,10 @@ class _AppRulesScreenState extends State<AppRulesScreen> {
         children: [
           Text(t(Env.appRulesUsePaths ? 'app.intro' : 'app.introAndroid'),
               style: const TextStyle(fontSize: 12, height: 1.35)),
+          if (_ruAuto) ...[
+            const SizedBox(height: 8),
+            Text(t('app.ruAuto'), style: const TextStyle(fontSize: 12, height: 1.35)),
+          ],
           // Предупреждение про путь с номером версии осмысленно только там, где
           // правило и есть путь.
           if (Env.appRulesUsePaths) ...[
@@ -11564,9 +11681,12 @@ class _AppRulesScreenState extends State<AppRulesScreen> {
             ...running.map((e) => ListTile(
                   dense: true,
                   contentPadding: EdgeInsets.zero,
-                  leading: const Icon(Icons.circle_outlined, size: 20),
+                  leading: Icon(
+                      _isAutoDirect(e.key) ? Icons.call_made : Icons.circle_outlined,
+                      size: 20),
                   title: Text(e.value),
-                  subtitle: Text(e.key,
+                  subtitle: Text(
+                      _isAutoDirect(e.key) ? '${e.key} · ${t('app.autoDirect')}' : e.key,
                       style: const TextStyle(fontSize: 10), maxLines: 1, overflow: TextOverflow.ellipsis),
                   trailing: _actionPicker(e.key),
                 )),
