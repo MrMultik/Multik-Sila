@@ -2,8 +2,12 @@ package com.example.proxy_app_test
 
 import android.app.Activity
 import android.content.Intent
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
+import android.provider.Settings
+import androidx.core.content.FileProvider
+import java.io.File
 import com.multiksila.libbox.Libbox
 import com.multiksila.silaxray.Silaxray
 import io.flutter.embedding.android.FlutterActivity
@@ -149,6 +153,58 @@ class MainActivity : FlutterActivity() {
                         }
                         .sortedBy { it["name"] as String }
                     result.success(apps)
+                }
+
+                // Самообновление. В релизе лежат APK под разные процессоры, и
+                // брать надо тот, что подходит телефону: первый в этом списке —
+                // родной, дальше то, что он умеет запускать тоже.
+                "supportedAbis" -> result.success(Build.SUPPORTED_ABIS.toList())
+
+                // Куда Dart скачивает APK обновления: папка, которую отдаёт
+                // FileProvider (res/xml/update_paths.xml). Прежние скачанные
+                // файлы убираем — это просто мусор на сотню мегабайт.
+                "updateApkPath" -> {
+                    val dir = File(cacheDir, "updates").apply { mkdirs() }
+                    dir.listFiles()?.forEach { it.delete() }
+                    result.success(File(dir, "update.apk").absolutePath)
+                }
+
+                // Передать скачанный APK системному установщику. Он сам спросит
+                // «обновить приложение?» и заменит его — подпись та же, поэтому
+                // профили и настройки остаются.
+                //
+                // Первый раз Android не даст установить без разрешения «установка
+                // из этого источника»: открываем человеку этот переключатель и
+                // возвращаем "permission" — Dart объяснит, что нажать потом.
+                "installApk" -> {
+                    val path = call.argument<String>("path")
+                    val file = path?.let { File(it) }
+                    if (file == null || !file.exists()) {
+                        result.error("no_file", "файл обновления не найден", null)
+                        return@setMethodCallHandler
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                        !packageManager.canRequestPackageInstalls()
+                    ) {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:$packageName"),
+                            )
+                        )
+                        result.success("permission")
+                        return@setMethodCallHandler
+                    }
+                    val uri = FileProvider.getUriForFile(this, "$packageName.updates", file)
+                    startActivity(
+                        Intent(Intent.ACTION_VIEW)
+                            .setDataAndType(uri, "application/vnd.android.package-archive")
+                            .addFlags(
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                    Intent.FLAG_ACTIVITY_NEW_TASK
+                            )
+                    )
+                    result.success("started")
                 }
 
                 else -> result.notImplemented()

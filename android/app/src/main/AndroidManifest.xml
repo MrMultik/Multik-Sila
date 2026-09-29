@@ -15,6 +15,11 @@
          человеку список установленных программ, их надо сначала увидеть:
          с Android 11 видимость пакетов ограничена по умолчанию. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"/>
+    <!-- Самообновление: приложение скачивает APK новой версии и передаёт его
+         системному установщику. Без этого разрешения Android откажет в
+         установке; сам человек разрешает её один раз в настройках («Установка
+         из этого источника»), и подтверждает каждое обновление в окне системы. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
 
     <application
         android:label="Multik Sila"
@@ -62,6 +67,19 @@
                 <action android:name="android.net.VpnService"/>
             </intent-filter>
         </service>
+
+        <!-- Отдаёт скачанный APK обновления системному установщику. Путь к
+             файлу напрямую (file://) Android с версии 7 в чужие программы не
+             пускает — только через content:// с временным правом на чтение. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_paths"/>
+        </provider>
 
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

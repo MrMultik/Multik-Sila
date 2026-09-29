@@ -3599,10 +3599,23 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
           return null;
         }
 
-        final chosen = pick((n) => n.endsWith('setup.exe')) ??
-            // zip оставлен запасным путём: если в релизе почему-то нет
-            // установщика, обновиться всё же лучше, чем не обновиться.
-            pick((n) => n.endsWith('.zip'));
+        Map<String, dynamic>? chosen;
+        if (Env.isAndroid) {
+          // Телефону — APK под его процессор. Раньше и Android шёл по ветке
+          // ниже: качал setup.exe (50 МБ установщика Windows) и пытался его
+          // запустить, то есть самообновление на телефоне не работало ни разу
+          // и заканчивалось ошибкой. Процессоры — от родного к совместимым:
+          // arm64-телефон умеет и armeabi-v7a, но свой APK быстрее.
+          for (final abi in await AndroidVpn.supportedAbis()) {
+            chosen = pick((n) => n.endsWith('-android-${abi.toLowerCase()}.apk'));
+            if (chosen != null) break;
+          }
+        } else {
+          chosen = pick((n) => n.endsWith('setup.exe')) ??
+              // zip оставлен запасным путём: если в релизе почему-то нет
+              // установщика, обновиться всё же лучше, чем не обновиться.
+              pick((n) => n.endsWith('.zip'));
+        }
         if (chosen == null) return null;
         url = '${chosen['browser_download_url'] ?? ''}'.trim();
       } else {
@@ -3752,6 +3765,43 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     // разваливается пополам:
     //
     //   "C:\Users\Абилова " не является внутренней или внешней командой
+  /// Android: качает APK новой версии и отдаёт его системному установщику.
+  /// Возвращает "started" (окно установки открыто), "permission" (Android
+  /// сначала просит разрешить установку из этого источника — переключатель
+  /// уже открыт) или "" при неудаче.
+  ///
+  /// Потоком прямо в файл, а не в память: APK — это под сотню мегабайт, и
+  /// держать их целиком в памяти телефона ради записи на диск незачем.
+  /// Качается мимо туннеля — приложение исключено из своего VPN, — то есть
+  /// так же, как человек скачал бы файл сам.
+  Future<String> _runApkUpdate(String version, String url) async {
+    final client = http.Client();
+    try {
+      _appendLog(tp('log.appDownloading', {'v': version}));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(tp('log.appDownloading', {'v': version}))),
+        );
+      }
+      final path = await AndroidVpn.updateApkPath();
+      final resp = await client
+          .send(http.Request('GET', Uri.parse(url)))
+          .timeout(const Duration(minutes: 1));
+      if (resp.statusCode != 200) throw 'HTTP ${resp.statusCode}';
+      await resp.stream.pipe(File(path).openWrite()).timeout(const Duration(minutes: 15));
+      final size = await File(path).length();
+      // Меньше мегабайта — не APK, а страница ошибки или обрывок.
+      if (size < 1024 * 1024) throw '$size ${t('unit.b')}';
+      _appendLog(tp('log.apkReady', {'v': version}));
+      return await AndroidVpn.installApk(path);
+    } catch (e) {
+      _appendLog(tp('log.appUpdateFailed', {'e': e}));
+      return '';
+    } finally {
+      client.close();
+    }
+  }
+
     //
     // `%~dp0` берётся из того, что cmd и так знает о запущенном файле, минуя
     // и разбор кавычек, и перекодировку. Единственное, что осталось внутри
@@ -3814,7 +3864,8 @@ del "%~f0"
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(t('app.updateTitle')),
-        content: Text(tp('app.updateText', {'v': version, 'cur': kAppVersion})),
+        content: Text(tp(isApk ? 'app.updateTextApk' : 'app.updateText',
+            {'v': version, 'cur': kAppVersion})),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false), child: Text(t('common.cancel'))),
@@ -3897,6 +3948,7 @@ del "%~f0"
 
     if (found.isNotEmpty) {
       // Текст зависит от того, дойдут ли руки у автообновления. Оно пропускает
+    final isApk = url.toLowerCase().endsWith('.apk');
       // ядро, версию которого не удаётся прочитать (сравнивать не с чем), и
       // обещать в этом случае «обновится само» — значит соврать: человек будет
       // ждать, а ничего не произойдёт.
@@ -3911,6 +3963,30 @@ del "%~f0"
           duration: const Duration(seconds: 8),
         ));
       }
+    if (isApk) {
+      final outcome = await _runApkUpdate(version, url);
+      if (!mounted) return;
+      if (outcome == 'permission') {
+        // Переключатель «разрешить установку» уже открыт системой. Сказать,
+        // что делать ПОСЛЕ него, обязательно: сам Android назад не вернёт и
+        // установку не продолжит.
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: Text(t('app.updateTitle')),
+            content: Text(t('app.apkPermission')),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: Text(t('common.ok'))),
+            ],
+          ),
+        );
+      } else if (outcome != 'started') {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(t('app.updateFailedApk'))),
+        );
+      }
+      return;
+    }
     } else if (!silent && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(t('core.upToDate'))),

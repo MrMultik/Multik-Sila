@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Единственное, что FileProvider отдаёт наружу: папка со скачанным APK
+     обновления в кэше приложения (см. updateApkPath в MainActivity). -->
+<paths>
+    <cache-path name="updates" path="updates/"/>
+</paths>

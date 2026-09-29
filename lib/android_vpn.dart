@@ -55,6 +55,21 @@ class AndroidVpn {
     return (singbox: map?['singbox'] ?? '', xray: map?['xray'] ?? '');
   }
 
+  /// Процессоры телефона, от родного к совместимым: по ним выбирается APK
+  /// обновления в релизе (arm64-v8a, armeabi-v7a, x86_64).
+  static Future<List<String>> supportedAbis() async =>
+      (await _commands.invokeListMethod<String>('supportedAbis')) ?? const [];
+
+  /// Путь, куда скачивать APK обновления (его отдаёт установщику FileProvider).
+  static Future<String> updateApkPath() async =>
+      (await _commands.invokeMethod<String>('updateApkPath'))!;
+
+  /// Отдать скачанный APK системному установщику. "started" — окно установки
+  /// открыто; "permission" — Android сначала просит разрешить установку из
+  /// этого источника, и человеку открыт этот переключатель.
+  static Future<String> installApk(String path) async =>
+      await _commands.invokeMethod<String>('installApk', {'path': path}) ?? '';
+
   /// Установленные программы — для правил «эта программа мимо VPN».
   /// Андроидный аналог правил по пути к .exe: там ключ путь, здесь имя пакета.
   static Future<List<AndroidApp>> installedApps() async {

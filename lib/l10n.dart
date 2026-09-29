@@ -70,6 +70,7 @@ const Map<String, Map<String, String>> _strings = {
 
   'common.save': {'ru': 'Сохранить', 'en': 'Save'},
   'common.cancel': {'ru': 'Отмена', 'en': 'Cancel'},
+  'common.ok': {'ru': 'Понятно', 'en': 'OK'},
   'common.add': {'ru': 'Добавить', 'en': 'Add'},
   'common.back': {'ru': 'Назад', 'en': 'Back'},
   'common.empty': {'ru': 'Пусто', 'en': 'Empty'},
@@ -309,11 +310,27 @@ const Map<String, Map<String, String>> _strings = {
   'app.updateTitle': {'ru': 'Вышло обновление', 'en': 'An update is available'},
   'app.updateText': {
     'ru': 'Версия {v} (у вас {cur}). Приложение скачает её, закроется и '
-        'запустится заново — соединение на это время прервётся. Текущая '
-        'сборка сохранится в папке backup_{cur}.',
+        'запустится заново — соединение на это время прервётся.',
     'en': 'Version {v} (you have {cur}). The app will download it, close and '
-        'start again — the connection will drop meanwhile. The current build '
-        'is kept in the backup_{cur} folder.',
+        'start again — the connection will drop meanwhile.',
+  },
+  'app.updateTextApk': {
+    'ru': 'Версия {v} (у вас {cur}). Приложение скачает её и откроет установку '
+        'Android — подтвердите обновление. Профили и настройки сохранятся.',
+    'en': 'Version {v} (you have {cur}). The app will download it and open the '
+        'Android installer — confirm the update. Profiles and settings are kept.',
+  },
+  'app.apkPermission': {
+    'ru': 'Android просит разрешить Multik Sila устанавливать приложения. Включите '
+        'переключатель на открывшемся экране, вернитесь и снова нажмите «Проверить '
+        'обновление приложения» в настройках.',
+    'en': 'Android asks you to allow Multik Sila to install apps. Turn on the switch '
+        'on the screen that opened, come back and press "Check for an app update" in '
+        'Settings again.',
+  },
+  'app.updateFailedApk': {
+    'ru': 'Обновиться не удалось — скачайте APK со страницы релизов',
+    'en': 'The update failed — download the APK from the releases page',
   },
   'app.updateNow': {'ru': 'Обновить', 'en': 'Update'},
 
@@ -1386,6 +1403,10 @@ const Map<String, Map<String, String>> _strings = {
   'log.appUpdateFailed': {
     'ru': 'Не удалось обновить приложение: {e}',
     'en': 'Could not update the app: {e}',
+  },
+  'log.apkReady': {
+    'ru': 'Обновление {v} скачано, открываю установку Android',
+    'en': 'Update {v} downloaded, opening the Android installer',
   },
   'log.coreDownloading': {
     'ru': 'Качаю новое ядро {core} {tag}...',

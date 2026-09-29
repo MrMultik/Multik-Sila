@@ -97,6 +97,8 @@ dependencies {
     // свой рантайм Go под одинаковым именем файла, и две библиотеки в одном APK
     // конфликтуют.
     implementation(files("libs/silacore.aar"))
+    // FileProvider — передать скачанный APK обновления системному установщику.
+    implementation("androidx.core:core:1.13.1")
 }
 
 kotlin {
