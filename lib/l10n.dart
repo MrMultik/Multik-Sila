@@ -679,6 +679,10 @@ const Map<String, Map<String, String>> _strings = {
   'sub.cached': {'ru': 'серверов', 'en': 'servers'},
   // Сбой загрузки при живой сохранённой копии: причина — оставлен прежний
   // список. {when} — «29.09 в 14:05» или sub.savedEarlier.
+  'sub.updateFailed': {
+    'ru': 'Не удалось обновить подписку',
+    'en': 'Could not update the subscription',
+  },
   'sub.keptSaved': {
     'ru': 'оставлен сохранённый список: серверов {count}, обновлён {when}',
     'en': 'kept the saved list: {count} servers, updated {when}',
@@ -1844,6 +1848,27 @@ const Map<String, Map<String, String>> _strings = {
   'log.latencyDone': {
     'ru': 'Тест задержки: готово — {summary}',
     'en': 'Latency test: done — {summary}',
+  },
+  // Итог замера на длинном списке — вместо строки на каждый сервер.
+  'log.latencyDoneBrief': {
+    'ru': 'Тест задержки: готово — отвечают {ok} из {n}; лучший: {best}, {ms} мс',
+    'en': 'Latency test: done — {ok} of {n} answer; best: {best}, {ms} ms',
+  },
+  'log.latencyDoneNone': {
+    'ru': 'Тест задержки: готово — не ответил ни один из {n}',
+    'en': 'Latency test: done — none of {n} answered',
+  },
+  'log.latencyFailedBrief': {
+    'ru': 'Не ответили: {why}',
+    'en': 'No answer: {why}',
+  },
+  'log.latFail.timeout': {'ru': 'таймаут', 'en': 'timed out'},
+  'log.latFail.refused': {'ru': 'отказ в соединении', 'en': 'connection refused'},
+  'log.latFail.dns': {'ru': 'имя не найдено', 'en': 'name not found'},
+  'log.latFail.other': {'ru': 'другая ошибка', 'en': 'other error'},
+  'log.latencyNoPhysical': {
+    'ru': 'Под TUN не нашёл сетевой адаптер для замера мимо туннеля — меряю через пробные ядра',
+    'en': 'Under TUN no network adapter was found to measure past the tunnel — measuring through probe cores',
   },
   'log.latencyError': {
     'ru': 'Тест задержки [{name}]: {e}',

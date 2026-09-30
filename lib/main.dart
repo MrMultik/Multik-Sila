@@ -603,6 +603,22 @@ List<ParsedServer> dedupeServerNames(List<ParsedServer> servers) {
   return out;
 }
 
+/// К какому виду относится сбой замера — для сводки по большому списку
+/// («таймаут 98, отказ 16»). Текст ошибки приходит и от Dart, и от ядра
+/// (`HTTP 504 {"message":"Timeout"}`), поэтому смотрим на слова, а не на тип.
+/// Возвращает хвост ключа перевода `log.latFail.<вид>`.
+String latencyFailureKind(String error) {
+  final e = error.toLowerCase();
+  if (e.contains('timeout') || e.contains('timed out') || e.contains('504')) return 'timeout';
+  if (e.contains('refused') || e.contains('errno = 111') || e.contains('errno = 10061')) {
+    return 'refused';
+  }
+  if (e.contains('host lookup') || e.contains('no address associated') || e.contains('errno = 11001')) {
+    return 'dns';
+  }
+  return 'other';
+}
+
 /// Отпечаток сервера для ядра: каким ядром он поднимается и каким outbound-ом
 /// (с тегом). Имя и исходная ссылка не в счёт — ядру они не видны.
 ///
@@ -4753,8 +4769,12 @@ del "%~f0"
     _scheduleSubscriptionRetry(profile);
     if (!mounted || _activeProfile?.id != profile.id) return;
     final count = servers;
+    // Со списком на руках причину сбоя на экран не тащим: это длинная
+    // техническая строка (она уже в журнале), а человеку важно одно —
+    // серверы на месте, и от какого они числа.
     setState(() => _subStatus = count > 0
-        ? () => "${reason()} — ${tp('sub.keptSaved', {'count': count, 'when': _subSavedWhen(profile)})}"
+        ? () => "${t('sub.updateFailed')} — "
+            "${tp('sub.keptSaved', {'count': count, 'when': _subSavedWhen(profile)})}"
         : reason);
   }
 
@@ -7754,13 +7774,41 @@ del "%~f0"
   /// непрошедших проверку становится прямым враньём: рабочий сервер исчезает
   /// из списка.
   ///
-  /// Двенадцать — компромисс: 200 серверов при таймауте по умолчанию
-  /// проверяются заметно быстрее, чем по одному, и при этом не толкаются.
-  static const int _latencyConcurrency = 12;
+  /// Было двенадцать. На бесплатных списках в полторы сотни серверов, где
+  /// большинство мертво и каждый мёртвый держит место до таймаута, это
+  /// лишние полминуты. Замер 2026-09-30 на ядре в эмуляторе, 136 серверов,
+  /// шесть прогонов вперемежку: по 12 — 38–39 с, по 24 — 22 с; все 14
+  /// серверов, стабильно отвечавших при 12, ответили и во всех прогонах при
+  /// 24 (и наоборот). Плавают только те, что и так на границе таймаута.
+  static const int _latencyConcurrency = 24;
+
+  /// Для замера одним TCP-рукопожатием: оно ничего не весит, ядро в нём не
+  /// участвует, толкаться нечему.
+  static const int _connectConcurrency = 48;
+
+  /// Сколько серверов ещё пишем в журнал по строке на каждый сбой. Дальше —
+  /// сводкой: полторы сотни строк «сервер недоступен» журнал не объясняют, а
+  /// хоронят.
+  static const int _latencyVerboseLimit = 20;
+
+  // Сбои текущего прогона по видам (см. latencyFailureKind) — для сводки.
+  final Map<String, int> _latencyFailures = {};
+
+  /// Сервер не ответил на замер. На коротком списке — строка в журнал с
+  /// причиной, как было; на длинном — только счётчик.
+  void _noteLatencyFailure(String name, Object error) {
+    if (_servers.length <= _latencyVerboseLimit) {
+      _appendLog(tp('log.latencyError', {'name': name, 'e': error}));
+      return;
+    }
+    final kind = latencyFailureKind('$error');
+    _latencyFailures[kind] = (_latencyFailures[kind] ?? 0) + 1;
+  }
 
   /// `Future.wait` с ограничением на число одновременных задач.
   Future<void> _runLimited<T>(
-      Iterable<T> items, Future<void> Function(T) body) async {
+      Iterable<T> items, Future<void> Function(T) body,
+      {int concurrency = _latencyConcurrency}) async {
     final queue = items.toList();
     var next = 0;
     Future<void> worker() async {
@@ -7777,8 +7825,7 @@ del "%~f0"
     }
 
     final workers = <Future<void>>[];
-    final count =
-        queue.length < _latencyConcurrency ? queue.length : _latencyConcurrency;
+    final count = queue.length < concurrency ? queue.length : concurrency;
     for (var i = 0; i < count; i++) {
       workers.add(worker());
     }
@@ -7792,6 +7839,7 @@ del "%~f0"
     // отменой, и оставленный флаг погасил бы следующий тест на первой же
     // задаче — кнопка «Тест задержки» переставала бы работать вовсе.
     _cancelLatency = false;
+    _latencyFailures.clear();
     _appendLog(tp('log.latencyStart', {'n': _servers.length}));
 
     setState(() {
@@ -7827,11 +7875,31 @@ del "%~f0"
     }
 
     if (mounted) setState(() => _testingLatency = false);
-    final summary = _servers.map((s) {
-      final v = _latencyMs[s.outbound['tag']];
-      return '${s.name}=${v != null ? tp('log.ms', {'v': v}) : t('log.unreachable')}';
-    }).join(', ');
-    _appendLog(tp('log.latencyDone', {'summary': summary}));
+    if (_servers.length <= _latencyVerboseLimit) {
+      final summary = _servers.map((s) {
+        final v = _latencyMs[s.outbound['tag']];
+        return '${s.name}=${v != null ? tp('log.ms', {'v': v}) : t('log.unreachable')}';
+      }).join(', ');
+      _appendLog(tp('log.latencyDone', {'summary': summary}));
+      return;
+    }
+    // Длинный список: сколько отвечает, кто лучший и почему молчат остальные.
+    final answered = _servers.where((s) => _latencyMs[s.outbound['tag']] != null).toList()
+      ..sort((a, b) => _latencyMs[a.outbound['tag']]!.compareTo(_latencyMs[b.outbound['tag']]!));
+    _appendLog(answered.isEmpty
+        ? tp('log.latencyDoneNone', {'n': _servers.length})
+        : tp('log.latencyDoneBrief', {
+            'ok': answered.length,
+            'n': _servers.length,
+            'best': answered.first.name,
+            'ms': _latencyMs[answered.first.outbound['tag']]!,
+          }));
+    if (_latencyFailures.isNotEmpty) {
+      final kinds = _latencyFailures.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+      _appendLog(tp('log.latencyFailedBrief', {
+        'why': kinds.map((e) => "${t('log.latFail.${e.key}')} — ${e.value}").join(', '),
+      }));
+    }
   }
 
   /// Замер задержки там, где нельзя запустить пробное ядро (Android).
@@ -7875,11 +7943,10 @@ del "%~f0"
             // ловились, а честный отказ ядра проходил молча. Три сервера из
             // пяти падали без единой строки, и на поиск причины ушёл лишний
             // круг — при том что ядро прямо в ответе объясняет, что не так.
-            _appendLog(tp('log.latencyError',
-                {'name': s.name, 'e': 'HTTP ${resp.statusCode} ${resp.body.trim()}'}));
+            _noteLatencyFailure(s.name, 'HTTP ${resp.statusCode} ${resp.body.trim()}');
           }
         } catch (e) {
-          _appendLog(tp('log.latencyError', {'name': s.name, 'e': e}));
+          _noteLatencyFailure(s.name, e);
         }
       });
       return;
@@ -7920,25 +7987,119 @@ del "%~f0"
 
   // Режим "как в Karing": время TCP-рукопожатия до сервера. Не поднимает ни
   // одного процесса, поэтому тест всех серверов занимает доли секунды.
+  //
+  // ПОД СВОИМ TUN — только с привязкой к физическому адаптеру. Соединение
+  // самого приложения туннель не исключает: оно уходит в SilaTUN, и TCP-
+  // рукопожатие завершает стек туннеля, а не сервер. Наружу это выглядело
+  // так (журнал пользователя, 2026-09-30): до подключения у всех серверов
+  // 358 мс, после — у всех 25–45 мс, и «Авто» каждые 15 минут выбирал
+  // сервер по этой цифре, то есть вслепую. Проверено на работающем TUN: без
+  // привязки 2–16 мс, с привязкой к адресу адаптера Wi-Fi — 42–94 мс
+  // (настоящий путь), с привязкой к адресу самого SilaTUN — те же 1–3 мс.
+  // Windows ищет маршрут только среди адаптеров с адресом-источником, так что
+  // привязки достаточно, чтобы выйти мимо туннеля.
   Future<void> _testLatenciesByConnect(List<ParsedServer> servers) async {
+    InternetAddress? source;
+    if (_tunMode && _runningEngine != null && Env.coreRunsAsProcess) {
+      source = await _physicalSourceAddress(servers);
+      if (source == null) {
+        // Адаптер не нашли — лучше честный сквозной замер пробными ядрами
+        // (они сами привязываются к физическому адаптеру), чем цифры туннеля.
+        _appendLog(t('log.latencyNoPhysical'));
+        final singbox = servers.where((s) => s.engine == 'singbox').toList();
+        final xray = servers.where((s) => s.engine == 'xray').toList();
+        await Future.wait([
+          if (singbox.isNotEmpty) _testSingboxLatencies(singbox),
+          if (xray.isNotEmpty) _testXrayLatencies(xray),
+        ]);
+        return;
+      }
+    }
+
+    final timeout = Duration(milliseconds: _settings.latencyTimeoutMs);
     await _runLimited(servers, (s) async {
       final tag = s.outbound['tag'] as String;
       final endpoint = _serverEndpoint(s);
       if (endpoint == null) return;
       try {
+        // Имя разрешаем ДО секундомера: иначе первый замер включал поиск в
+        // DNS и был в разы больше следующих.
+        final address = await _resolveForProbe(endpoint.$1);
         final sw = Stopwatch()..start();
-        final socket = await Socket.connect(
-          endpoint.$1,
-          endpoint.$2,
-          timeout: Duration(milliseconds: _settings.latencyTimeoutMs),
-        );
+        final socket = await Socket.connect(address, endpoint.$2,
+            sourceAddress: source, timeout: timeout);
         sw.stop();
         socket.destroy();
         if (mounted) setState(() => _latencyMs[tag] = sw.elapsedMilliseconds);
       } catch (e) {
-        _appendLog(tp('log.latencyError', {'name': s.name, 'e': e}));
+        _noteLatencyFailure(s.name, e);
       }
-    });
+    }, concurrency: _connectConcurrency);
+  }
+
+  /// Адрес сервера для пробы: литерал как есть, имя — через системный DNS.
+  /// Заодно наполняет кэш, которым пользуется запекание адресов в конфиг.
+  Future<InternetAddress> _resolveForProbe(String host) async {
+    final literal = InternetAddress.tryParse(host);
+    if (literal != null) return literal;
+    final cached = _hostIpCache[host];
+    if (cached != null) return InternetAddress(cached);
+    final found = await InternetAddress.lookup(host, type: InternetAddressType.IPv4)
+        .timeout(const Duration(seconds: 5));
+    if (found.isEmpty) throw const SocketException('Failed host lookup');
+    _hostIpCache[host] = found.first.address;
+    return found.first;
+  }
+
+  /// Адрес физического адаптера, с которого проба выйдет мимо своего TUN.
+  ///
+  /// Кандидаты — IPv4 всех адаптеров, кроме самого туннеля: его исключаем и
+  /// по имени, и по адресу, потому что привязка к нему «отвечает» быстрее
+  /// всех и выиграла бы любую гонку. Среди остальных могут быть адаптеры без
+  /// выхода в сеть (виртуальные машины, Hyper-V), поэтому выбираем делом: с
+  /// какого адреса сервер ответил. Пробуем на нескольких серверах — первый
+  /// может просто лежать.
+  Future<InternetAddress?> _physicalSourceAddress(List<ParsedServer> servers) async {
+    final tunAddress = _settings.tunIpv4.split('/').first;
+    final candidates = <InternetAddress>[];
+    try {
+      for (final nic in await NetworkInterface.list(type: InternetAddressType.IPv4)) {
+        if (nic.name == _settings.tunName) continue;
+        for (final a in nic.addresses) {
+          if (a.address != tunAddress) candidates.add(a);
+        }
+      }
+    } catch (_) {}
+    if (candidates.isEmpty) return null;
+
+    var tried = 0;
+    for (final s in servers) {
+      if (_udpOnlyProtocols.contains(s.protocol)) continue;
+      final endpoint = _serverEndpoint(s);
+      if (endpoint == null) continue;
+      if (tried++ >= 3) break;
+      final InternetAddress address;
+      try {
+        address = await _resolveForProbe(endpoint.$1);
+      } catch (_) {
+        continue;
+      }
+      final found = Completer<InternetAddress?>();
+      var pending = candidates.length;
+      for (final source in candidates) {
+        Socket.connect(address, endpoint.$2,
+                sourceAddress: source, timeout: const Duration(seconds: 3))
+            .then((socket) {
+          socket.destroy();
+          if (!found.isCompleted) found.complete(source);
+        }).catchError((_) {
+          if (--pending == 0 && !found.isCompleted) found.complete(null);
+        });
+      }
+      final source = await found.future;
+      if (source != null) return source;
+    }
+    return null;
   }
 
   // Режим «как в Karing»: соединение устанавливается ВНЕ замера, секундомер
@@ -8013,7 +8174,7 @@ del "%~f0"
             client.close(force: true);
           }
         } catch (e) {
-          _appendLog(tp('log.latencyError', {'name': server.name, 'e': e}));
+          _noteLatencyFailure(server.name, e);
         }
       }
     } catch (e) {
@@ -8090,11 +8251,11 @@ del "%~f0"
             // ловились, а честный отказ ядра проходил молча. Три сервера из
             // пяти падали без единой строки, и на поиск причины ушёл лишний
             // круг — при том что ядро прямо в ответе объясняет, что не так.
-            _appendLog(tp('log.latencyError',
-                {'name': nameOf[tag] ?? tag, 'e': 'HTTP ${resp.statusCode} ${resp.body.trim()}'}));
+            _noteLatencyFailure(
+                nameOf[tag] ?? tag, 'HTTP ${resp.statusCode} ${resp.body.trim()}');
           }
         } catch (e) {
-          _appendLog(tp('log.latencyError', {'name': nameOf[tag] ?? tag, 'e': e}));
+          _noteLatencyFailure(nameOf[tag] ?? tag, e);
         }
       });
     } catch (_) {
@@ -8154,7 +8315,7 @@ del "%~f0"
     } catch (e) {
       // Раньше ошибка глоталась молча, и «недоступен» ничего не объяснял —
       // на разбор одного такого случая ушёл целый заход. Теперь видно причину.
-      _appendLog(tp('log.latencyError', {'name': name, 'e': e}));
+      _noteLatencyFailure(name, e);
       return null;
     } finally {
       client.close(force: true);
@@ -8340,7 +8501,7 @@ del "%~f0"
           setState(() => _latencyMs[tag] = elapsed);
         }
       } catch (e) {
-        _appendLog(tp('log.latencyError', {'name': server.name, 'e': e}));
+        _noteLatencyFailure(server.name, e);
       } finally {
         probe?.kill();
 
