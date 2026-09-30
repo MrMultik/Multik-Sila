@@ -136,6 +136,9 @@ Type: files; Name: "{app}\*_probe*.json"
 Type: files; Name: "{app}\app_log.txt"
 Type: files; Name: "{app}\app_log.txt.prev.txt"
 Type: files; Name: "{app}\startup_log.txt"
+; Сохранённая копия последнего ответа подписки (серверы с ключами) — её
+; приложение берёт, когда подписка не загрузилась.
+Type: files; Name: "{app}\sub_cache_*.txt"
 Type: files; Name: "{app}\sing-box.exe.new"
 Type: files; Name: "{app}\sing-box.exe.bak"
 Type: files; Name: "{app}\xray.exe.new"

@@ -425,6 +425,10 @@ class ParsedServer {
   // сервер на телефон. Заполняется в одном месте, после разбора строки:
   // раскладывать её по семи веткам парсеров смысла нет.
   String link = '';
+  // Отпечаток для ядра (см. serverCoreKey). Снимается один раз, сразу после
+  // разбора: дальше outbound правится на месте (_bakeServerIps кладёт в него
+  // IP), и сравнивать сами outbound-ы с заново разобранными уже нельзя.
+  String coreKey = '';
 
   ParsedServer({
     required this.name,
@@ -597,6 +601,41 @@ List<ParsedServer> dedupeServerNames(List<ParsedServer> servers) {
           ..link = s.link));
   }
   return out;
+}
+
+/// Отпечаток сервера для ядра: каким ядром он поднимается и каким outbound-ом
+/// (с тегом). Имя и исходная ссылка не в счёт — ядру они не видны.
+String serverCoreKey(ParsedServer s) => '${s.engine}|${jsonEncode(s.outbound)}';
+
+/// Одинаковы ли два списка для ЯДРА: те же outbound-ы под теми же тегами.
+///
+/// Подписка обновляется и посреди сеанса (раз в N часов), и почти всегда
+/// приходит тем же, чем была, — у панелей меняются разве что подписи с
+/// остатком трафика. Раньше любое обновление гасило мосты Xray под работающим
+/// ядром и сбрасывало выбранный сервер на первый в списке. Если для ядра
+/// ничего не изменилось, трогать соединение незачем.
+bool sameServersForCore(List<ParsedServer> a, List<ParsedServer> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i].coreKey.isEmpty || a[i].coreKey != b[i].coreKey) return false;
+  }
+  return true;
+}
+
+/// Тот же сервер в обновлённом списке — чтобы выбор человека пережил
+/// обновление подписки. По исходной ссылке, а где её нет (Clash, JSON) — по
+/// имени и протоколу.
+ParsedServer? findSameServer(ParsedServer? wanted, List<ParsedServer> servers) {
+  if (wanted == null) return null;
+  if (wanted.link.isNotEmpty) {
+    for (final s in servers) {
+      if (s.link == wanted.link) return s;
+    }
+  }
+  for (final s in servers) {
+    if (s.name == wanted.name && s.protocol == wanted.protocol) return s;
+  }
+  return null;
 }
 
 /// Адрес сервера в Xray-outbound: у vless/vmess он в settings.vnext[],
@@ -2731,6 +2770,9 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   static const String _settingsPrefsKey = kSettingsPrefsKey;
   Timer? _autoSelectTimer;
   Timer? _subUpdateTimer;
+  // Повтор загрузки подписки после сбоя (см. _scheduleSubscriptionRetry).
+  Timer? _subRetryTimer;
+  int _subRetryAttempt = 0;
   // Проверка живости активного сервера: таймер, счётчик подряд идущих
   // провалов и список тех, кто проверку уже завалил. Список — по ИМЕНИ, как
   // и избранное: теги srv_N раздаются по порядку в подписке и после её
@@ -4432,18 +4474,84 @@ del "%~f0"
             return;
           }
         }
-        if (_activeProfile?.id == profile.id) {
-          setState(() => _subStatus = () => "${t('sub.httpError')} ${resp.statusCode}");
-        }
+        await _subscriptionLoadFailed(
+            profile, () => "${t('sub.httpError')} ${resp.statusCode}");
         return;
       }
 
       await _applySubscriptionResponse(profile, resp);
     } catch (e) {
-      if (_activeProfile?.id == profile.id) {
-        setState(() => _subStatus = () => "${t('sub.error')}: $e");
-      }
+      await _subscriptionLoadFailed(profile, () => "${t('sub.error')}: $e");
     }
+  }
+
+  // Последний удачный ответ подписки, как он пришёл. Лежит рядом с
+  // profile_<id>.txt локальных профилей и нужен ровно для одного: чтобы сбой
+  // загрузки не оставлял человека без серверов.
+  String _subCachePath(String id) =>
+      '$_workDir${Platform.pathSeparator}sub_cache_$id.txt';
+
+  Future<void> _dropSubCache(String id) async {
+    try {
+      final file = File(_subCachePath(id));
+      if (await file.exists()) await file.delete();
+    } catch (_) {}
+  }
+
+  /// Подписка не загрузилась (нет сети, панель не отвечает, HTTP-ошибка).
+  ///
+  /// Раньше это значило «серверов нет»: на запуске список оставался пустым,
+  /// и подключаться было не к чему, — хотя вчерашние серверы никуда не
+  /// делись. Хуже всего это било по автозапуску вместе с Windows: сеть ещё не
+  /// поднялась, запрос падал, и автоподключение молча не происходило. А ещё
+  /// панель бывает недоступна как раз БЕЗ VPN — то есть обновить список можно
+  /// было только уже подключившись, а подключиться без списка нельзя.
+  ///
+  /// Теперь серверы берутся из сохранённой копии последнего удачного ответа
+  /// (так же ведёт себя Karing), а загрузка повторяется позже — к тому
+  /// времени сеть, скорее всего, уже есть.
+  Future<void> _subscriptionLoadFailed(
+      SubscriptionProfile profile, String Function() reason) async {
+    _appendLog(tp('log.subLoadFailed', {'name': profile.name, 'reason': reason()}));
+    var servers = _serverCache[profile.id]?.length ?? 0;
+    if (servers == 0) {
+      try {
+        final file = File(_subCachePath(profile.id));
+        if (await file.exists()) {
+          servers = _applySubscriptionContent(profile, await file.readAsString());
+          if (servers > 0) _appendLog(tp('log.subFromCache', {'count': servers}));
+        }
+      } catch (_) {}
+    }
+    _scheduleSubscriptionRetry(profile);
+    if (!mounted || _activeProfile?.id != profile.id) return;
+    final count = servers;
+    setState(() => _subStatus = count > 0
+        ? () => "${reason()} — ${tp('sub.keptSaved', {'count': count, 'when': _subSavedWhen(profile)})}"
+        : reason);
+  }
+
+  // «29.09 в 14:05» — когда подписка в последний раз обновилась успешно.
+  String _subSavedWhen(SubscriptionProfile p) {
+    if (p.lastUpdated <= 0) return t('sub.savedEarlier');
+    final tm = DateTime.fromMillisecondsSinceEpoch(p.lastUpdated * 1000);
+    String two(int n) => n.toString().padLeft(2, '0');
+    return "${two(tm.day)}.${two(tm.month)} ${t('sub.at')} ${two(tm.hour)}:${two(tm.minute)}";
+  }
+
+  /// Повтор неудавшейся загрузки: через минуту и ещё раз через пять. Дальше
+  /// — обычное расписание (см. _rescheduleSubscriptionUpdate): панель,
+  /// которая лежит, незачем дёргать без конца.
+  void _scheduleSubscriptionRetry(SubscriptionProfile profile) {
+    _subRetryTimer?.cancel();
+    if (profile.url.startsWith('file:')) return;
+    const delays = [Duration(minutes: 1), Duration(minutes: 5)];
+    if (_subRetryAttempt >= delays.length) return;
+    final delay = delays[_subRetryAttempt++];
+    _subRetryTimer = Timer(delay, () {
+      if (!mounted || _activeProfile?.id != profile.id) return;
+      _loadSubscription(profile);
+    });
   }
 
   /// Успешный ответ подписки: заголовки, отметки времени, разбор содержимого.
@@ -4471,7 +4579,16 @@ del "%~f0"
     // подписки — ровно тот момент, когда его пора сбросить.
     _hostIpCache.clear();
 
-    _applySubscriptionContent(profile, resp.body);
+    _subRetryTimer?.cancel();
+    _subRetryAttempt = 0;
+    final servers = _applySubscriptionContent(profile, resp.body);
+    // Копию кладём, только если в ответе нашлись серверы: страница с
+    // ошибкой или пустая выдача не должны затирать последний рабочий список.
+    if (servers > 0) {
+      try {
+        await File(_subCachePath(profile.id)).writeAsString(resp.body, flush: true);
+      } catch (_) {}
+    }
   }
 
   /// Панель отозвала ссылку. Дальше есть ровно два случая, и они требуют
@@ -4507,6 +4624,7 @@ del "%~f0"
 
     if (isActive && _runningEngine != null) await _stopCore();
     _serverCache.remove(profile.id);
+    await _dropSubCache(profile.id);
     if (!isActive || !mounted) return;
     _stopAllXrayBridges();
     setState(() {
@@ -4517,8 +4635,9 @@ del "%~f0"
     });
   }
 
-  // Разбор содержимого подписки — общий для сетевой загрузки и локального файла.
-  void _applySubscriptionContent(SubscriptionProfile profile, String raw) {
+  // Разбор содержимого подписки — общий для сетевой загрузки, локального
+  // файла и сохранённой копии. Возвращает число разобранных серверов.
+  int _applySubscriptionContent(SubscriptionProfile profile, String raw) {
     String decoded;
     try {
       decoded = utf8.decode(base64.decode(raw.trim()));
@@ -4585,37 +4704,81 @@ del "%~f0"
     // по отдельности через Clash API, не перезапуская ядро
     for (var i = 0; i < parsed.length; i++) {
       parsed[i].outbound['tag'] = 'srv_$i';
+      parsed[i].coreKey = serverCoreKey(parsed[i]);
     }
 
+    final previous = _serverCache[profile.id];
+    final unchangedForCore = previous != null && sameServersForCore(previous, parsed);
     _serverCache[profile.id] = parsed;
 
     // пока грузилась подписка, юзер мог переключиться на другой профиль —
     // тогда этот результат больше не актуален для текущего экрана
-    if (_activeProfile?.id != profile.id) return;
+    if (_activeProfile?.id != profile.id) return parsed.length;
 
-    // теги переехали на новый список — старые мосты (если были подняты)
-    // указывают на серверы, которых по этим тегам больше нет
+    // Ноль серверов — это не «подписка пустая», а чаще всего «формат не
+    // тот». Раньше здесь писалось «Распознано: 0 — пропущено: 340», и по
+    // этой строке нельзя было понять, что подписка вообще другого вида:
+    // выглядело как сломанная подписка, а не как неподдержанный формат.
+    final count = parsed.length;
+    final String Function() status = count == 0
+        ? () => t('sub.unknownFormat')
+        : (skipped > 0
+            ? () => "${t('sub.parsed')}: $count (${format()}) — ${t('sub.skipped')}: $skipped"
+            : () => "${t('sub.parsed')}: $count (${format()})");
+    _appendLog(tp('log.subFormat',
+        {'format': format(), 'count': parsed.length, 'skipped': skipped}));
+
+    // Для ядра ничего не изменилось (обычное дело при обновлении по
+    // расписанию): теги и outbound-ы те же, так что мосты, замеры и выбранный
+    // сервер остаются как есть. Меняются разве что подписи.
+    if (unchangedForCore) {
+      final keepTag = _selectedServer?.outbound['tag'];
+      setState(() {
+        _servers = parsed;
+        _selectedServer = parsed.where((s) => s.outbound['tag'] == keepTag).firstOrNull ??
+            (parsed.isNotEmpty ? parsed.first : null);
+        _subStatus = status;
+      });
+      return parsed.length;
+    }
+
+    // Список для ядра другой. Теги переехали — старые мосты (если были
+    // подняты) указывают на серверы, которых по этим тегам больше нет.
+    // Выбор человека переносим на тот же сервер в новом списке.
+    final wasRunning = _runningEngine != null;
+    final kept = findSameServer(_selectedServer, parsed);
     _stopAllXrayBridges();
     setState(() {
       _servers = parsed;
-      _selectedServer = parsed.isNotEmpty ? parsed.first : null;
+      _selectedServer = kept ?? (parsed.isNotEmpty ? parsed.first : null);
       _latencyMs.clear();
-      // Ноль серверов — это не «подписка пустая», а чаще всего «формат не
-      // тот». Раньше здесь писалось «Распознано: 0 — пропущено: 340», и по
-      // этой строке нельзя было понять, что подписка вообще другого вида:
-      // выглядело как сломанная подписка, а не как неподдержанный формат.
-      final count = parsed.length;
-      _subStatus = count == 0
-          ? () => t('sub.unknownFormat')
-          : (skipped > 0
-              ? () => "${t('sub.parsed')}: $count (${format()}) — ${t('sub.skipped')}: $skipped"
-              : () => "${t('sub.parsed')}: $count (${format()})");
+      _subStatus = status;
     });
-    _appendLog(tp('log.subFormat',
-        {'format': format(), 'count': parsed.length, 'skipped': skipped}));
+    // Работающее ядро держит ПРЕЖНИЙ список: его srv_3 — уже не тот сервер,
+    // что srv_3 на экране. Переключение по такому списку попадало бы в чужой
+    // сервер, поэтому переподключаемся с новым. Только для первого списка
+    // (previous == null) этого не нужно: ядро без серверов не работает.
+    if (wasRunning && previous != null && parsed.isNotEmpty) {
+      _appendLog(t('log.subChangedReconnect'));
+      unawaited(_reconnectAfterSubscriptionChange());
+    }
+    return parsed.length;
+  }
+
+  /// Переподключение после того, как обновлённая подписка принесла другой
+  /// список серверов. Через обычные остановку и старт — тем же путём, что и
+  /// кнопка: другого, «облегчённого», пути перезапуска в приложении нет, и
+  /// заводить его ради редкого случая незачем.
+  Future<void> _reconnectAfterSubscriptionChange() async {
+    if (_busy) return;
+    await _stopCore();
+    if (!mounted || _servers.isEmpty) return;
+    await _startCore();
   }
 
   Future<void> _switchProfile(SubscriptionProfile profile) async {
+    _subRetryTimer?.cancel();
+    _subRetryAttempt = 0;
     _stopAllXrayBridges();
     setState(() => _activeProfile = profile);
     await _saveProfiles();
@@ -5187,12 +5350,16 @@ del "%~f0"
     final userAgent = uaController.text.trim();
 
     if (editing != null) {
+      // Сохранённую копию сбрасываем, только если сменилось то, от чего
+      // зависит ответ панели: от переименования профиля серверы не меняются.
+      final sourceChanged = editing.url != url || editing.userAgent != userAgent;
       setState(() {
         editing.name = name;
         editing.url = url;
         editing.userAgent = userAgent;
       });
       _serverCache.remove(editing.id);
+      if (sourceChanged) await _dropSubCache(editing.id);
       await _saveProfiles();
       if (_activeProfile?.id == editing.id) {
         await _loadSubscription(editing);
@@ -5230,6 +5397,7 @@ del "%~f0"
       _latencyMs.clear();
       if (_activeProfile == null) _subStatus = () => t('profile.addNone');
     });
+    await _dropSubCache(profile.id);
     await _saveProfiles();
 
     if (_activeProfile != null && _serverCache[_activeProfile!.id] == null) {
@@ -8616,6 +8784,7 @@ del "%~f0"
     _autoSelectTimer?.cancel();
     _healthTimer?.cancel();
     _subUpdateTimer?.cancel();
+    _subRetryTimer?.cancel();
     _boundsSaveTimer?.cancel();
     super.dispose();
   }

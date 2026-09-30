@@ -130,6 +130,7 @@ if ($Stage -ne "package") {
   }
   Get-ChildItem $rel -Filter "xray_bridge_*.json" -ErrorAction SilentlyContinue | Remove-Item -Force
   Get-ChildItem $rel -Filter "*_probe*.json" -ErrorAction SilentlyContinue | Remove-Item -Force
+  Get-ChildItem $rel -Filter "sub_cache_*.txt" -ErrorAction SilentlyContinue | Remove-Item -Force
   foreach ($d in @("rulesets", "probe")) {
     Remove-Item (Join-Path $rel $d) -Recurse -Force -ErrorAction SilentlyContinue
   }

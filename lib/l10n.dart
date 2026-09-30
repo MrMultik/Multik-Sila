@@ -677,6 +677,13 @@ const Map<String, Map<String, String>> _strings = {
   'sub.updated': {'ru': 'обновлено', 'en': 'updated'},
   'sub.at': {'ru': 'в', 'en': 'at'},
   'sub.cached': {'ru': 'серверов', 'en': 'servers'},
+  // Сбой загрузки при живой сохранённой копии: причина — оставлен прежний
+  // список. {when} — «29.09 в 14:05» или sub.savedEarlier.
+  'sub.keptSaved': {
+    'ru': 'оставлен сохранённый список: серверов {count}, обновлён {when}',
+    'en': 'kept the saved list: {count} servers, updated {when}',
+  },
+  'sub.savedEarlier': {'ru': 'ранее', 'en': 'earlier'},
   'sub.loading': {'ru': 'Загружаю подписку', 'en': 'Loading subscription'},
   'sub.readFail': {'ru': 'Не удалось прочитать файл профиля', 'en': 'Could not read the profile file'},
   'sub.httpError': {'ru': 'Ошибка загрузки: HTTP', 'en': 'Download error: HTTP'},
@@ -1907,6 +1914,18 @@ const Map<String, Map<String, String>> _strings = {
   'log.probeCoreFailed': {
     'ru': 'Не удалось подготовить копию ядра для замера: {e}',
     'en': 'Could not prepare the core copy used for measuring: {e}',
+  },
+  'log.subLoadFailed': {
+    'ru': 'Подписка "{name}" не загрузилась: {reason}',
+    'en': 'Subscription "{name}" failed to load: {reason}',
+  },
+  'log.subFromCache': {
+    'ru': 'Взят сохранённый список серверов: {count}',
+    'en': 'Using the saved server list: {count}',
+  },
+  'log.subChangedReconnect': {
+    'ru': 'Подписка принесла другой список серверов — переподключаюсь с новым',
+    'en': 'The subscription brought a different server list — reconnecting with it',
   },
   'log.subFormat': {
     'ru': 'Подписка разобрана как {format}: серверов {count}, пропущено {skipped}',
