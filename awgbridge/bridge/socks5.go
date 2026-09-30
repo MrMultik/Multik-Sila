@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"sync"
@@ -15,10 +16,11 @@ import (
 	"time"
 )
 
-// SOCKS5 в объёме, который нужен sing-box: без авторизации, CONNECT и
-// UDP ASSOCIATE (RFC 1928). Своя реализация, а не библиотека, намеренно: на
-// Android этот пакет собирается в один модуль с sing-box и Xray, и каждая
-// лишняя зависимость там — повод для конфликта версий.
+// SOCKS5 в объёме, который нужен sing-box (без авторизации, CONNECT и
+// UDP ASSOCIATE, RFC 1928), и на том же порту HTTP-прокси. Своя реализация, а
+// не библиотека, намеренно: на Android этот пакет собирается в один модуль с
+// sing-box и Xray, и каждая лишняя зависимость там — повод для конфликта
+// версий.
 
 const (
 	socksVersion = 5
@@ -53,6 +55,18 @@ func (t *tunnel) handle(c net.Conn) {
 	// сколько угодно.
 	c.SetDeadline(time.Now().Add(30 * time.Second))
 	br := bufio.NewReader(c)
+
+	// Порт общий для SOCKS5 и HTTP-прокси, как `mixed` у sing-box: SOCKS5
+	// начинается с байта версии 5, HTTP — с буквы метода. HTTP нужен тесту
+	// задержки приложения: он меряет через HttpClient, а тот SOCKS не умеет.
+	first, err := br.Peek(1)
+	if err != nil {
+		return
+	}
+	if first[0] != socksVersion {
+		t.handleHTTP(c, br)
+		return
+	}
 
 	// Приветствие: версия, число методов, методы.
 	head := make([]byte, 2)
@@ -162,10 +176,14 @@ func writeReply(c net.Conn, rep byte, bound net.Addr) error {
 	return err
 }
 
-func (t *tunnel) connect(c net.Conn, br *bufio.Reader, host string, port uint16) {
+func (t *tunnel) dial(hostport string) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	remote, err := t.tnet.DialContext(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(int(port))))
-	cancel()
+	defer cancel()
+	return t.tnet.DialContext(ctx, "tcp", hostport)
+}
+
+func (t *tunnel) connect(c net.Conn, br *bufio.Reader, host string, port uint16) {
+	remote, err := t.dial(net.JoinHostPort(host, strconv.Itoa(int(port))))
 	if err != nil {
 		writeReply(c, repHostUnreachable, nil)
 		return
@@ -174,8 +192,65 @@ func (t *tunnel) connect(c net.Conn, br *bufio.Reader, host string, port uint16)
 	if err := writeReply(c, repOK, nil); err != nil {
 		return
 	}
+	pipe(c, br, remote)
+}
 
-	// Два направления; каждое, дочитав, закрывает свою половину записи, чтобы
+// handleHTTP — HTTP-прокси: CONNECT для https и пересылка обычного запроса
+// для http. Одно соединение — один запрос: тесту задержки больше не нужно, а
+// браузерный трафик идёт через SOCKS5.
+func (t *tunnel) handleHTTP(c net.Conn, br *bufio.Reader) {
+	req, err := http.ReadRequest(br)
+	if err != nil {
+		return
+	}
+	c.SetDeadline(time.Time{})
+
+	if req.Method == http.MethodConnect {
+		remote, err := t.dial(req.Host)
+		if err != nil {
+			io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
+			return
+		}
+		defer remote.Close()
+		if _, err := io.WriteString(c, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
+			return
+		}
+		pipe(c, br, remote)
+		return
+	}
+
+	host := req.URL.Host
+	if host == "" {
+		host = req.Host
+	}
+	if host == "" {
+		io.WriteString(c, "HTTP/1.1 400 Bad Request\r\n\r\n")
+		return
+	}
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		host = net.JoinHostPort(host, "80")
+	}
+	remote, err := t.dial(host)
+	if err != nil {
+		io.WriteString(c, "HTTP/1.1 502 Bad Gateway\r\n\r\n")
+		return
+	}
+	defer remote.Close()
+	// Серверу — запрос в обычном виде (путь, а не полный адрес) и с просьбой
+	// закрыть соединение: следующий запрос клиента пришёл бы сюда же, а
+	// адресован мог бы быть уже другому сайту.
+	req.RequestURI = ""
+	req.Header.Del("Proxy-Connection")
+	req.Close = true
+	if err := req.Write(remote); err != nil {
+		return
+	}
+	io.Copy(c, remote)
+}
+
+// pipe гонит данные в обе стороны, пока обе не закончатся.
+func pipe(c net.Conn, br *bufio.Reader, remote net.Conn) {
+	// Каждое направление, дочитав, закрывает свою половину записи, чтобы
 	// вторая сторона увидела конец потока, а не обрыв.
 	done := make(chan struct{}, 2)
 	go func() {

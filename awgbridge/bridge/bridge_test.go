@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
@@ -331,6 +332,57 @@ func TestTCPAndUDPThroughAmneziaWG31(t *testing.T) {
 	}
 	if got != "echo:ping" {
 		t.Fatalf("UDP through the bridge: got %q", got)
+	}
+}
+
+// Тот же порт принимает и HTTP-прокси: им меряет задержку приложение.
+func TestHTTPProxyOnTheSamePort(t *testing.T) {
+	params := params31(t)
+	socks := startClient(t, startServer(t, params), params)
+
+	// Обычный http: запрос с полным адресом пересылается серверу.
+	proxyURL, _ := url.Parse("http://" + socks.String())
+	client := &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+		Timeout:   10 * time.Second,
+	}
+	resp, err := client.Get("http://" + serverTunnelIP + "/")
+	if err != nil {
+		t.Fatalf("plain request through the HTTP proxy: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "hello through awg" {
+		t.Fatalf("plain request: got %q", body)
+	}
+
+	// CONNECT — так через прокси ходит https.
+	c, err := net.DialTimeout("tcp", socks.String(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(10 * time.Second))
+	fmt.Fprintf(c, "CONNECT %s:80 HTTP/1.1\r\nHost: %s:80\r\n\r\n", serverTunnelIP, serverTunnelIP)
+	br := bufio.NewReader(c)
+	status, err := br.ReadString('\n')
+	if err != nil || !strings.Contains(status, " 200 ") {
+		t.Fatalf("CONNECT: %q, %v", status, err)
+	}
+	for line := status; strings.TrimSpace(line) != ""; {
+		if line, err = br.ReadString('\n'); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fmt.Fprintf(c, "GET / HTTP/1.0\r\nHost: test\r\n\r\n")
+	inner, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("through CONNECT: %v", err)
+	}
+	body, _ = io.ReadAll(inner.Body)
+	inner.Body.Close()
+	if string(body) != "hello through awg" {
+		t.Fatalf("through CONNECT: got %q", body)
 	}
 }
 

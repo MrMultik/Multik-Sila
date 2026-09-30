@@ -68,6 +68,9 @@ app_log.txt
 # Их скачивает само приложение (автообновление ядер) либо кладут руками — см. README.
 /sing-box.exe
 /xray.exe
+# Мост AmneziaWG собирается из awgbridge/ (tools/build_awg_bridge.ps1) — в
+# репозитории лежит исходный код, а не бинарник.
+/awg-bridge.exe
 
 # Рабочие файлы приложения рядом с .exe: конфиги содержат реальные адреса
 # серверов и UUID из подписки, лог — историю соединений.
@@ -77,6 +80,7 @@ xray_bridge_*.json
 *_probe.json
 app_log.txt*
 sub_cache_*.txt
+awg_bridge.json
 rulesets/
 update_staging/
 backup_*/
