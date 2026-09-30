@@ -101,6 +101,13 @@ install(FILES "${CMAKE_SOURCE_DIR}/../xray.exe"
   DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 
+# awg-bridge.exe runs AmneziaWG servers, which neither sing-box nor Xray can.
+# Unlike the two above it is built from this repository (awgbridge/) by
+# tools/build_awg_bridge.ps1, which tools/release.ps1 runs before the build.
+install(FILES "${CMAKE_SOURCE_DIR}/../awg-bridge.exe"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime)
+
 # Copy the native assets provided by the build.dart from all packages.
 set(NATIVE_ASSETS_DIR "${PROJECT_BUILD_DIR}native_assets/windows/")
 install(DIRECTORY "${NATIVE_ASSETS_DIR}"

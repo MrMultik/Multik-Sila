@@ -102,6 +102,9 @@ Source: "{#BuildDir}\data\flutter_assets\*"; DestDir: "{app}\data\flutter_assets
 ; только вперёд по версии.
 Source: "{#BuildDir}\sing-box.exe"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "{#BuildDir}\xray.exe"; DestDir: "{app}"; Flags: onlyifdoesntexist
+; Мост AmneziaWG — наша собственная сборка (awgbridge\), своего канала
+; обновления у него нет: едет с приложением и заменяется вместе с ним.
+Source: "{#BuildDir}\awg-bridge.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
@@ -130,6 +133,8 @@ Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; F
 Type: files; Name: "{app}\config.json"
 Type: files; Name: "{app}\xray_config.json"
 Type: files; Name: "{app}\xray_bridge_*.json"
+; Конфиг моста AmneziaWG: в нём ключи серверов.
+Type: files; Name: "{app}\awg_bridge.json"
 ; *_probe*.json, а не *_probe.json: пробник одного сервера пишет
 ; xray_probe_single.json, и в нём адрес и ключи сервера.
 Type: files; Name: "{app}\*_probe*.json"

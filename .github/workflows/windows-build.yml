@@ -9,6 +9,9 @@
 #                             and XTLS/Xray-core; only the two .exe files are
 #                             taken, exactly as the local setup does)
 #   - Inno Setup             (official release of jrsoftware/issrc)
+#   - Go                     (GO_VERSION) - builds awg-bridge.exe, the
+#                             AmneziaWG bridge, from awgbridge/; its
+#                             dependencies are pinned by awgbridge/go.sum
 #
 # Code signing (SignPath) is NOT wired yet: it needs the organisation and
 # project IDs SignPath issues after the project is approved. The two places
@@ -30,6 +33,7 @@ env:
   SING_BOX_SHA256: "c2d8bfff918755808781dfdeeb8581b6c91eb3a243d9a7b55483cfc0c0684d32"
   XRAY_VERSION: "26.9.9"
   XRAY_SHA256: "244deaba2098c2964e49bba90df3707777e5f5f428a82d2f29604015f24beec2"
+  GO_VERSION: "1.26.5"
   INNO_VERSION: "6.7.3"
   INNO_TAG: "is-6_7_3"
   INNO_SHA256: "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732"
@@ -74,6 +78,14 @@ jobs:
         with:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      # tools/release.ps1 builds awg-bridge.exe with it (the AmneziaWG bridge
+      # is ours - there is no release archive to fetch, only source).
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: awgbridge/go.sum
 
       - name: Fetch sing-box and Xray
         run: |

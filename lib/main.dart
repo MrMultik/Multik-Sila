@@ -10408,6 +10408,8 @@ class _AboutBlock extends StatefulWidget {
 class _AboutBlockState extends State<_AboutBlock> {
   String? _singBox;
   String? _xray;
+  // Версия движка AmneziaWG в мосте (awg-bridge), например 3.1.20260828.
+  String? _awg;
   bool _loading = true;
   bool _checking = false;
 
@@ -10432,13 +10434,28 @@ class _AboutBlockState extends State<_AboutBlock> {
     }
   }
 
+  // Мост печатает «awg-bridge 1.0.0 (amneziawg-go v3.1.20260828)» — человеку
+  // важна версия протокола, то есть движка.
+  Future<String?> _awgVersion() async {
+    try {
+      final path = '$_dir${Platform.pathSeparator}awg-bridge.exe';
+      if (!await File(path).exists()) return null;
+      final r = await Process.run(path, ['-version']).timeout(const Duration(seconds: 10));
+      return RegExp(r'amneziawg-go v([\d.]+)').firstMatch('${r.stdout}')?.group(1);
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _load() async {
     final sb = await _version('sing-box.exe');
     final xr = await _version('xray.exe');
+    final awg = await _awgVersion();
     if (!mounted) return;
     setState(() {
       _singBox = sb;
       _xray = xr;
+      _awg = awg;
       _loading = false;
     });
   }
@@ -10467,6 +10484,7 @@ class _AboutBlockState extends State<_AboutBlock> {
         if (kBuildStamp.isNotEmpty) _row(t('about.build'), kBuildStamp),
         _row('sing-box', _loading ? '…' : (_singBox ?? unknown)),
         _row('Xray', _loading ? '…' : (_xray ?? unknown)),
+        _row('AmneziaWG', _loading ? '…' : (_awg ?? unknown)),
         // Ядро без версии автообновление не трогает — сравнивать не с чем.
         // Молчать об этом нельзя: человек будет ждать обновлений, которых нет.
         if (!_loading && (_singBox == null || _xray == null))
