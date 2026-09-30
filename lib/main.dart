@@ -3118,21 +3118,36 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     _loadTunPreference();
     _loadProfiles();
     if (Env.needsSystemProxy) _recoverSystemProxyIfNeeded();
-    if (Env.coresUpdateSeparately) _checkCoreUpdates();
-    // Намеренно без await: обновление наборов правил не должно задерживать
-    // ни показ окна, ни автоподключение. Результат ляжет рядом как <файл>.new
-    // и применится при следующем старте ядра.
-    _refreshRuleSetsInBackground();
-    // Проверка обновления самого приложения. Без URL-фида не делает ничего
-    // и в сеть не ходит; найдя новую версию, СПРАШИВАЕТ — перезапуск рвёт
-    // соединение, молча такое делать нельзя.
-    _checkAppUpdate();
-    // Тоже без await и тоже с отложенным применением: качать 20 МБ на старте
-    // и заставлять человека ждать этого ради подключения — ровно то, чего мы
-    // избегали с наборами правил. На Android ядро вкомпилировано в APK и
-    // обновляется вместе с приложением — качать нечего.
-    if (Env.coresUpdateSeparately) _autoUpdateCores();
+    // Всё, что ниже, смотрит в настройки, а они читаются из SharedPreferences
+    // асинхронно (_loadTunPreference). Раньше эти задачи стартовали прямо
+    // здесь, до чтения, и работали по настройкам ПО УМОЛЧАНИЮ: выключенные
+    // человеком проверка обновлений и автообновление ядер на запуске всё
+    // равно выполнялись, а свой адрес обновлений не использовался вовсе.
+    // Найдено при проверке самообновления Android на эмуляторе: тестовый
+    // фид не получил от приложения ни одного запроса.
+    _prefsLoaded.future.then((_) {
+      if (!mounted) return;
+      if (Env.coresUpdateSeparately) _checkCoreUpdates();
+      // Намеренно без await: обновление наборов правил не должно задерживать
+      // ни показ окна, ни автоподключение. Результат ляжет рядом как
+      // <файл>.new и применится при следующем старте ядра.
+      _refreshRuleSetsInBackground();
+      // Проверка обновления самого приложения. Без URL-фида не делает ничего
+      // и в сеть не ходит; найдя новую версию, СПРАШИВАЕТ — перезапуск рвёт
+      // соединение, молча такое делать нельзя.
+      _checkAppUpdate();
+      // Тоже без await и тоже с отложенным применением: качать 20 МБ на
+      // старте и заставлять человека ждать этого ради подключения — ровно то,
+      // чего мы избегали с наборами правил. На Android ядро вкомпилировано в
+      // APK и обновляется вместе с приложением — качать нечего.
+      if (Env.coresUpdateSeparately) _autoUpdateCores();
+    });
   }
+
+  /// Настройки, режим TUN и остальное из SharedPreferences прочитаны
+  /// (_loadTunPreference дошла до конца). Кто смотрит в `_settings` на
+  /// запуске, обязан этого дождаться.
+  final Completer<void> _prefsLoaded = Completer<void>();
 
   StreamSubscription<AndroidVpnStatus>? _androidVpnSub;
 
@@ -3369,6 +3384,14 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   }
 
   Future<void> _loadTunPreference() async {
+    try {
+      await _readPreferences();
+    } finally {
+      if (!_prefsLoaded.isCompleted) _prefsLoaded.complete();
+    }
+  }
+
+  Future<void> _readPreferences() async {
     final admin = await _isElevated();
     final prefs = await SharedPreferences.getInstance();
     final requested = prefs.getBool(_tunModePrefsKey) ?? false;
@@ -4606,6 +4629,12 @@ del "%~f0"
   }
 
   Future<void> _loadProfiles() async {
+    // Сначала настройки и режим TUN. Автоподключение в конце этой функции
+    // смотрит и в то, и в другое, и пока загрузка подписки занимала сотни
+    // миллисекунд, они успевали прочитаться сами. С сохранённым списком
+    // серверов (см. _subscriptionLoadFailed) загрузка может отказать
+    // мгновенно — и подключение ушло бы с настройками по умолчанию и без TUN.
+    await _prefsLoaded.future;
     // Скачанные в прошлый раз ядра подменяем ЗДЕСЬ: ядро ещё не запущено
     // (автоподключение живёт в _applyLaunchBehaviour, в самом конце этой
     // функции), а работающий .exe Windows заменить не даст.
