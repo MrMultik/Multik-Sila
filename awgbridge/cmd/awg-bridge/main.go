@@ -18,27 +18,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"runtime/debug"
 
 	"github.com/MrMultik/Multik-Sila/awgbridge/bridge"
 )
 
 const version = "1.0.0"
-
-// engineVersion — версия amneziawg-go, с которой собран мост. Берём из
-// сведений о сборке, а не пишем руками: строка не разойдётся с go.mod.
-func engineVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
-	}
-	for _, dep := range info.Deps {
-		if dep.Path == "github.com/amnezia-vpn/amneziawg-go/v3" {
-			return dep.Version
-		}
-	}
-	return "unknown"
-}
 
 func main() {
 	configPath := flag.String("c", "", "path to the bridge config (JSON)")
@@ -47,7 +31,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("awg-bridge %s (amneziawg-go %s)\n", version, engineVersion())
+		fmt.Printf("awg-bridge %s (amneziawg-go %s)\n", version, bridge.EngineVersion())
 		return
 	}
 	if *configPath == "" {

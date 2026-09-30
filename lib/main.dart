@@ -7692,7 +7692,20 @@ del "%~f0"
           {'n': (bridgesConfig['inbounds'] as List).length}));
     }
 
-    await AndroidVpn.start(config: config, bridges: bridges);
+    // Мост AmneziaWG — тоже один на все такие серверы, тем же генератором,
+    // что на Windows. Что движок не примет, служба выкинет сама
+    // (startAwgBridge).
+    String? awgBridge;
+    final awgServers = _servers.where((s) => s.engine == 'awg').toList();
+    _awgRejected.clear();
+    if (awgServers.isNotEmpty) {
+      final awgConfig = await _buildAwgBridgeConfig(awgServers, _bridgePortFor);
+      awgBridge = const JsonEncoder.withIndent('  ').convert(awgConfig);
+      await File(_awgBridgeConfigPath).writeAsString(awgBridge);
+      _appendLog(tp('log.awgBridgesReady', {'n': awgServers.length}));
+    }
+
+    await AndroidVpn.start(config: config, bridges: bridges, awgBridge: awgBridge);
     // Состояние щита придёт от службы через поток — здесь его не трогаем,
     // иначе на экране будет «подключено» раньше, чем ядро действительно
     // поднялось.
@@ -10448,9 +10461,23 @@ class _AboutBlockState extends State<_AboutBlock> {
   }
 
   Future<void> _load() async {
-    final sb = await _version('sing-box.exe');
-    final xr = await _version('xray.exe');
-    final awg = await _awgVersion();
+    String? sb, xr, awg;
+    if (Env.coreRunsAsProcess) {
+      sb = await _version('sing-box.exe');
+      xr = await _version('xray.exe');
+      awg = await _awgVersion();
+    } else {
+      // На Android ядра вкомпилированы в приложение: файлов нет, версии
+      // отдаёт сама библиотека. Раньше экран искал здесь .exe и писал
+      // «версия не определяется» про ядра, которые на месте и работают.
+      try {
+        final v = await AndroidVpn.coreVersions();
+        String? number(String s) => RegExp(r'\d+\.\d+\.\d+').firstMatch(s)?.group(0);
+        sb = number(v.singbox);
+        xr = number(v.xray);
+        awg = number(v.awg);
+      } catch (_) {}
+    }
     if (!mounted) return;
     setState(() {
       _singBox = sb;

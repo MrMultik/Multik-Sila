@@ -35,6 +35,8 @@ import java.io.File
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import com.multiksila.libbox.NetworkInterface as LibboxNetworkInterface
+import com.multiksila.silaawg.Instance as AwgInstance
+import com.multiksila.silaawg.Silaawg
 import com.multiksila.silaxray.Instance as XrayInstance
 import org.json.JSONArray
 import org.json.JSONObject
@@ -62,6 +64,7 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         const val ACTION_STOP = "com.example.proxy_app_test.STOP"
         const val EXTRA_CONFIG = "config"
         const val EXTRA_XRAY_BRIDGES = "xray_bridges"
+        const val EXTRA_AWG_BRIDGE = "awg_bridge"
 
         private const val NOTIFICATION_CHANNEL = "multik_sila_vpn"
         private const val NOTIFICATION_ID = 1
@@ -91,6 +94,14 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
      * отдельные процессы `xray.exe`, а здесь объекты внутри нашего процесса.
      */
     private val xrayBridges = mutableMapOf<String, XrayInstance>()
+
+    /**
+     * Мост AmneziaWG — один на все такие серверы профиля. Этот протокол не
+     * знают ни sing-box, ни Xray, поэтому его держит свой движок
+     * (amneziawg-go), а sing-box ходит в его порты SOCKS5 на петле — ровно
+     * как в мосты Xray. На Windows это программа `awg-bridge.exe`.
+     */
+    private var awgBridge: AwgInstance? = null
 
     private val running = AtomicBoolean(false)
     private var interfaceListener: InterfaceUpdateListener? = null
@@ -166,7 +177,11 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
 
         startForegroundNotification()
         try {
-            startTunnel(config, intent.getStringArrayExtra(EXTRA_XRAY_BRIDGES))
+            startTunnel(
+                config,
+                intent.getStringArrayExtra(EXTRA_XRAY_BRIDGES),
+                intent.getStringExtra(EXTRA_AWG_BRIDGE),
+            )
         } catch (e: Exception) {
             statusListener?.invoke(false, e.message ?: e.toString())
             stopTunnel()
@@ -194,7 +209,7 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
     // Запуск и остановка ядра
     // ------------------------------------------------------------------
 
-    private fun startTunnel(config: String, bridges: Array<String>?) {
+    private fun startTunnel(config: String, bridges: Array<String>?, awgConfig: String?) {
         // Мосты Xray поднимаются ДО ядра — все разом, как на Windows.
         // Причина та же: sing-box запекает порт socks-outbound'а в конфиг при
         // старте и не меняет его на лету, поэтому один общий порт с рестартом
@@ -204,6 +219,7 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         // оставленный мост держал бы свой порт занятым.
         closeBridges()
         bridges?.forEach { bridgeConfig -> startXrayBridge(bridgeConfig) }
+        if (!awgConfig.isNullOrBlank()) startAwgBridge(awgConfig)
 
         // Служба УЖЕ работает — значит это смена сервера или профиля, и ядро
         // надо перезагрузить, а не поднять второе. У библиотеки для этого
@@ -279,6 +295,54 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             }
         }
         xrayBridges.clear()
+        try {
+            awgBridge?.close()
+        } catch (_: Exception) {
+        }
+        awgBridge = null
+    }
+
+    // Мост AmneziaWG: один экземпляр на все серверы, как и у Xray, и та же
+    // обратная сторона — сервер, который движок не принимает (битый ключ,
+    // пересекающиеся H1–H4), ронял бы всех. Отказ называет виновника:
+    // «server <тег>: причина» — выкидываем его и пробуем снова. То же на
+    // Windows делает `awg-bridge -test` (_dropRejectedByAwg в main.dart).
+    private fun startAwgBridge(bridgeConfig: String) {
+        var config = bridgeConfig
+        repeat(64) {
+            try {
+                awgBridge = Silaawg.start(config)
+                return
+            } catch (e: Exception) {
+                val message = e.message ?: ""
+                val rejected = Regex("server (\\S+): (.*)").find(message)
+                if (rejected == null) {
+                    statusListener?.invoke(running.get(), "мост AmneziaWG: $message")
+                    return
+                }
+                val tag = rejected.groupValues[1]
+                statusListener?.invoke(
+                    running.get(),
+                    "AmneziaWG не принимает сервер $tag: ${rejected.groupValues[2]}",
+                )
+                config = dropFromAwgConfig(config, tag) ?: return
+            }
+        }
+    }
+
+    // Убирает сервер [tag] из конфига моста AmneziaWG. Пустой список — null:
+    // поднимать нечего.
+    private fun dropFromAwgConfig(config: String, tag: String): String? = try {
+        val json = JSONObject(config)
+        val servers = json.getJSONArray("servers")
+        val kept = JSONArray()
+        for (i in 0 until servers.length()) {
+            val item = servers.optJSONObject(i)
+            if (item != null && item.optString("tag") != tag) kept.put(item)
+        }
+        if (kept.length() == 0) null else json.put("servers", kept).toString()
+    } catch (_: Exception) {
+        null
     }
 
     // Мост — ОДИН экземпляр Xray на все Xray-серверы профиля (вход на сервер,

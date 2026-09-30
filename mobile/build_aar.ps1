@@ -66,10 +66,11 @@ $gmArgs = @(
   '-trimpath', '-buildvcs=false',
   '-ldflags', $ld,
   '-tags', $tags,
-  # Два пакета ОДНОЙ командой: ядро sing-box и обёртка над Xray для транспорта
-  # xhttp, которого sing-box не понимает вовсе.
+  # Три пакета ОДНОЙ командой: ядро sing-box, обёртка над Xray (xhttp и
+  # REALITY, которых sing-box не тянет) и мост AmneziaWG (его не знают оба).
   'github.com/sagernet/sing-box/experimental/libbox',
-  './silaxray'
+  './silaxray',
+  './silaawg'
 )
 
 Write-Host "building silacore.aar for $Target"

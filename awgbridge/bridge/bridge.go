@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -207,4 +208,19 @@ func (b *Bridge) Close() {
 		}
 		t.dev.Close()
 	}
+}
+
+// EngineVersion — версия amneziawg-go, с которой собран мост. Берётся из
+// сведений о сборке, а не пишется руками: строка не разойдётся с go.mod.
+func EngineVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	for _, dep := range info.Deps {
+		if dep.Path == "github.com/amnezia-vpn/amneziawg-go/v3" {
+			return dep.Version
+		}
+	}
+	return "unknown"
 }

@@ -1,11 +1,12 @@
 // awg-testserver — сервер AmneziaWG 3.1 для проверки моста и приложения без
-// настоящего сервера. НЕ для работы: наружу он не выпускает ничего, внутри
-// туннеля отвечает только сам.
+// настоящего сервера. НЕ для работы: один клиент, ключи на один запуск,
+// никакой защиты.
 //
-// Поднимает сторону сервера, внутри туннеля слушает HTTP на 10.9.0.1:80 и DNS
-// на 10.9.0.1:53 (любое имя -> 10.9.0.1) и печатает клиентский .conf в том
-// виде, в каком его выдаёт 3x-ui. С флагом -v20 — набор параметров AmneziaWG
-// 2.0 (без строк 3.x).
+// Поднимает сторону сервера, выпускает клиента в сеть этой машины (см.
+// nat.go) и печатает клиентский .conf в том виде, в каком его выдаёт 3x-ui.
+// По адресу http://10.9.0.1/ внутри туннеля отвечает сам — так видно, что
+// запрос прошёл именно через туннель. С флагом -v20 — набор параметров
+// AmneziaWG 2.0 (без строк 3.x).
 //
 //	awg-testserver -endpoint 127.0.0.1:51999 > client.conf
 //
@@ -21,7 +22,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -29,14 +29,13 @@ import (
 
 	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
 	"github.com/amnezia-vpn/amneziawg-go/v3/device"
-	"github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
 	"golang.org/x/crypto/curve25519"
-	"golang.org/x/net/dns/dnsmessage"
 )
 
 const (
 	serverIP = "10.9.0.1"
 	clientIP = "10.9.0.2"
+	mtu      = 1264
 )
 
 func newKey() (priv, pub []byte) {
@@ -55,6 +54,11 @@ func newKey() (priv, pub []byte) {
 
 func b64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 
+func die(what string, err error) {
+	fmt.Fprintln(os.Stderr, what, err)
+	os.Exit(1)
+}
+
 func main() {
 	endpoint := flag.String("endpoint", "127.0.0.1:51999", "address the client should connect to (host:port)")
 	v20 := flag.Bool("v20", false, "AmneziaWG 2.0 parameters only")
@@ -64,6 +68,15 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "endpoint:", err)
 		os.Exit(2)
+	}
+
+	// Занятый порт движок пишет в журнал и работает дальше «вхолостую» — а
+	// клиент при этом молча попадает к тому, кто порт держит (например, к
+	// прошлому запуску с другими ключами). Проверяем сами и сразу.
+	if probe, err := net.ListenPacket("udp", ":"+portText); err != nil {
+		die("UDP port is busy:", err)
+	} else {
+		probe.Close()
 	}
 
 	serverPriv, serverPub := newKey()
@@ -94,7 +107,7 @@ func main() {
 
 	var uapi, conf strings.Builder
 	fmt.Fprintf(&uapi, "private_key=%s\nlisten_port=%s\n", hex.EncodeToString(serverPriv), portText)
-	fmt.Fprintf(&conf, "[Interface]\nPrivateKey = %s\nAddress = %s/32\nDNS = 1.1.1.1\nMTU = 1264\n", b64(clientPriv), clientIP)
+	fmt.Fprintf(&conf, "[Interface]\nPrivateKey = %s\nAddress = %s/32\nDNS = 1.1.1.1\nMTU = %d\n", b64(clientPriv), clientIP, mtu)
 	for _, p := range params {
 		fmt.Fprintf(&uapi, "%s=%s\n", p.uapi, p.value)
 		fmt.Fprintf(&conf, "%s = %s\n", p.conf, p.value)
@@ -104,42 +117,13 @@ func main() {
 	fmt.Fprintf(&conf, "\n# awg-testserver - client\n[Peer]\nPublicKey = %s\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = %s\nPersistentKeepalive = 25",
 		b64(serverPub), *endpoint)
 
-	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr(serverIP)}, nil, 1264)
+	// Собственный ответ сервера: обычный HTTP на петле машины, куда пересылка
+	// отправляет всё, что клиент шлёт на 10.9.0.1:80.
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		die("inner http:", err)
 	}
-	logger := &device.Logger{
-		Verbosef: device.DiscardLogf,
-		Errorf:   func(f string, a ...any) { fmt.Fprintf(os.Stderr, "server: "+f+"\n", a...) },
-	}
-	dev := device.NewDevice(tunDev, conn.NewStdNetBind(), logger)
-	if err := dev.IpcSet(uapi.String()); err != nil {
-		fmt.Fprintln(os.Stderr, "server config:", err)
-		os.Exit(1)
-	}
-	// Первый пакет после настройки движок шлёт без заполнения S4 (см.
-	// primeTransportPadding в пакете bridge) — снимаем холостым пакетом.
-	if c, err := tnet.DialUDPAddrPort(netip.AddrPortFrom(netip.MustParseAddr(serverIP), 0), netip.MustParseAddrPort("192.0.2.1:9")); err == nil {
-		c.Write([]byte{0})
-		c.Close()
-		time.Sleep(20 * time.Millisecond)
-	}
-	if err := dev.IpcSet(fmt.Sprintf("public_key=%s\nallowed_ip=%s/32\n", hex.EncodeToString(clientPub), clientIP)); err != nil {
-		fmt.Fprintln(os.Stderr, "server peer:", err)
-		os.Exit(1)
-	}
-	if err := dev.Up(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-
-	ln, err := tnet.ListenTCP(&net.TCPAddr{Port: 80})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	go http.Serve(inner, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/generate_204" {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -147,49 +131,33 @@ func main() {
 		io.WriteString(w, "hello through awg")
 	}))
 
-	// DNS внутри туннеля: на любой вопрос про A отвечает адресом сервера. Нужен,
-	// чтобы проверить UDP через мост тем же способом, каким им пользуется
-	// sing-box, — запросом DNS.
-	dns, err := tnet.ListenUDPAddrPort(netip.AddrPortFrom(netip.MustParseAddr(serverIP), 53))
+	tunDev, err := newNATTun(mtu, serverIP, inner.Addr().String())
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		die("network stack:", err)
 	}
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, from, err := dns.ReadFrom(buf)
-			if err != nil {
-				return
-			}
-			var p dnsmessage.Parser
-			h, err := p.Start(buf[:n])
-			if err != nil {
-				continue
-			}
-			q, err := p.Question()
-			if err != nil {
-				continue
-			}
-			b := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: h.ID, Response: true, RecursionAvailable: true})
-			b.EnableCompression()
-			b.StartQuestions()
-			b.Question(q)
-			b.StartAnswers()
-			if q.Type == dnsmessage.TypeA {
-				b.AResource(
-					dnsmessage.ResourceHeader{Name: q.Name, Class: dnsmessage.ClassINET, TTL: 60},
-					dnsmessage.AResource{A: netip.MustParseAddr(serverIP).As4()})
-			}
-			if msg, err := b.Finish(); err == nil {
-				dns.WriteTo(msg, from)
-			}
-		}
-	}()
+	logger := &device.Logger{
+		Verbosef: device.DiscardLogf,
+		Errorf:   func(f string, a ...any) { fmt.Fprintf(os.Stderr, "server: "+f+"\n", a...) },
+	}
+	dev := device.NewDevice(tunDev, conn.NewStdNetBind(), logger)
+	if err := dev.IpcSet(uapi.String()); err != nil {
+		die("server config:", err)
+	}
+	// Первый пакет после настройки движок шлёт без заполнения S4 (см.
+	// primeTransportPadding в пакете bridge) — снимаем холостым пакетом, пока
+	// узла ещё нет.
+	tunDev.prime()
+	time.Sleep(20 * time.Millisecond)
+	if err := dev.IpcSet(fmt.Sprintf("public_key=%s\nallowed_ip=%s/32\n", hex.EncodeToString(clientPub), clientIP)); err != nil {
+		die("server peer:", err)
+	}
+	if err := dev.Up(); err != nil {
+		die("bring up:", err)
+	}
 
 	// Конфиг клиента — единственное, что идёт в stdout.
 	fmt.Println(conf.String())
-	fmt.Fprintf(os.Stderr, "awg-testserver: listening on UDP %s, HTTP inside the tunnel at http://%s/\n", portText, serverIP)
+	fmt.Fprintf(os.Stderr, "awg-testserver: listening on UDP %s; the client gets this machine's network, and http://%s/ answers from the server itself\n", portText, serverIP)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
