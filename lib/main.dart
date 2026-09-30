@@ -2108,6 +2108,95 @@ Map<String, dynamic>? _clashTransport(Map proxy) {
   }
 }
 
+/// Запись Clash с транспортом xhttp — в outbound Xray.
+///
+/// Поля переводятся в те же параметры, что несёт ссылка (`security`, `sni`,
+/// `fp`, `pbk`, `path`, `mode`…), и дальше работает общий
+/// [_buildXhttpStreamSettings]: сервер из Clash-подписки и тот же сервер из
+/// ссылки обязаны дать один и тот же outbound. Формат снят с живой панели
+/// (Remnawave, заголовок mihomo): `network: xhttp` и блок `xhttp-opts` с
+/// `mode`, `path`, `x-padding-bytes`.
+ParsedServer? _clashXhttpServer(Map proxy, String type, String server, int port, String name) {
+  final opts = proxy['xhttp-opts'] ?? proxy['splithttp-opts'];
+  final o = opts is Map ? opts : const {};
+  final reality = proxy['reality-opts'];
+
+  // Хост в Clash пишут и строкой, и списком, и в headers.Host.
+  var host = o['host'];
+  if (host is List) host = host.isNotEmpty ? host.first : null;
+  if (host == null && o['headers'] is Map) host = (o['headers'] as Map)['Host'];
+
+  final alpn = proxy['alpn'];
+  final params = <String, String>{
+    'security': reality is Map
+        ? 'reality'
+        : (proxy['tls'] == true || type == 'trojan' ? 'tls' : 'none'),
+    'sni': '${proxy['servername'] ?? proxy['sni'] ?? proxy['peer'] ?? server}',
+    if ('${proxy['client-fingerprint'] ?? ''}'.isNotEmpty) 'fp': '${proxy['client-fingerprint']}',
+    if (o['path'] != null) 'path': '${o['path']}',
+    if (o['mode'] != null) 'mode': '${o['mode']}',
+    if (host != null) 'host': '$host',
+    if (o['x-padding-bytes'] != null) 'x_padding_bytes': '${o['x-padding-bytes']}',
+    if (alpn is List && alpn.isNotEmpty) 'alpn': alpn.join(','),
+    if (reality is Map) 'pbk': '${reality['public-key'] ?? ''}',
+    if (reality is Map) 'sid': '${reality['short-id'] ?? ''}',
+  };
+
+  final Map<String, dynamic> settings;
+  switch (type) {
+    case 'vless':
+      final flow = '${proxy['flow'] ?? ''}';
+      settings = {
+        "vnext": [
+          {
+            "address": server,
+            "port": port,
+            "users": [
+              {
+                "id": '${proxy['uuid'] ?? ''}',
+                "encryption": "none",
+                if (flow.isNotEmpty) "flow": flow,
+              }
+            ],
+          }
+        ],
+      };
+    case 'vmess':
+      settings = {
+        "vnext": [
+          {
+            "address": server,
+            "port": port,
+            "users": [
+              {"id": '${proxy['uuid'] ?? ''}', "security": '${proxy['cipher'] ?? 'auto'}'}
+            ],
+          }
+        ],
+      };
+    case 'trojan':
+      settings = {
+        "servers": [
+          {"address": server, "port": port, "password": '${proxy['password'] ?? ''}'}
+        ],
+      };
+    default:
+      // xhttp бывает только поверх этих трёх.
+      return null;
+  }
+
+  return ParsedServer(
+    name: name,
+    protocol: type,
+    engine: 'xray',
+    outbound: {
+      "protocol": type,
+      "tag": "proxy",
+      "settings": settings,
+      "streamSettings": _buildXhttpStreamSettings(params, server),
+    },
+  );
+}
+
 /// Одна запись из секции `proxies:` Clash-конфига — в outbound sing-box.
 ///
 /// Ключи у Clash свои (`cipher`, `servername`, `skip-cert-verify`,
@@ -2121,6 +2210,15 @@ ParsedServer? parseClashProxy(Map proxy) {
     if (server.isEmpty || port == null) return null;
 
     final name = '${proxy['name'] ?? '$type $server:$port'}';
+
+    // xhttp sing-box не умеет вовсе — такой сервер поднимает Xray, ровно как
+    // пришедший обычной ссылкой (см. parseVless). Раньше запись молча
+    // превращалась в sing-box-outbound без транспорта и не подключалась.
+    final network = '${proxy['network'] ?? 'tcp'}'.toLowerCase();
+    if (network == 'xhttp' || network == 'splithttp') {
+      return _clashXhttpServer(proxy, type, server, port, name);
+    }
+
     final outbound = <String, dynamic>{
       "tag": "proxy",
       "server": server,
@@ -2274,6 +2372,116 @@ List<ParsedServer> parseSingboxJson(String raw) {
   } catch (e) {
     return const [];
   }
+}
+
+/// Протоколы Xray, которые являются серверами, а не служебными звеньями
+/// (`freedom`, `blackhole`, `dns`).
+const Set<String> kXrayProxyProtocols = {'vless', 'vmess', 'trojan', 'shadowsocks'};
+
+/// Подписка в формате Xray JSON: массив полных конфигов Xray (по одному на
+/// сервер, имя — в `remarks`) или один такой конфиг. Так отвечают Marzban,
+/// Remnawave и 3x-ui клиентам v2rayN / v2rayNG / Happ.
+///
+/// От sing-box JSON отличается ключом: у Xray outbound описан полем
+/// `protocol`, у sing-box — `type`, так что перепутать их нельзя.
+///
+/// Outbound берётся как есть и поднимается Xray (через мост): панель
+/// собрала его под Xray, и переводить его в sing-box значило бы терять то,
+/// чего sing-box не умеет (xhttp, параметры REALITY). Убирается только то,
+/// что ссылается на соседей по исходному конфигу: у нас их нет, и Xray на
+/// такой ссылке не стартует.
+List<ParsedServer> parseXrayJson(String raw) {
+  try {
+    final doc = jsonDecode(raw);
+    final configs = doc is List ? doc : [doc];
+    final out = <ParsedServer>[];
+    for (final c in configs) {
+      if (c is! Map) continue;
+      // Либо полный конфиг с `outbounds`, либо голый outbound.
+      final List outbounds = c['outbounds'] is List
+          ? c['outbounds'] as List
+          : (c['protocol'] != null ? [c] : const []);
+      final proxies = [
+        for (final o in outbounds)
+          if (o is Map && kXrayProxyProtocols.contains('${o['protocol']}')) o,
+      ];
+      final remarks = '${c['remarks'] ?? ''}'.trim();
+      for (final o in proxies) {
+        final outbound = _cleanXrayOutbound(o);
+        if (outbound == null) continue;
+        final protocol = '${outbound['protocol']}';
+        final tag = '${o['tag'] ?? ''}';
+        // В конфиге с балансировщиком серверов несколько под одним `remarks`
+        // — различаем их тегом.
+        final String name;
+        if (remarks.isNotEmpty) {
+          name = proxies.length > 1 && tag.isNotEmpty ? '$remarks · $tag' : remarks;
+        } else if (tag.isNotEmpty && tag != 'proxy') {
+          name = tag;
+        } else {
+          name = '$protocol ${xrayOutboundAddress(outbound)}';
+        }
+        out.add(ParsedServer(name: name, protocol: protocol, outbound: outbound, engine: 'xray'));
+      }
+    }
+    return out;
+  } catch (e) {
+    return const [];
+  }
+}
+
+/// Outbound из чужого конфига Xray — в пригодный для нашего: своя копия, тег
+/// `proxy` (его потом заменит тег сервера), без ссылок на другие outbound-ы
+/// исходного конфига. Без адреса сервера — null.
+Map<String, dynamic>? _cleanXrayOutbound(Map source) {
+  final o = jsonDecode(jsonEncode(source)) as Map<String, dynamic>;
+  o['tag'] = 'proxy';
+  // Цепочки через соседние outbound-ы (`fragment`, `chain`…).
+  o.remove('proxySettings');
+  o.remove('sendThrough');
+  final stream = o['streamSettings'];
+  if (stream is Map) {
+    final sockopt = stream['sockopt'];
+    if (sockopt is Map) {
+      sockopt.remove('dialerProxy');
+      if (sockopt.isEmpty) stream.remove('sockopt');
+    }
+  }
+
+  // Свежие версии Xray принимают и «плоские» настройки без vnext/servers:
+  // `{"address": …, "port": …, "id": …}`. Приводим к полному виду — на него
+  // рассчитан остальной код (адрес сервера, подмена имени на IP).
+  final settings = o['settings'];
+  if (settings is Map &&
+      settings['vnext'] == null &&
+      settings['servers'] == null &&
+      settings['address'] != null) {
+    final address = settings['address'];
+    final port = _asInt(settings['port']);
+    switch ('${o['protocol']}') {
+      case 'vless':
+      case 'vmess':
+        final user = Map<String, dynamic>.from(settings)
+          ..remove('address')
+          ..remove('port');
+        o['settings'] = {
+          "vnext": [
+            {
+              "address": address,
+              "port": port,
+              "users": [user]
+            }
+          ],
+        };
+      default:
+        o['settings'] = {
+          "servers": [Map<String, dynamic>.from(settings)..['port'] = port],
+        };
+    }
+  }
+
+  final address = xrayOutboundAddress(o);
+  return address == null || address.isEmpty ? null : o;
 }
 
 /// Коды, которыми панель говорит «этого доступа больше нет», а не «зайди
@@ -4655,8 +4863,16 @@ del "%~f0"
 
     final head = decoded.trimLeft();
     if (head.startsWith('{') || head.startsWith('[')) {
-      parsed.addAll(parseSingboxJson(decoded));
-      format = () => 'sing-box JSON';
+      // Xray и sing-box различаются ключом outbound-а (`protocol` против
+      // `type`), так что первый разбор на чужом формате просто даст ноль.
+      final xray = parseXrayJson(decoded);
+      if (xray.isNotEmpty) {
+        parsed.addAll(xray);
+        format = () => 'Xray JSON';
+      } else {
+        parsed.addAll(parseSingboxJson(decoded));
+        format = () => 'sing-box JSON';
+      }
     } else if (looksLikeClash(decoded)) {
       parsed.addAll(parseClashYaml(decoded));
       format = () => 'Clash YAML';

@@ -1184,11 +1184,11 @@ const Map<String, Map<String, String>> _strings = {
   'sub.formatLinks': {'ru': 'список ссылок', 'en': 'link list'},
   'sub.unknownFormat': {
     'ru': 'Формат подписки не распознан. Понимаем: список ссылок '
-        '(vless, vmess, trojan, hysteria2, ss), Clash YAML и конфиг sing-box. '
+        '(vless, vmess, trojan, hysteria2, ss), Clash YAML, конфиги sing-box и Xray. '
         'Формат выбирает панель по User-Agent — его можно сменить в '
         'настройках профиля.',
     'en': 'Subscription format not recognised. Supported: a link list '
-        '(vless, vmess, trojan, hysteria2, ss), Clash YAML and a sing-box config. '
+        '(vless, vmess, trojan, hysteria2, ss), Clash YAML, sing-box and Xray configs. '
         'The panel picks the format by the User-Agent, which you can change '
         'in the profile settings.',
   },
