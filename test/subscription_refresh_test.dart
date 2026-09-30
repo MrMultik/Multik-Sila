@@ -50,6 +50,27 @@ void main() {
     expect(sameServersForCore(running, _parse([_a, _b])), isTrue);
   });
 
+  test('a REALITY short id picked anew by the panel is still the same list', () {
+    // Панель на каждую выдачу подставляет случайный shortId (и spiderX) из
+    // разрешённых сервером: две выдачи одной подписки подряд ими различаются.
+    String reality(String sid, String spx) =>
+        'vless://33333333-3333-3333-3333-333333333333@r.example.com:443?security=reality&type=tcp'
+        '&sni=s.example.com&fp=chrome&pbk=PUBKEY&sid=$sid&spx=$spx&flow=xtls-rprx-vision#R';
+    List<ParsedServer> list(String link) {
+      final s = realityViaXray(parseVless(link)!..link = link);
+      s.outbound['tag'] = 'srv_0';
+      s.coreKey = serverCoreKey(s);
+      return [s];
+    }
+
+    expect(sameServersForCore(list(reality('aa11', '%2Fone')), list(reality('bb22cc', '%2Ftwo'))), isTrue);
+    // А другой ключ сервера — уже другой сервер.
+    expect(
+        sameServersForCore(
+            list(reality('aa11', '%2Fone')), list(reality('aa11', '%2Fone').replaceFirst('PUBKEY', 'OTHER'))),
+        isFalse);
+  });
+
   test('servers without a fingerprint are never treated as unchanged', () {
     final bare = _parse([_a])..first.coreKey = '';
     expect(sameServersForCore(bare, bare), isFalse);

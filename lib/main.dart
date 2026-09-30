@@ -605,7 +605,26 @@ List<ParsedServer> dedupeServerNames(List<ParsedServer> servers) {
 
 /// Отпечаток сервера для ядра: каким ядром он поднимается и каким outbound-ом
 /// (с тегом). Имя и исходная ссылка не в счёт — ядру они не видны.
-String serverCoreKey(ParsedServer s) => '${s.engine}|${jsonEncode(s.outbound)}';
+///
+/// Не в счёт и `shortId` со `spiderX` у REALITY: панель (проверено на
+/// Remnawave) на каждую выдачу подставляет случайный shortId из разрешённых
+/// сервером, и две выдачи одной подписки подряд ими различаются. Сервер при
+/// этом тот же, и прежний shortId по-прежнему годится — переподключаться из-за
+/// него при каждом обновлении подписки незачем.
+String serverCoreKey(ParsedServer s) {
+  final o = jsonDecode(jsonEncode(s.outbound)) as Map<String, dynamic>;
+  final stream = o['streamSettings'];
+  final xrayReality = stream is Map ? stream['realitySettings'] : null;
+  if (xrayReality is Map) {
+    xrayReality
+      ..remove('shortId')
+      ..remove('spiderX');
+  }
+  final tls = o['tls'];
+  final singboxReality = tls is Map ? tls['reality'] : null;
+  if (singboxReality is Map) singboxReality.remove('short_id');
+  return '${s.engine}|${jsonEncode(o)}';
+}
 
 /// Одинаковы ли два списка для ЯДРА: те же outbound-ы под теми же тегами.
 ///
