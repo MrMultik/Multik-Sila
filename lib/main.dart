@@ -6412,43 +6412,18 @@ del "%~f0"
     return copy;
   }
 
+  /// Собирает то, что требует диска, сети и процессов, и отдаёт сборку
+  /// конфига [buildSingboxConfig] — её проверяют тесты.
   Future<void> _writeConfig() async {
     final singboxServers = _servers.where((s) => s.engine == 'singbox').toList();
-    final xraySeversForBridge = _servers.where((s) => s.engine == 'xray').toList();
-
-    // socks, а не http — HTTP-прокси в принципе не переносит UDP, а браузеры
-    // часто сначала пробуют HTTP/3 (QUIC поверх UDP). VLESS сам по себе UDP
-    // поддерживает, ограничение было именно в транспорте моста.
-    final bridgeOutbounds = xraySeversForBridge
-        .map((s) => {
-              "type": "socks",
-              "tag": s.outbound['tag'],
-              "server": "127.0.0.1",
-              "server_port": _bridgePortFor(s.outbound['tag'] as String),
-            })
-        .toList();
-
-    final selectorTags = [
-      ...singboxServers.map((s) => s.outbound['tag'] as String),
-      ...bridgeOutbounds.map((o) => o['tag'] as String),
-    ];
-    final defaultTag = selectorTags.contains(_selectedServer?.outbound['tag'])
-        ? _selectedServer!.outbound['tag'] as String
-        : selectorTags.first;
-
-    final selector = {
-      "type": "selector",
-      "tag": "proxy",
-      "outbounds": selectorTags,
-      "default": defaultTag,
-    };
+    final xrayServers = _servers.where((s) => s.engine == 'xray').toList();
 
     // Имена хостов прокси-серверов ЗАПОМИНАЕМ ДО подмены на IP: ниже они
     // нужны как домены для DNS-правил («хосты серверов резолвим напрямую»),
     // а после подмены в outbound'ах лежат уже адреса.
     final proxyHostNames = <String>{
       ...singboxServers.map((s) => s.outbound['server'] as String),
-      ...xraySeversForBridge.map((s) => xrayOutboundAddress(s.outbound)).whereType<String>(),
+      ...xrayServers.map((s) => xrayOutboundAddress(s.outbound)).whereType<String>(),
     };
 
     // Порты самих серверов — чтобы страховка от петли (правило «адрес сервера
@@ -6465,704 +6440,51 @@ del "%~f0"
     // серверу именно на эти порты, их и оставляем прямыми. Всё остальное на
     // том же адресе — панель, сайт, что угодно — идёт обычным путём.
     final proxyPorts = <int>{};
-    for (final s in [...singboxServers, ...xraySeversForBridge]) {
+    for (final s in [...singboxServers, ...xrayServers]) {
       final endpoint = _serverEndpoint(s);
       if (endpoint != null) proxyPorts.add(endpoint.$2);
     }
 
-    // И только теперь — подмена. Обязательно ДО сборки config["outbounds"]:
-    // там значения уже копируются в конфиг, и правка после этой строки в
+    // И только теперь — подмена. Обязательно ДО сборки outbound'ов: там
+    // значения уже копируются в конфиг, и правка после этой строки в
     // готовый JSON не попадёт. На это я один раз наступил.
     await _bakeServerIps(singboxServers);
 
-    final Map<String, dynamic> config = {
-      "log": {
-        "level": "info",
-        // На Android лог ядра надо явно направить в файл.
-        //
-        // На Windows ядро — отдельный процесс, и его вывод читается из
-        // stdout/stderr прямо в наш журнал. Здесь ядро внутри приложения, и
-        // его лог по умолчанию не видно НИГДЕ: ни в журнале приложения, ни в
-        // системном, ни в stderr (туда попадают только паники Go).
-        //
-        // Цена этой слепоты уже заплачена: туннель поднимался, пакеты в него
-        // шли, наружу не выходило ничего, и ни одной строки о причине —
-        // разбирать было нечем.
-        if (!Env.coreRunsAsProcess)
-          "output": '$_workDir${Platform.pathSeparator}core_log.txt',
-      },
-      "experimental": {
-        "clash_api": {"external_controller": "127.0.0.1:${_settings.clashApiPort}"}
-      },
-      // Своё время для ядра: Reality и VMess отвергают соединение, если часы
-      // клиента ушли больше чем на пару минут. Системные часы при этом НЕ
-      // трогаются — правами администратора для этого обзаводиться не нужно.
-      //
-      // БЕЗ "detour". Первая версия ставила сюда "detour": "direct" (казалось
-      // логичным: за временем идти мимо туннеля) — ядро на старте пишет
-      // `ntp: initialize time: detour to an empty direct outbound makes no
-      // sense` и НТП молча не работает, хотя сам прокси продолжает жить.
-      // Ровно та же ловушка, что с dns-direct. `sing-box check` её не видит.
-      // Проверено запуском, A/B с контролем: без ntp — HTTP 204; с detour —
-      // HTTP 204, но ERROR и никакой сверки; без detour — HTTP 204 и
-      // `ntp: updated time` в логе. Без детура ядро идёт напрямую само,
-      // а под TUN его собственный трафик и так исключён auto_detect_interface.
-      if (_settings.ntpEnabled)
-        "ntp": {
-          "enabled": true,
-          "server": _settings.ntpServer,
-          "server_port": _settings.ntpPort,
-          "interval": _settings.ntpInterval,
-        },
-      "outbounds": [
-        ...singboxServers.map((s) => _withTlsTweaks(s.outbound)),
-        ...bridgeOutbounds,
-        selector,
+    final readySets =
+        await _ensureRuleSets(ruleSetsWanted(_settings, _routingMode, blockAds: _blockAds));
+    final stack = _settings.tunStack;
+    final result = buildSingboxConfig(SingboxConfigInput(
+      settings: _settings,
+      tunMode: _tunMode,
+      routingMode: _routingMode,
+      blockAds: _blockAds,
+      singboxOutbounds: [for (final s in singboxServers) _withTlsTweaks(s.outbound)],
+      bridges: [
+        for (final s in xrayServers)
+          (tag: s.outbound['tag'] as String, port: _bridgePortFor(s.outbound['tag'] as String)),
       ],
-    };
-    (config["outbounds"] as List).add({"type": "direct", "tag": "direct"});
-
-    // Наборы правил нужны обоим режимам: раздельное туннелирование одинаково
-    // осмысленно и для системного VPN, и для локального прокси на 1337.
-    final ruMode = _routingMode == RoutingMode.bypassRu;
-    final wantGeoSite = ruMode && _settings.geoSiteEnabled;
-    final wantGeoIp = ruMode && _settings.geoIpEnabled;
-    // Набор geosite скачивается и когда роутинг по нему выключен, а geoip
-    // включён: по нему строится DNS-правило «RU-домены резолвим местным
-    // резолвером». Без этого правила geoip промахивается — зарубежный DNS
-    // на российский сайт отдаёт не тот адрес, что видит местный.
-    final readySets = await _ensureRuleSets([
-      if (wantGeoSite || wantGeoIp) _rsGeositeRu,
-      if (wantGeoIp) _rsGeoipRu,
-      if (_blockAds) _rsAds,
-    ]);
-    final adsReady = readySets.contains(_rsAds);
-    final geoSiteReady = readySets.contains(_rsGeositeRu);
-    final geoIpReady = readySets.contains(_rsGeoipRu);
-    final ruTags = <String>[
-      // В маршрутные правила geosite попадает только если он включён именно
-      // как способ маршрутизации, а не подтянут ради DNS.
-      if (wantGeoSite && geoSiteReady) _rsGeositeRu.tag,
-      if (geoIpReady) _rsGeoipRu.tag,
-    ];
-    final ruleSetDecls = readySets
-        .map((r) => {"type": "local", "tag": r.tag, "format": "binary", "path": _ruleSetPath(r)})
-        .toList();
-
-    // Одна запись списка — либо домен, либо IP/подсеть. Домены кладём в
-    // domain_suffix: запись "example.com" должна ловить и сам домен, и все его
-    // поддомены, иначе пользователю пришлось бы перечислять их вручную.
-    // Голому IP дописываем /32 — sing-box ждёт именно CIDR.
-    Map<String, dynamic>? ruleFromList(List<String> entries, Map<String, dynamic> action) {
-      final domains = <String>[];
-      final cidrs = <String>[];
-      for (final raw in entries) {
-        final e = raw.trim();
-        if (e.isEmpty || e.startsWith('#')) continue;
-        if (RegExp(r'^[0-9a-fA-F:.]+(/\d{1,3})?$').hasMatch(e) && e.contains(RegExp(r'[:.]'))) {
-          final looksIpv4 = RegExp(r'^\d+\.\d+\.\d+\.\d+(/\d{1,2})?$').hasMatch(e);
-          final looksIpv6 = e.contains(':');
-          if (looksIpv4 || looksIpv6) {
-            cidrs.add(e.contains('/') ? e : (looksIpv6 ? '$e/128' : '$e/32'));
-            continue;
-          }
-        }
-        domains.add(e.toLowerCase());
-      }
-      if (domains.isEmpty && cidrs.isEmpty) return null;
-      return {
-        if (domains.isNotEmpty) "domain_suffix": domains,
-        if (cidrs.isNotEmpty) "ip_cidr": cidrs,
-        ...action,
-      };
-    }
-
-    final userBlock = ruleFromList(_settings.customBlock, {"action": "reject"});
-    final userDirect = ruleFromList(_settings.customDirect, {"outbound": "direct"});
-    final userProxy = ruleFromList(_settings.customProxy, {"outbound": "proxy"});
-
-    // Правила для сервисов. Домены всех сервисов с одинаковым назначением
-    // собираем в ОДНО правило: sing-box проверяет список правил по порядку,
-    // и два десятка отдельных правил он бы перебирал на каждое соединение.
-    final byAction = <String, List<String>>{};
-    _settings.serviceRules.forEach((service, action) {
-      final domains = AppSettings.serviceDomains[service];
-      if (domains == null || action == 'default') return;
-      byAction.putIfAbsent(action, () => []).addAll(domains);
-    });
-    final serviceRules = <Map<String, dynamic>>[
-      if (byAction['block'] != null)
-        {"domain_suffix": byAction['block'], "action": "reject"},
-      if (byAction['direct'] != null)
-        {"domain_suffix": byAction['direct'], "outbound": "direct"},
-      if (byAction['proxy'] != null)
-        {"domain_suffix": byAction['proxy'], "outbound": "proxy"},
-    ];
-
-    // Порядок важен — правила проверяются сверху вниз, побеждает первое
-    // совпавшее. Личные списки идут ВЫШЕ готовых наборов: иначе режим
-    // «РФ напрямую» перебивал бы явный выбор пользователя. Реклама режется до
-    // RU-обхода: иначе ad.ozone.ru как российский домен ушёл бы в direct
-    // и благополучно загрузился.
-    // GeoIP сравнивает АДРЕС, а в обычном режиме соединение приходит доменом
-    // (браузер отдаёт хост прямо в SOCKS/HTTP-запросе) — и правило по IP к
-    // нему не применяется вообще. Проверено запуском: с одним лишь geoip-ru
-    // yandex.ru и mail.ru уходили в прокси, хотя набор подключён и загружен;
-    // с `{"action":"resolve"}` перед правилом оба ушли в direct.
-    // В TUN этого не нужно: туда соединение приходит уже голым адресом.
-    // Резолв стоит денег (запрос перед каждым новым соединением), поэтому
-    // добавляется только когда geoip реально включён.
-    final needsResolve = !_tunMode && geoIpReady;
-
-    // Правила по приложениям. Собираем в одно правило на действие: sing-box
-    // перебирает список сверху вниз на каждое соединение, и десяток отдельных
-    // правил на десяток программ он бы перебирал целиком.
-    final appsByAction = <String, List<String>>{};
-    _settings.appRules.forEach((path, action) {
-      if (action == 'default' || path.trim().isEmpty) return;
-      appsByAction.putIfAbsent(action, () => []).add(path);
-    });
-    // Ключ правила зависит от платформы: на рабочем столе программа опознаётся
-    // путём к .exe, на Android — именем пакета. Разные поля, а не разные
-    // значения одного: `process_path` с именем пакета не совпадёт НИКОГДА, то
-    // есть все правила пользователя молча не работали бы, а он видел бы их
-    // список на экране и считал настроенными. Проверено по исходникам ядра:
-    // на Android оно ищет владельца соединения в любом случае
-    // (`C.IsAndroid && platformInterface != nil` -> `needFindProcess = true`),
-    // так что цена правила здесь только в самом сравнении.
-    final appRuleKey = Env.appRulesUsePaths ? "process_path" : "package_name";
-    final appRules = <Map<String, dynamic>>[
-      if (appsByAction['block'] != null)
-        {appRuleKey: appsByAction['block'], "action": "reject"},
-      if (appsByAction['direct'] != null)
-        {appRuleKey: appsByAction['direct'], "outbound": "direct"},
-      if (appsByAction['proxy'] != null)
-        {appRuleKey: appsByAction['proxy'], "outbound": "proxy"},
-    ];
-
-    // «Только IPv4» обязано означать «IPv6 не пробовать», а не «не спрашивать
-    // AAAA у DNS».
-    //
-    // Разница вылезает на телефоне. У TUN-адаптера есть IPv6-адрес (так и
-    // задумано — иначе IPv6-трафик уходит мимо туннеля), поэтому система
-    // сообщает приложениям, что IPv6 в наличии. Приложениям с зашитыми
-    // IPv6-адресами (Telegram — ровно такое) наш DNS не указ: они идут по
-    // IPv6 напрямую, соединение уходит в туннель, а на выходе у большинства
-    // прокси-серверов IPv6 нет вовсе. Пакет уходит в тишину, и приложение ждёт
-    // таймаута вместо того, чтобы за миллисекунды откатиться на IPv4.
-    // Снаружи: «интернет есть, а Telegram пишет нет соединения», при этом
-    // обычные сайты открываются.
-    //
-    // `reject` отвечает отказом сразу, и Happy Eyeballs честно переключается на
-    // IPv4. Правило действует ТОЛЬКО в режиме «Только IPv4»: человек уже сказал,
-    // что IPv6 ему не нужен, — а в остальных режимах трогать его нельзя.
-    final rejectIpv6 = _settings.dnsStrategy == 'ipv4_only';
-
-    List<Map<String, dynamic>> splitRules() => [
-          {"ip_is_private": true, "outbound": "direct"},
-          // Выше вообще всего, включая правила для программ: это не
-          // предпочтение, а корректность. Внутреннее имя через туннель не
-          // заработает ни при каких настройках, зато молча съест таймаут.
-          {"domain_suffix": kPrivateDomainSuffixes, "outbound": "direct"},
-          if (rejectIpv6) {"ip_version": 6, "action": "reject"},
-          // Выше всего остального: «эта программа — всегда так» — самое
-          // конкретное указание, какое пользователь может дать, и спорить
-          // с ним доменным правилам незачем.
-          ...appRules,
-          ?userBlock,
-          ?userDirect,
-          ?userProxy,
-          // Правила сервисов ниже личных списков, но выше готовых наборов:
-          // явная запись пользователя должна побеждать шаблон, а шаблон —
-          // общий режим «РФ напрямую».
-          ...serviceRules,
-          if (adsReady) {"rule_set": [_rsAds.tag], "action": "reject"},
-          // Именно здесь, а не выше: всё, что решается по домену (личные
-          // списки, сервисы, реклама), уже разобрано и резолва не потребовало.
-          if (needsResolve) {"action": "resolve"},
-          if (ruTags.isNotEmpty) {"rule_set": ruTags, "outbound": "direct"},
-        ];
-
-    // Домены самих прокси-серверов должны резолвиться напрямую — иначе
-    // циклическая зависимость: чтобы подключиться к серверу, надо узнать
-    // его IP, а DNS-запрос сам едет через ещё не поднятый до сервера туннель.
-    // Для xhttp-серверов это тоже обязательно: в конфиг sing-box они попадают
-    // как мост на 127.0.0.1, но реальный коннект до сервера делает отдельный
-    // процесс xray.exe, и резолвить хост он будет через системный DNS.
-    // Берём сохранённые ИМЕНА, а не текущее содержимое outbound'ов: там уже
-    // подставлены IP (см. _bakeServerIps выше).
-    final proxyHosts = proxyHostNames;
-    final bypassDomains =
-        proxyHosts.where((h) => !RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(h)).toList();
-    // Хост NTP резолвим напрямую по той же причине, что и прокси-серверы:
-    // ядро идёт к нему в обход туннеля (detour: direct), и ответ зарубежного
-    // DNS через туннель тут только мешает — а под TUN это ещё и курица с яйцом.
-    if (_settings.ntpEnabled) {
-      final ntpHost = _settings.ntpServer.trim();
-      if (ntpHost.isNotEmpty &&
-          !RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(ntpHost) &&
-          !bypassDomains.contains(ntpHost)) {
-        bypassDomains.add(ntpHost);
-      }
-    }
-
-
-    // DNS идёт через АКТИВНЫЙ сервер (selector), а не через фиксированный
-    // первый, и по TCP, а не по UDP.
-    //
-    // Раньше detour был прибит к `singboxServers.first`: xhttp-мост не несёт
-    // UDP, и DNS к нему отваливался с «invalid argument». Побочный эффект
-    // оказался хуже болезни — если тормозил именно первый сервер подписки,
-    // ложился резолв ЦЕЛИКОМ, хотя человек сидел на другом, живом сервере.
-    // Пользователь поймал это как «половина зарубежных сайтов не грузится»,
-    // Discord — ERR_CONNECTION_RESET; в логе:
-    //   dns: lookup failed for cp.cloudflare.com: context deadline exceeded (10.0s)
-    // При этом через активный сервер шло 178 соединений, а через первый — 6,
-    // и все шесть были DNS.
-    //
-    // DNS детурится через ФИКСИРОВАННЫЙ сервер, а не через активный selector.
-    // Это выстрадано: попытка пустить DNS через selector сломала резолв
-    // напрочь, стоило автовыбору встать на gRPC-сервер. Замеры на живом
-    // приложении, активный сервер VLESS GRPC:
-    //   UDP  через selector — 0 из 3 сайтов, 3 ошибки резолва
-    //   DoH  через selector — 2 из 3, 1 ошибка
-    //   UDP  через фиксированный — работает стабильно (как было всегда)
-    // Причина: транспорт сервера может не переносить UDP (gRPC, xhttp), и
-    // тогда ложится ВЕСЬ резолв, а не отдельный сайт.
-    //
-    // Но «первый попавшийся» тоже не годится: если тормозит именно он,
-    // DNS ложится, хотя человек сидит на другом, живом сервере. Пользователь
-    // поймал это как «половина зарубежных сайтов не грузится», в логе:
-    //   dns: lookup failed for cp.cloudflare.com: context deadline exceeded (10.0s)
-    // Поэтому берём первый сервер с ПРОСТЫМ транспортом: у такого UDP
-    // проходит гарантированно. gRPC/WebSocket/HTTP-транспорты пропускаем.
-    // ЭТО ОПИСАНИЕ ОСТАВЛЕНО КАК ИСТОРИЯ: фиксированный детур убран, теперь
-    // способ выбирает человек («Способ разрешения в DNS», см. ниже), и по
-    // умолчанию DNS идёт через активный сервер — как в Karing.
-    //
-    // Замер 2026-08-05 на всех девяти серверах подписки показал, что UDP
-    // несут ВСЕ, включая gRPC-транспорт: DNS через каждый из них отдаёт 204
-    // за 0.2–0.5 с. То есть причина, по которой детур когда-то прибили к
-    // фиксированному серверу, к нынешней сборке ядра не относится.
-    // Если она вернётся, симптом будет прежний — «половина зарубежных сайтов
-    // не грузится» и `dns: lookup failed ... context deadline exceeded` в
-    // логе, — и лечится он переключением способа на «Напрямую».
-
-    // DNS задаём В ОБОИХ режимах, а не только в TUN. В обычном режиме его
-    // раньше не было вовсе, и резолв шёл через системный. С включённым geoip-ru
-    // sing-box обязан резолвить КАЖДЫЙ домен, чтобы понять, российский ли адрес,
-    // — и любая заминка системного резолвера вешала сразу весь трафик, а не
-    // отдельные сайты. Своим DNS эта зависимость снимается.
-    // Статические записи вида "домен=адрес". Отдельным сервером типа hosts,
-    // а не правилом: так они отвечают мгновенно и не ходят в сеть вовсе.
-    final hosts = <String, List<String>>{};
-    for (final line in _settings.dnsHosts) {
-      final parts = line.split('=');
-      if (parts.length != 2) continue;
-      final domain = parts[0].trim();
-      final addr = parts[1].trim();
-      if (domain.isEmpty || addr.isEmpty) continue;
-      hosts.putIfAbsent(domain, () => []).add(addr);
-    }
-
-    // `local` — это тип сервера в sing-box, а не адрес: он спрашивает
-    // резолвер операционной системы. ПОД TUN ЭТО ЛОВУШКА: запрос системного
-    // резолвера сам заходит в туннель и упирается в перехват DNS. Поэтому
-    // такой сервер появляется в конфиге, только если человек выбрал его
-    // сознательно, и никогда не ставится по умолчанию.
-    // ЧЕРЕЗ ТУННЕЛЬ (`detour != null`) — только TCP. UDP там держится не на
-    // всех транспортах, и когда не держится, ломается не «немного медленнее»,
-    // а весь настоящий резолв разом.
-    //
-    // Как это выглядело у человека: Outlook перестал работать, в логе —
-    // `dns: exchange failed for mail.<corp>.ru. IN A: write payload: io:
-    // read/write on closed pipe`. При этом браузер жив, потому что FakeIP
-    // выдаёт адрес не спрашивая никого, и поломку не видно до тех пор, пока
-    // кому-то не понадобится НАСТОЯЩИЙ адрес: домену из обхода «РФ напрямую»,
-    // SRV-записи автообнаружения, корпоративной почте.
-    //
-    // Виноват транспорт конкретного сервера: автовыбор встал на trojan поверх
-    // gRPC (он был самым быстрым по пингу), а UDP через gRPC не проходит.
-    // A/B на нём же, домен настоящий: UDP — closed pipe за 154 мс, TCP —
-    // ответ за 337 мс, DoH — за 305 мс. Проверены все серверы подписки:
-    // отказывал ровно один, остальные пять резолвили нормально, — то есть
-    // беда всплывала бы случайно, «по вторникам», в зависимости от того, кого
-    // выберет автовыбор.
-    //
-    // `dns-direct` остаётся на UDP: он идёт по физическому каналу, где UDP
-    // работает и быстрее.
-    Map<String, Object> dnsServer(String tag, String value, {String? detour}) =>
-        value == AppSettings.kSystemDns
-            ? {"type": "local", "tag": tag}
-            : {
-                "type": detour == null ? "udp" : "tcp",
-                "tag": tag,
-                "server": value,
-                // `?` перед значением — запись попадёт в карту, только если
-                // оно не null.
-                "detour": ?detour,
-              };
-
-    // Каким сервером резолвить то, что ПОЙДЁТ МИМО туннеля (RU-домены, личные
-    // списки «напрямую», хосты прокси-серверов). См. длинный комментарий ниже:
-    // под TUN на Windows запрос мимо туннеля не доходит никуда, поэтому там
-    // резолвим через туннель, а маршрутизацию оставляем прежней.
-    //
-    // На Android — напрямую, как в Karing. Там ядро живёт внутри приложения,
-    // а приложение исключено из своего VPN (addDisallowedApplication), так
-    // что его DNS мимо туннеля доходит. Обход через туннель там только вредил:
-    // российские сайты зависели от того, умеет ли выбранный сервер DNS, а
-    // автовыбор охотно встаёт на «Trojan GT» (быстрый по пингу), который
-    // имена временами не разрешает вовсе. Снаружи — ровно жалоба тестера:
-    // Google и YouTube работают (FakeIP, DNS не нужен), российские сервисы
-    // не открываются. Заодно RU-домены получают местные адреса CDN, а не те,
-    // что видит 8.8.8.8 из Германии.
-    final directDnsTag = _tunMode && Env.coreRunsAsProcess ? 'dns-remote' : 'dns-direct';
-
-    // Способ разрешения для трафика прокси (настройка «Способ разрешения в
-    // DNS», как в Karing). Меняется только ДЕТУР сервера dns-remote и то,
-    // добавляется ли FakeIP:
-    //
-    //  * current — через АКТИВНЫЙ сервер (селектор `proxy`). Резолв и
-    //    соединение идут одним путём, поэтому и адрес приходит тот же,
-    //    что увидит сервер. Раньше детур был жёстко прибит к первому серверу
-    //    с простым транспортом, и при переключении сервера DNS продолжал
-    //    ходить через старый — незаметно и неверно.
-    //  * direct — мимо туннеля. Быстро, но провайдер видит запрашиваемые
-    //    домены, а под TUN этот путь может не работать вовсе.
-    //  * fakeip — адрес выдаётся мгновенно, настоящий узнаётся при коннекте.
-    final proxyResolve = _settings.dnsProxyResolve;
-    final remoteDetour = proxyResolve == 'direct' ? null : 'proxy';
-
-    config["dns"] = {
-      "servers": [
-        dnsServer("dns-direct", _settings.dnsDirect),
-        dnsServer("dns-remote", _settings.dnsRemote, detour: remoteDetour),
-        if (hosts.isNotEmpty) {"type": "hosts", "tag": "dns-hosts", "predefined": hosts},
-        // FakeIP отдаёт выдуманный адрес мгновенно, а настоящий узнаётся уже
-        // при подключении — это убирает ожидание DNS перед каждым запросом.
-        if (_settings.dnsFakeIp)
-          {
-            "type": "fakeip",
-            "tag": "dns-fake",
-            "inet4_range": "198.18.0.0/15",
-            "inet6_range": "fc00::/18",
-          },
-      ],
-      "rules": [
-        if (hosts.isNotEmpty) {"domain": hosts.keys.toList(), "server": "dns-hosts"},
-        if (bypassDomains.isNotEmpty)
-          {
-            "domain": bypassDomains,
-            "server": directDnsTag,
-            if (_settings.dnsTtl > 0) "rewrite_ttl": _settings.dnsTtl,
-          },
-      ],
-      // FakeIP подключается ПРАВИЛОМ, а не через final: sing-box отказывается
-      // стартовать с "default server cannot be fakeip". Правило добавляется
-      // последним (см. ниже), уже после всех dns-direct — так домены, которым
-      // нужен настоящий адрес, успевают уйти на честный резолв, иначе geoip
-      // сравнивал бы выдуманный адрес и всегда промахивался.
-      "final": "dns-remote",
-      "strategy": _settings.dnsStrategy,
-      // Раздельный кэш обязателен при FakeIP: иначе выдуманные и настоящие
-      // ответы для одного домена перемешиваются в общем кэше.
-      //
-      // Но только для ядер ДО 1.14: там кэш общий, и развести его можно
-      // только этим ключом. С 1.14 сервер входит в ключ кэша всегда
-      // (`transportTag` в dnsCacheKey, dns/client.go v1.14.2), ключ стал
-      // пустым и объявлен устаревшим, а в 1.16 его уберут — и конфиг с ним
-      // перестанет приниматься. Автообновление ядра проверяет конфиг перед
-      // подменой, так что 1.16 просто не встал бы, и приложение застряло бы
-      // на старом ядре. Обе версии живут одновременно: Windows на 1.14.2,
-      // ядро Android собрано из 1.13.16 (mobile/go.mod).
-      if (_settings.dnsFakeIp && await _singboxNeedsIndependentCache())
-        "independent_cache": true,
-      if (_settings.dnsClientSubnet.trim().isNotEmpty)
-        "client_subnet": _settings.dnsClientSubnet.trim(),
-    };
-    // dns-direct СПЕЦИАЛЬНО без detour. Была попытка проставить ему
-    // "detour": "direct" — sing-box падает на старте с "detour to an empty
-    // direct outbound makes no sense": DNS-сервер без детура и так дозванивается
-    // напрямую, а детур на пустой direct-outbound ядро считает бессмыслицей.
-    // ВАЖНО: `sing-box check` эту ошибку НЕ ловит — она возникает при старте
-    // сервиса, а не при разборе конфига. Проверять только реальным запуском.
-    //
-    // ПОД TUN «резолвить напрямую» НЕ РАБОТАЕТ, и это отдельная беда.
-    // Замерено на живой машине: через туннель `cp.cloudflare.com` даёт 204 за
-    // 0.1 с, а `yandex.ru` висит 11 секунд с `dns=0.000` — то есть DNS-запрос
-    // мимо туннеля не доходит вообще, ни к 1.1.1.1, ни к 77.88.8.8, ни к
-    // 8.8.8.8. `strict_route` тут ни при чём: A/B с ним и без него дал
-    // одинаковый результат.
-    //
-    // При этом сам outbound `direct` ЖИВ — по нему ядро ходит до
-    // прокси-сервера, и туннель поднимается. Не работает именно DNS.
-    //
-    // Отсюда развязка: «резолвить» и «маршрутизировать» — разные вещи, и
-    // связывать их не обязано. Под TUN резолвим ВСЁ через туннель (он
-    // заведомо работает), а трафик по-прежнему пускаем мимо по route.rules.
-    // Российский сайт получит адрес от зарубежного DNS, но пойдёт к нему
-    // напрямую — а это ровно то, что нужно.
-    //
-    // Цена: geoip-ru может промахнуться, если зарубежный DNS отдаст не тот
-    // адрес, что видит местный резолвер. Доменное правило geosite-ru при этом
-    // работает как прежде, а промах по IP несравнимо дешевле, чем нынешнее
-    // «российские сайты не открываются вовсе».
-    if (geoSiteReady) {
-      (config["dns"]["rules"] as List).add({
-        "rule_set": [_rsGeositeRu.tag],
-        "server": directDnsTag,
-      });
-    }
-    // То же и для личного списка «напрямую»: без этого домен уходит мимо
-    // туннеля, а его DNS-запрос — через туннель. Смысл обхода теряется.
-    final userDirectDomains = (userDirect?['domain_suffix'] as List?)?.cast<String>();
-    if (userDirectDomains != null && userDirectDomains.isNotEmpty) {
-      (config["dns"]["rules"] as List).add({
-        "domain_suffix": userDirectDomains,
-        "server": directDnsTag,
-      });
-    }
-    // Сервисы, помеченные «напрямую», тоже резолвим настоящим DNS. При
-    // включённом FakeIP без этого они получили бы выдуманный адрес, и
-    // правило маршрутизации по IP до них не добралось бы.
-    final directServices = byAction['direct'];
-    if (directServices != null && directServices.isNotEmpty) {
-      (config["dns"]["rules"] as List).add({
-        "domain_suffix": directServices,
-        "server": directDnsTag,
-      });
-    }
-    // FakeIP — САМЫМ последним правилом, когда всё, что требует настоящего
-    // адреса, уже разобрано правилами выше.
-    // ОБЯЗАТЕЛЬНО выше правила FakeIP: иначе внутреннее имя доедет до него и
-    // получит адрес из 198.18.0.0/15, с которым соединение уже не отличить от
-    // обычного — и оно уедет в туннель.
-    //
-    // Отказываем САМИ, а не спрашиваем кого-то. Три варианта проверены
-    // запуском, и первые два оказались хуже болезни:
-    //
-    //  * системный резолвер (`{"type":"local"}`) даёт ПЕТЛЮ: под нашим же TUN
-    //    у адаптера SilaTUN прописан наш DNS (172.19.0.2) — система
-    //    спрашивает нас, мы спрашиваем систему. Имя так и возвращало FakeIP,
-    //    ровно как без правила;
-    //  * `dns-direct` под TUN не доезжает вообще (см. длинный комментарий
-    //    выше), а `dns-remote` отдаёт ТАЙМАУТ 10 СЕКУНД: публичные резолверы
-    //    имена вида `.local` не обслуживают — `.local` вдобавок закреплён за
-    //    mDNS (RFC 6762), и обычному DNS его разрешать запрещено. Замерено:
-    //    10 090 мс на `mail.contoso.local` через 8.8.8.8.
-    //
-    // Локальный отказ — 80 мс. Это и есть поведение БЕЗ VPN: там внутреннее
-    // имя получает NXDOMAIN мгновенно, и программа сразу переходит к
-    // следующему кандидату. С FakeIP она вместо отказа получала выдуманный
-    // адрес, уходила с ним в туннель и висела до таймаута — снаружи ровно
-    // «с включённым VPN почта не работает».
-    //
-    // Чего правило НЕ даёт: если машина в корпоративной сети, где `.local`
-    // разрешает внутренний сервер, мы его тоже не спросим. Для этого нужен
-    // DNS физического адаптера — отдельная задача.
-    (config["dns"]["rules"] as List).add({
-      "domain_suffix": kPrivateDomainSuffixes,
-      "action": "reject",
-      "method": "default",
-    });
-
-    // Срок жизни выдуманного адреса — 1 с, как у fake-ip в Clash. Сам sing-box
-    // отдаёт 600 с, а таблицу «адрес → домен» держит только в памяти ядра.
-    // После любого перезапуска ядра Windows ещё десять минут раздаёт старые
-    // адреса из своего кэша, а новое ядро о них не знает: в журнале «missing
-    // fakeip record», соединение рвётся (так и было 01.10.2026 после
-    // переподключения). Хуже того, новое ядро раздаёт адреса с начала
-    // диапазона заново, и старый адрес из кэша может уже означать другой
-    // сайт. Ответ FakeIP приходит из самого ядра мгновенно, так что короткий
-    // срок ничего не стоит.
-    if (_settings.dnsFakeIp) {
-      (config["dns"]["rules"] as List).add({
-        "query_type": ["A", "AAAA"],
-        "server": "dns-fake",
-        "rewrite_ttl": 1,
-      });
-    }
-
-    if (_tunMode) {
-      // Стек сверяем с возможностями ядра. Конфиг с неподдерживаемым стеком
-      // не даёт предупреждения — он роняет ядро на старте, и приложение
-      // перестаёт подключаться вообще. Лучше молча взять рабочий и сказать
-      // об этом в лог, чем оставить человека без сети.
-      // `mixed` тоже требует gVisor — он использует его для UDP.
-      var tunStack = _settings.tunStack;
-      if ((tunStack == 'gvisor' || tunStack == 'mixed') &&
-          !await _coreSupportsGvisor()) {
-        _appendLog(t('log.tunStackFallback'));
-        tunStack = 'system';
-      }
-      final androidExcluded = Env.appRulesUsePaths
-          ? const <String>[]
-          : androidExcludedPackages(_settings.appRules, ruDirect: ruMode);
-      config["inbounds"] = [
-        {
-          "type": "tun",
-          "tag": "tun-in",
-          "interface_name": _settings.tunName,
-          // Без IPv6-адреса адаптер не перехватывает IPv6 вообще — такой
-          // трафик уходит напрямую мимо туннеля, и если IPv6 к конкретному
-          // сайту не работает (нередкая ситуация), браузер по Happy Eyeballs
-          // долго ждёт таймаута IPv6, прежде чем откатиться на IPv4 (который
-          // у нас через туннель отрабатывает нормально) — выглядит как
-          // "жуткий пинг"/зависание, хотя сам туннель ни при чём.
-          "address": [
-            _settings.tunIpv4,
-            if (_settings.tunIpv6Enabled) _settings.tunIpv6,
-          ],
-          "auto_route": true,
-          "strict_route": _settings.strictRoute,
-          "stack": tunStack,
-          "mtu": _settings.tunMtu,
-          // На Android «эта программа — напрямую» = программа ВНЕ VPN целиком,
-          // а не только правило маршрута. Иначе банк, Госуслуги, маркетплейс
-          // видят VPN всё равно: Android сообщает о нём любой программе
-          // (TRANSPORT_VPN у сети), куда бы ни шёл её трафик, — и отказываются
-          // работать. Так же делает экран «Per-app proxy» в Karing. Список
-          // уходит в SilaVpnService как excludePackage ->
-          // addDisallowedApplication. Правило package_name -> direct ниже
-          // остаётся: программе, которую система всё же пустит в туннель
-          // (например, пакет не найден), оно даст тот же маршрут.
-          // В режиме «РФ напрямую» сюда же сами попадают российские
-          // приложения — см. kRuDirectApps.
-          if (androidExcluded.isNotEmpty) "exclude_package": androidExcluded,
-        }
-      ];
-      // Свой xray.exe (мосты для xhttp-серверов) ходит до прокси-сервера как
-      // обычный процесс — и auto_route заворачивает его собственный коннект
-      // обратно в TUN. Если при этом активен как раз xhttp-сервер, sing-box по
-      // final:"proxy" отправляет этот коннект в socks-мост, то есть ОБРАТНО В
-      // ТОТ ЖЕ xray: получается петля, трафик ходит по кругу и наружу не
-      // выходит вообще (в UI это видно как "Отправлено" растёт, "Скачано" = 0,
-      // в браузере — ERR_CONNECTION_RESET). Своё ядро sing-box из туннеля
-      // исключает само (auto_detect_interface), но про чужой процесс не знает.
-      //
-      // Исключаем по ПУТИ процесса, а не по имени: под именем xray.exe у
-      // пользователя работает личный v2rayN, и уводить его трафик мимо VPN
-      // молча мы не вправе. Плюс страховка по IP самих серверов — на случай,
-      // если process-матчинг на Windows не отработает.
-      final bypassCidrs = await _resolveToCidrs(proxyHosts);
-      config["route"] = {
-        if (ruleSetDecls.isNotEmpty) "rule_set": ruleSetDecls,
-        "rules": [
-          // TUN отдаёт роутеру голый IP — без sniff доменные правила (geosite,
-          // реклама) применять просто не к чему, домен берётся из TLS SNI.
-          {"action": "sniff"},
-          // Перехват DNS: запросы приложений к любому серверу разворачиваются
-          // на наш. Без этого программы с зашитым DNS (а таких много) ходят
-          // мимо туннеля, и разделение трафика для них не работает вовсе.
-          if (_settings.dnsHijack) {"protocol": "dns", "action": "hijack-dns"},
-          // Вывод собственного моста Xray из туннеля — ТОЛЬКО на рабочем столе.
-          //
-          // Там мост это отдельный процесс `xray.exe`, и `auto_route`
-          // заворачивает в туннель трафик всех процессов машины, включая его.
-          // Его коннект до прокси-сервера уходил обратно в тот же туннель —
-          // замкнутый круг, наружу не выходило ничего.
-          //
-          // На Android правила быть не должно, и дело не в том, что путь к
-          // .exe там бессмыслен и просто никогда не совпадёт. Вред тоньше:
-          // САМО НАЛИЧИЕ правила по процессу заставляет роутер определять
-          // владельца КАЖДОГО соединения — то есть звать
-          // `findConnectionOwner` в нашей службе, который для неопознанных
-          // соединений честно бросает исключение. Туннель при этом поднят,
-          // а трафик не идёт.
-          //
-          // Петля здесь невозможна и без правила: мосты работают внутри
-          // нашего же процесса, а он исключён из туннеля целиком
-          // (`addDisallowedApplication` в openTun).
-          // Вместе с мостом Xray выводим и КОПИЮ ядра, которой работают
-          // пробники теста задержки (см. _probeCorePath). Без этого замер
-          // идёт через измеряемый же туннель и врёт втрое, а автовыбор потом
-          // рвёт живое соединение по выдуманным цифрам.
-          //
-          // Здесь именно путь копии, а не `_singBoxPath`: правило по пути не
-          // отличает копии одного файла, и указание рабочего ядра увело бы
-          // мимо туннеля ЕГО СОБСТВЕННЫЙ трафик — проверено, наружу тогда не
-          // выходит ничего.
-          if (Env.coreRunsAsProcess)
-            {
-              "process_path": [_xrayPath, _probeCorePath],
-              "outbound": "direct",
-            },
-          if (bypassCidrs.isNotEmpty)
-            {
-              "ip_cidr": bypassCidrs,
-              // Только порты серверов, а не весь адрес — см. proxyPorts выше.
-              if (proxyPorts.isNotEmpty) "port": proxyPorts.toList()..sort(),
-              "outbound": "direct",
-            },
-          // QUIC (HTTP/3 у браузеров, YouTube) — отказ, и браузер тут же
-          // переходит на обычный HTTPS по TCP. Через туннель поверх TCP QUIC
-          // ведёт себя плохо: на сервере это выглядело как ~50 с почти нуля и
-          // потом рывок до 20 Мбит/с, а у человека — подвисающее видео; с
-          // выключенным в браузере QUIC подвисания пропали.
-          //
-          // По протоколу, а не «UDP на 443»: sniff выше распознаёт QUIC, и
-          // другой UDP на 443 (DTLS, чужие VPN внутри туннеля) не страдает.
-          // Строго ПОСЛЕ двух правил выше: наши мосты ходят к серверу xhttp
-          // и по HTTP/3, то есть тем же QUIC, и должны уйти напрямую раньше.
-          // reject, а не тишина: ответ «порт недоступен» переводит браузер на
-          // TCP сразу, молчание — только после таймаута.
-          if (_settings.blockQuic) {"protocol": "quic", "action": "reject"},
-          ...splitRules(),
-        ],
-        "final": "proxy",
-        "auto_detect_interface": true,
-        // Чем резолвить домены, встреченные в полях подключения (адрес
-        // сервера у outbound). Без этого ключа sing-box 1.12+ ругается
-        // депрекейтом, а начиная с 1.13.16 просто ОТКАЗЫВАЕТСЯ стартовать:
-        // «to continuing using this feature, set ENABLE_DEPRECATED_MISSING_
-        // DOMAIN_RESOLVER=true». Поймано при проверке кандидата на
-        // автообновление — с текущим ядром конфиг работал, а с новым падал.
-        //
-        // ИМЕННО системный резолвер, а не dns-direct и тем более не
-        // dns-remote. Этим ключом ядро узнаёт адрес самого прокси-сервера —
-        // то есть резолвит ДО того, как поднялся хоть какой-то туннель, по
-        // голому физическому каналу. Публичный адрес тут ставить нельзя: у
-        // провайдера он может быть закрыт, и тогда всё встаёт намертво —
-        // без резолва нет прокси, без прокси нет DNS. Поймано debug-логом:
-        //   dns: lookup failed for <хост сервера>: context deadline exceeded
-        // по 10 секунд и по кругу, при полностью исправном туннеле.
-        // dns-direct, а не системный резолвер: под TUN системный сам ходит
-        // через туннель. Резолвить тут по сути нечего — адреса серверов уже
-        // подставлены в конфиг (_bakeServerIps), — но ключ обязателен, без
-        // него свежие ядра не стартуют.
-        "default_domain_resolver": "dns-direct",
-      };
-    } else {
-      config["inbounds"] = [
-        {
-          "type": "mixed",
-          "tag": "mixed-in",
-          // 0.0.0.0 открывает прокси для других устройств в локальной сети —
-          // ровно то, что в Karing называется "разрешить доступ из локальной сети".
-          "listen": _settings.allowLan ? "0.0.0.0" : "127.0.0.1",
-          "listen_port": _settings.localPort,
-        }
-      ];
-      // Здесь sniff не нужен: домен приходит прямо в SOCKS/HTTP-запросе
-      // от браузера, ничего вынюхивать из TLS не требуется.
-      config["route"] = {
-        if (ruleSetDecls.isNotEmpty) "rule_set": ruleSetDecls,
-        "rules": splitRules(),
-        "final": "proxy",
-        // См. комментарий в TUN-ветке: без этого ключа свежие ядра не
-        // стартуют, а резолвить адрес прокси-сервера обязан системный
-        // резолвер — единственный, который работает на любой сети.
-        // dns-direct, а не системный резолвер: под TUN системный сам ходит
-        // через туннель. Резолвить тут по сути нечего — адреса серверов уже
-        // подставлены в конфиг (_bakeServerIps), — но ключ обязателен, без
-        // него свежие ядра не стартуют.
-        "default_domain_resolver": "dns-direct",
-      };
+      selectedTag: _selectedServer?.outbound['tag'] as String?,
+      proxyHostNames: proxyHostNames,
+      proxyPorts: proxyPorts,
+      readyRuleSets: {for (final r in readySets) r.tag: _ruleSetPath(r)},
+      // Страховка по адресам серверов нужна только под TUN — резолвим лишь там.
+      bypassCidrs: _tunMode ? await _resolveToCidrs(proxyHostNames) : const [],
+      needsIndependentCache: _settings.dnsFakeIp && await _singboxNeedsIndependentCache(),
+      gvisorSupported: _tunMode && (stack == 'gvisor' || stack == 'mixed')
+          ? await _coreSupportsGvisor()
+          : true,
+      coreRunsAsProcess: Env.coreRunsAsProcess,
+      appRulesUsePaths: Env.appRulesUsePaths,
+      processPathsDirect: [_xrayPath, _probeCorePath],
+      coreLogPath:
+          Env.coreRunsAsProcess ? null : '$_workDir${Platform.pathSeparator}core_log.txt',
+    ));
+    for (final key in result.warnings) {
+      _appendLog(t(key));
     }
 
     final file = File(_configPath);
-    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(config));
+    await file.writeAsString(const JsonEncoder.withIndent('  ').convert(result.config));
   }
 
   // Конфиг Xray всегда пишется для постоянного моста конкретного сервера —
@@ -12901,4 +12223,804 @@ class AddProfileScreen extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Всё, что `buildSingboxConfig` берёт извне. То, что требует диска, сети или
+/// запуска процессов, здесь уже посчитано (см. `_writeConfig`).
+class SingboxConfigInput {
+  const SingboxConfigInput({
+    required this.settings,
+    required this.tunMode,
+    required this.routingMode,
+    required this.blockAds,
+    required this.singboxOutbounds,
+    this.bridges = const [],
+    this.selectedTag,
+    this.proxyHostNames = const {},
+    this.proxyPorts = const {},
+    this.readyRuleSets = const {},
+    this.bypassCidrs = const [],
+    this.needsIndependentCache = false,
+    this.gvisorSupported = true,
+    required this.coreRunsAsProcess,
+    required this.appRulesUsePaths,
+    this.processPathsDirect = const [],
+    this.coreLogPath,
+  });
+
+  final AppSettings settings;
+  final bool tunMode;
+  final RoutingMode routingMode;
+  final bool blockAds;
+
+  /// Outbound'ы серверов sing-box — уже с адресами вместо имён и с правками
+  /// TLS и mux.
+  final List<Map<String, dynamic>> singboxOutbounds;
+
+  /// Серверы Xray: тег и порт его моста.
+  final List<({String tag, int port})> bridges;
+  final String? selectedTag;
+
+  /// Имена хостов серверов ДО подмены на адреса — для DNS-правил.
+  final Set<String> proxyHostNames;
+
+  /// Порты серверов: правило «мимо туннеля» берёт только их.
+  final Set<int> proxyPorts;
+
+  /// Наборы правил, что лежат на диске: тег → путь.
+  final Map<String, String> readyRuleSets;
+
+  /// Адреса серверов в виде CIDR — страховка от петли под TUN.
+  final List<String> bypassCidrs;
+
+  /// Ядро старше 1.14 — ему нужен `independent_cache` при FakeIP.
+  final bool needsIndependentCache;
+
+  /// Ядро собрано с gVisor (нужен стекам `gvisor` и `mixed`).
+  final bool gvisorSupported;
+
+  /// Платформа: ядро — отдельный процесс (Windows) или библиотека (Android).
+  final bool coreRunsAsProcess;
+
+  /// Правила для программ — по пути к .exe (Windows) или по пакету (Android).
+  final bool appRulesUsePaths;
+
+  /// Свои процессы, которые под TUN ходят мимо туннеля (мост Xray, пробник).
+  final List<String> processPathsDirect;
+
+  /// Куда ядру писать лог, когда оно внутри приложения (Android).
+  final String? coreLogPath;
+}
+
+/// Какие наборы правил нужны при этих настройках.
+///
+/// Набор geosite скачивается и когда роутинг по нему выключен, а geoip
+/// включён: по нему строится DNS-правило «RU-домены резолвим местным
+/// резолвером». Без этого правила geoip промахивается — зарубежный DNS
+/// на российский сайт отдаёт не тот адрес, что видит местный.
+List<RuleSetSpec> ruleSetsWanted(AppSettings st, RoutingMode mode, {required bool blockAds}) {
+  final ruMode = mode == RoutingMode.bypassRu;
+  final wantGeoSite = ruMode && st.geoSiteEnabled;
+  final wantGeoIp = ruMode && st.geoIpEnabled;
+  return [
+    if (wantGeoSite || wantGeoIp) _rsGeositeRu,
+    if (wantGeoIp) _rsGeoipRu,
+    if (blockAds) _rsAds,
+  ];
+}
+
+/// Конфиг sing-box из уже собранных данных — без диска, сети и процессов.
+/// Всё, что требует их, считает `_writeConfig` и передаёт в [input]; поэтому
+/// эту функцию можно гонять в тестах на любых сочетаниях настроек и
+/// проверять результат самим `sing-box check` (см. test/core_config_test.dart).
+/// [warnings] — ключи строк для журнала.
+({Map<String, dynamic> config, List<String> warnings}) buildSingboxConfig(SingboxConfigInput input) {
+  final st = input.settings;
+  final warnings = <String>[];
+  // socks, а не http — HTTP-прокси в принципе не переносит UDP, а браузеры
+  // часто сначала пробуют HTTP/3 (QUIC поверх UDP). VLESS сам по себе UDP
+  // поддерживает, ограничение было именно в транспорте моста.
+  final bridgeOutbounds = [
+    for (final b in input.bridges)
+      {"type": "socks", "tag": b.tag, "server": "127.0.0.1", "server_port": b.port},
+  ];
+
+  final selectorTags = [
+    ...input.singboxOutbounds.map((o) => o['tag'] as String),
+    ...input.bridges.map((b) => b.tag),
+  ];
+  final defaultTag =
+      selectorTags.contains(input.selectedTag) ? input.selectedTag! : selectorTags.first;
+
+  final selector = {
+    "type": "selector",
+    "tag": "proxy",
+    "outbounds": selectorTags,
+    "default": defaultTag,
+  };
+
+  // Имена хостов серверов (до подмены на адреса) и их порты — см. _writeConfig.
+  final proxyHostNames = input.proxyHostNames;
+  final proxyPorts = input.proxyPorts;
+
+  final Map<String, dynamic> config = {
+    "log": {
+      "level": "info",
+      // На Android лог ядра надо явно направить в файл.
+      //
+      // На Windows ядро — отдельный процесс, и его вывод читается из
+      // stdout/stderr прямо в наш журнал. Здесь ядро внутри приложения, и
+      // его лог по умолчанию не видно НИГДЕ: ни в журнале приложения, ни в
+      // системном, ни в stderr (туда попадают только паники Go).
+      //
+      // Цена этой слепоты уже заплачена: туннель поднимался, пакеты в него
+      // шли, наружу не выходило ничего, и ни одной строки о причине —
+      // разбирать было нечем.
+      if (!input.coreRunsAsProcess)
+        "output": input.coreLogPath,
+    },
+    "experimental": {
+      "clash_api": {"external_controller": "127.0.0.1:${st.clashApiPort}"}
+    },
+    // Своё время для ядра: Reality и VMess отвергают соединение, если часы
+    // клиента ушли больше чем на пару минут. Системные часы при этом НЕ
+    // трогаются — правами администратора для этого обзаводиться не нужно.
+    //
+    // БЕЗ "detour". Первая версия ставила сюда "detour": "direct" (казалось
+    // логичным: за временем идти мимо туннеля) — ядро на старте пишет
+    // `ntp: initialize time: detour to an empty direct outbound makes no
+    // sense` и НТП молча не работает, хотя сам прокси продолжает жить.
+    // Ровно та же ловушка, что с dns-direct. `sing-box check` её не видит.
+    // Проверено запуском, A/B с контролем: без ntp — HTTP 204; с detour —
+    // HTTP 204, но ERROR и никакой сверки; без detour — HTTP 204 и
+    // `ntp: updated time` в логе. Без детура ядро идёт напрямую само,
+    // а под TUN его собственный трафик и так исключён auto_detect_interface.
+    if (st.ntpEnabled)
+      "ntp": {
+        "enabled": true,
+        "server": st.ntpServer,
+        "server_port": st.ntpPort,
+        "interval": st.ntpInterval,
+      },
+    "outbounds": [
+      ...input.singboxOutbounds,
+      ...bridgeOutbounds,
+      selector,
+    ],
+  };
+  (config["outbounds"] as List).add({"type": "direct", "tag": "direct"});
+
+  // Наборы правил нужны обоим режимам: раздельное туннелирование одинаково
+  // осмысленно и для системного VPN, и для локального прокси на 1337.
+  final ruMode = input.routingMode == RoutingMode.bypassRu;
+  final wantGeoSite = ruMode && st.geoSiteEnabled;
+  // Какие наборы нужны, решает ruleSetsWanted (их же раскладывает на диск
+  // _writeConfig); сюда приходят только те, что реально легли.
+  final ready = input.readyRuleSets;
+  final adsReady = ready.containsKey(_rsAds.tag);
+  final geoSiteReady = ready.containsKey(_rsGeositeRu.tag);
+  final geoIpReady = ready.containsKey(_rsGeoipRu.tag);
+  final ruTags = <String>[
+    // В маршрутные правила geosite попадает только если он включён именно
+    // как способ маршрутизации, а не подтянут ради DNS.
+    if (wantGeoSite && geoSiteReady) _rsGeositeRu.tag,
+    if (geoIpReady) _rsGeoipRu.tag,
+  ];
+  final ruleSetDecls = [
+    for (final e in ready.entries)
+      {"type": "local", "tag": e.key, "format": "binary", "path": e.value},
+  ];
+
+  // Одна запись списка — либо домен, либо IP/подсеть. Домены кладём в
+  // domain_suffix: запись "example.com" должна ловить и сам домен, и все его
+  // поддомены, иначе пользователю пришлось бы перечислять их вручную.
+  // Голому IP дописываем /32 — sing-box ждёт именно CIDR.
+  Map<String, dynamic>? ruleFromList(List<String> entries, Map<String, dynamic> action) {
+    final domains = <String>[];
+    final cidrs = <String>[];
+    for (final raw in entries) {
+      final e = raw.trim();
+      if (e.isEmpty || e.startsWith('#')) continue;
+      if (RegExp(r'^[0-9a-fA-F:.]+(/\d{1,3})?$').hasMatch(e) && e.contains(RegExp(r'[:.]'))) {
+        final looksIpv4 = RegExp(r'^\d+\.\d+\.\d+\.\d+(/\d{1,2})?$').hasMatch(e);
+        final looksIpv6 = e.contains(':');
+        if (looksIpv4 || looksIpv6) {
+          cidrs.add(e.contains('/') ? e : (looksIpv6 ? '$e/128' : '$e/32'));
+          continue;
+        }
+      }
+      domains.add(e.toLowerCase());
+    }
+    if (domains.isEmpty && cidrs.isEmpty) return null;
+    return {
+      if (domains.isNotEmpty) "domain_suffix": domains,
+      if (cidrs.isNotEmpty) "ip_cidr": cidrs,
+      ...action,
+    };
+  }
+
+  final userBlock = ruleFromList(st.customBlock, {"action": "reject"});
+  final userDirect = ruleFromList(st.customDirect, {"outbound": "direct"});
+  final userProxy = ruleFromList(st.customProxy, {"outbound": "proxy"});
+
+  // Правила для сервисов. Домены всех сервисов с одинаковым назначением
+  // собираем в ОДНО правило: sing-box проверяет список правил по порядку,
+  // и два десятка отдельных правил он бы перебирал на каждое соединение.
+  final byAction = <String, List<String>>{};
+  st.serviceRules.forEach((service, action) {
+    final domains = AppSettings.serviceDomains[service];
+    if (domains == null || action == 'default') return;
+    byAction.putIfAbsent(action, () => []).addAll(domains);
+  });
+  final serviceRules = <Map<String, dynamic>>[
+    if (byAction['block'] != null)
+      {"domain_suffix": byAction['block'], "action": "reject"},
+    if (byAction['direct'] != null)
+      {"domain_suffix": byAction['direct'], "outbound": "direct"},
+    if (byAction['proxy'] != null)
+      {"domain_suffix": byAction['proxy'], "outbound": "proxy"},
+  ];
+
+  // Порядок важен — правила проверяются сверху вниз, побеждает первое
+  // совпавшее. Личные списки идут ВЫШЕ готовых наборов: иначе режим
+  // «РФ напрямую» перебивал бы явный выбор пользователя. Реклама режется до
+  // RU-обхода: иначе ad.ozone.ru как российский домен ушёл бы в direct
+  // и благополучно загрузился.
+  // GeoIP сравнивает АДРЕС, а в обычном режиме соединение приходит доменом
+  // (браузер отдаёт хост прямо в SOCKS/HTTP-запросе) — и правило по IP к
+  // нему не применяется вообще. Проверено запуском: с одним лишь geoip-ru
+  // yandex.ru и mail.ru уходили в прокси, хотя набор подключён и загружен;
+  // с `{"action":"resolve"}` перед правилом оба ушли в direct.
+  // В TUN этого не нужно: туда соединение приходит уже голым адресом.
+  // Резолв стоит денег (запрос перед каждым новым соединением), поэтому
+  // добавляется только когда geoip реально включён.
+  final needsResolve = !input.tunMode && geoIpReady;
+
+  // Правила по приложениям. Собираем в одно правило на действие: sing-box
+  // перебирает список сверху вниз на каждое соединение, и десяток отдельных
+  // правил на десяток программ он бы перебирал целиком.
+  final appsByAction = <String, List<String>>{};
+  st.appRules.forEach((path, action) {
+    if (action == 'default' || path.trim().isEmpty) return;
+    appsByAction.putIfAbsent(action, () => []).add(path);
+  });
+  // Ключ правила зависит от платформы: на рабочем столе программа опознаётся
+  // путём к .exe, на Android — именем пакета. Разные поля, а не разные
+  // значения одного: `process_path` с именем пакета не совпадёт НИКОГДА, то
+  // есть все правила пользователя молча не работали бы, а он видел бы их
+  // список на экране и считал настроенными. Проверено по исходникам ядра:
+  // на Android оно ищет владельца соединения в любом случае
+  // (`C.IsAndroid && platformInterface != nil` -> `needFindProcess = true`),
+  // так что цена правила здесь только в самом сравнении.
+  final appRuleKey = input.appRulesUsePaths ? "process_path" : "package_name";
+  final appRules = <Map<String, dynamic>>[
+    if (appsByAction['block'] != null)
+      {appRuleKey: appsByAction['block'], "action": "reject"},
+    if (appsByAction['direct'] != null)
+      {appRuleKey: appsByAction['direct'], "outbound": "direct"},
+    if (appsByAction['proxy'] != null)
+      {appRuleKey: appsByAction['proxy'], "outbound": "proxy"},
+  ];
+
+  // «Только IPv4» обязано означать «IPv6 не пробовать», а не «не спрашивать
+  // AAAA у DNS».
+  //
+  // Разница вылезает на телефоне. У TUN-адаптера есть IPv6-адрес (так и
+  // задумано — иначе IPv6-трафик уходит мимо туннеля), поэтому система
+  // сообщает приложениям, что IPv6 в наличии. Приложениям с зашитыми
+  // IPv6-адресами (Telegram — ровно такое) наш DNS не указ: они идут по
+  // IPv6 напрямую, соединение уходит в туннель, а на выходе у большинства
+  // прокси-серверов IPv6 нет вовсе. Пакет уходит в тишину, и приложение ждёт
+  // таймаута вместо того, чтобы за миллисекунды откатиться на IPv4.
+  // Снаружи: «интернет есть, а Telegram пишет нет соединения», при этом
+  // обычные сайты открываются.
+  //
+  // `reject` отвечает отказом сразу, и Happy Eyeballs честно переключается на
+  // IPv4. Правило действует ТОЛЬКО в режиме «Только IPv4»: человек уже сказал,
+  // что IPv6 ему не нужен, — а в остальных режимах трогать его нельзя.
+  final rejectIpv6 = st.dnsStrategy == 'ipv4_only';
+
+  List<Map<String, dynamic>> splitRules() => [
+        {"ip_is_private": true, "outbound": "direct"},
+        // Выше вообще всего, включая правила для программ: это не
+        // предпочтение, а корректность. Внутреннее имя через туннель не
+        // заработает ни при каких настройках, зато молча съест таймаут.
+        {"domain_suffix": kPrivateDomainSuffixes, "outbound": "direct"},
+        if (rejectIpv6) {"ip_version": 6, "action": "reject"},
+        // Выше всего остального: «эта программа — всегда так» — самое
+        // конкретное указание, какое пользователь может дать, и спорить
+        // с ним доменным правилам незачем.
+        ...appRules,
+        ?userBlock,
+        ?userDirect,
+        ?userProxy,
+        // Правила сервисов ниже личных списков, но выше готовых наборов:
+        // явная запись пользователя должна побеждать шаблон, а шаблон —
+        // общий режим «РФ напрямую».
+        ...serviceRules,
+        if (adsReady) {"rule_set": [_rsAds.tag], "action": "reject"},
+        // Именно здесь, а не выше: всё, что решается по домену (личные
+        // списки, сервисы, реклама), уже разобрано и резолва не потребовало.
+        if (needsResolve) {"action": "resolve"},
+        if (ruTags.isNotEmpty) {"rule_set": ruTags, "outbound": "direct"},
+      ];
+
+  // Домены самих прокси-серверов должны резолвиться напрямую — иначе
+  // циклическая зависимость: чтобы подключиться к серверу, надо узнать
+  // его IP, а DNS-запрос сам едет через ещё не поднятый до сервера туннель.
+  // Для xhttp-серверов это тоже обязательно: в конфиг sing-box они попадают
+  // как мост на 127.0.0.1, но реальный коннект до сервера делает отдельный
+  // процесс xray.exe, и резолвить хост он будет через системный DNS.
+  // Берём сохранённые ИМЕНА, а не текущее содержимое outbound'ов: там уже
+  // подставлены IP (см. _bakeServerIps выше).
+  final proxyHosts = proxyHostNames;
+  final bypassDomains =
+      proxyHosts.where((h) => !RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(h)).toList();
+  // Хост NTP резолвим напрямую по той же причине, что и прокси-серверы:
+  // ядро идёт к нему в обход туннеля (detour: direct), и ответ зарубежного
+  // DNS через туннель тут только мешает — а под TUN это ещё и курица с яйцом.
+  if (st.ntpEnabled) {
+    final ntpHost = st.ntpServer.trim();
+    if (ntpHost.isNotEmpty &&
+        !RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(ntpHost) &&
+        !bypassDomains.contains(ntpHost)) {
+      bypassDomains.add(ntpHost);
+    }
+  }
+
+
+  // DNS идёт через АКТИВНЫЙ сервер (selector), а не через фиксированный
+  // первый, и по TCP, а не по UDP.
+  //
+  // Раньше detour был прибит к `singboxServers.first`: xhttp-мост не несёт
+  // UDP, и DNS к нему отваливался с «invalid argument». Побочный эффект
+  // оказался хуже болезни — если тормозил именно первый сервер подписки,
+  // ложился резолв ЦЕЛИКОМ, хотя человек сидел на другом, живом сервере.
+  // Пользователь поймал это как «половина зарубежных сайтов не грузится»,
+  // Discord — ERR_CONNECTION_RESET; в логе:
+  //   dns: lookup failed for cp.cloudflare.com: context deadline exceeded (10.0s)
+  // При этом через активный сервер шло 178 соединений, а через первый — 6,
+  // и все шесть были DNS.
+  //
+  // DNS детурится через ФИКСИРОВАННЫЙ сервер, а не через активный selector.
+  // Это выстрадано: попытка пустить DNS через selector сломала резолв
+  // напрочь, стоило автовыбору встать на gRPC-сервер. Замеры на живом
+  // приложении, активный сервер VLESS GRPC:
+  //   UDP  через selector — 0 из 3 сайтов, 3 ошибки резолва
+  //   DoH  через selector — 2 из 3, 1 ошибка
+  //   UDP  через фиксированный — работает стабильно (как было всегда)
+  // Причина: транспорт сервера может не переносить UDP (gRPC, xhttp), и
+  // тогда ложится ВЕСЬ резолв, а не отдельный сайт.
+  //
+  // Но «первый попавшийся» тоже не годится: если тормозит именно он,
+  // DNS ложится, хотя человек сидит на другом, живом сервере. Пользователь
+  // поймал это как «половина зарубежных сайтов не грузится», в логе:
+  //   dns: lookup failed for cp.cloudflare.com: context deadline exceeded (10.0s)
+  // Поэтому берём первый сервер с ПРОСТЫМ транспортом: у такого UDP
+  // проходит гарантированно. gRPC/WebSocket/HTTP-транспорты пропускаем.
+  // ЭТО ОПИСАНИЕ ОСТАВЛЕНО КАК ИСТОРИЯ: фиксированный детур убран, теперь
+  // способ выбирает человек («Способ разрешения в DNS», см. ниже), и по
+  // умолчанию DNS идёт через активный сервер — как в Karing.
+  //
+  // Замер 2026-08-05 на всех девяти серверах подписки показал, что UDP
+  // несут ВСЕ, включая gRPC-транспорт: DNS через каждый из них отдаёт 204
+  // за 0.2–0.5 с. То есть причина, по которой детур когда-то прибили к
+  // фиксированному серверу, к нынешней сборке ядра не относится.
+  // Если она вернётся, симптом будет прежний — «половина зарубежных сайтов
+  // не грузится» и `dns: lookup failed ... context deadline exceeded` в
+  // логе, — и лечится он переключением способа на «Напрямую».
+
+  // DNS задаём В ОБОИХ режимах, а не только в TUN. В обычном режиме его
+  // раньше не было вовсе, и резолв шёл через системный. С включённым geoip-ru
+  // sing-box обязан резолвить КАЖДЫЙ домен, чтобы понять, российский ли адрес,
+  // — и любая заминка системного резолвера вешала сразу весь трафик, а не
+  // отдельные сайты. Своим DNS эта зависимость снимается.
+  // Статические записи вида "домен=адрес". Отдельным сервером типа hosts,
+  // а не правилом: так они отвечают мгновенно и не ходят в сеть вовсе.
+  final hosts = <String, List<String>>{};
+  for (final line in st.dnsHosts) {
+    final parts = line.split('=');
+    if (parts.length != 2) continue;
+    final domain = parts[0].trim();
+    final addr = parts[1].trim();
+    if (domain.isEmpty || addr.isEmpty) continue;
+    hosts.putIfAbsent(domain, () => []).add(addr);
+  }
+
+  // `local` — это тип сервера в sing-box, а не адрес: он спрашивает
+  // резолвер операционной системы. ПОД TUN ЭТО ЛОВУШКА: запрос системного
+  // резолвера сам заходит в туннель и упирается в перехват DNS. Поэтому
+  // такой сервер появляется в конфиге, только если человек выбрал его
+  // сознательно, и никогда не ставится по умолчанию.
+  // ЧЕРЕЗ ТУННЕЛЬ (`detour != null`) — только TCP. UDP там держится не на
+  // всех транспортах, и когда не держится, ломается не «немного медленнее»,
+  // а весь настоящий резолв разом.
+  //
+  // Как это выглядело у человека: Outlook перестал работать, в логе —
+  // `dns: exchange failed for mail.<corp>.ru. IN A: write payload: io:
+  // read/write on closed pipe`. При этом браузер жив, потому что FakeIP
+  // выдаёт адрес не спрашивая никого, и поломку не видно до тех пор, пока
+  // кому-то не понадобится НАСТОЯЩИЙ адрес: домену из обхода «РФ напрямую»,
+  // SRV-записи автообнаружения, корпоративной почте.
+  //
+  // Виноват транспорт конкретного сервера: автовыбор встал на trojan поверх
+  // gRPC (он был самым быстрым по пингу), а UDP через gRPC не проходит.
+  // A/B на нём же, домен настоящий: UDP — closed pipe за 154 мс, TCP —
+  // ответ за 337 мс, DoH — за 305 мс. Проверены все серверы подписки:
+  // отказывал ровно один, остальные пять резолвили нормально, — то есть
+  // беда всплывала бы случайно, «по вторникам», в зависимости от того, кого
+  // выберет автовыбор.
+  //
+  // `dns-direct` остаётся на UDP: он идёт по физическому каналу, где UDP
+  // работает и быстрее.
+  Map<String, Object> dnsServer(String tag, String value, {String? detour}) =>
+      value == AppSettings.kSystemDns
+          ? {"type": "local", "tag": tag}
+          : {
+              "type": detour == null ? "udp" : "tcp",
+              "tag": tag,
+              "server": value,
+              // `?` перед значением — запись попадёт в карту, только если
+              // оно не null.
+              "detour": ?detour,
+            };
+
+  // Каким сервером резолвить то, что ПОЙДЁТ МИМО туннеля (RU-домены, личные
+  // списки «напрямую», хосты прокси-серверов). См. длинный комментарий ниже:
+  // под TUN на Windows запрос мимо туннеля не доходит никуда, поэтому там
+  // резолвим через туннель, а маршрутизацию оставляем прежней.
+  //
+  // На Android — напрямую, как в Karing. Там ядро живёт внутри приложения,
+  // а приложение исключено из своего VPN (addDisallowedApplication), так
+  // что его DNS мимо туннеля доходит. Обход через туннель там только вредил:
+  // российские сайты зависели от того, умеет ли выбранный сервер DNS, а
+  // автовыбор охотно встаёт на «Trojan GT» (быстрый по пингу), который
+  // имена временами не разрешает вовсе. Снаружи — ровно жалоба тестера:
+  // Google и YouTube работают (FakeIP, DNS не нужен), российские сервисы
+  // не открываются. Заодно RU-домены получают местные адреса CDN, а не те,
+  // что видит 8.8.8.8 из Германии.
+  final directDnsTag = input.tunMode && input.coreRunsAsProcess ? 'dns-remote' : 'dns-direct';
+
+  // Способ разрешения для трафика прокси (настройка «Способ разрешения в
+  // DNS», как в Karing). Меняется только ДЕТУР сервера dns-remote и то,
+  // добавляется ли FakeIP:
+  //
+  //  * current — через АКТИВНЫЙ сервер (селектор `proxy`). Резолв и
+  //    соединение идут одним путём, поэтому и адрес приходит тот же,
+  //    что увидит сервер. Раньше детур был жёстко прибит к первому серверу
+  //    с простым транспортом, и при переключении сервера DNS продолжал
+  //    ходить через старый — незаметно и неверно.
+  //  * direct — мимо туннеля. Быстро, но провайдер видит запрашиваемые
+  //    домены, а под TUN этот путь может не работать вовсе.
+  //  * fakeip — адрес выдаётся мгновенно, настоящий узнаётся при коннекте.
+  final proxyResolve = st.dnsProxyResolve;
+  final remoteDetour = proxyResolve == 'direct' ? null : 'proxy';
+
+  config["dns"] = {
+    "servers": [
+      dnsServer("dns-direct", st.dnsDirect),
+      dnsServer("dns-remote", st.dnsRemote, detour: remoteDetour),
+      if (hosts.isNotEmpty) {"type": "hosts", "tag": "dns-hosts", "predefined": hosts},
+      // FakeIP отдаёт выдуманный адрес мгновенно, а настоящий узнаётся уже
+      // при подключении — это убирает ожидание DNS перед каждым запросом.
+      if (st.dnsFakeIp)
+        {
+          "type": "fakeip",
+          "tag": "dns-fake",
+          "inet4_range": "198.18.0.0/15",
+          "inet6_range": "fc00::/18",
+        },
+    ],
+    "rules": [
+      if (hosts.isNotEmpty) {"domain": hosts.keys.toList(), "server": "dns-hosts"},
+      if (bypassDomains.isNotEmpty)
+        {
+          "domain": bypassDomains,
+          "server": directDnsTag,
+          if (st.dnsTtl > 0) "rewrite_ttl": st.dnsTtl,
+        },
+    ],
+    // FakeIP подключается ПРАВИЛОМ, а не через final: sing-box отказывается
+    // стартовать с "default server cannot be fakeip". Правило добавляется
+    // последним (см. ниже), уже после всех dns-direct — так домены, которым
+    // нужен настоящий адрес, успевают уйти на честный резолв, иначе geoip
+    // сравнивал бы выдуманный адрес и всегда промахивался.
+    "final": "dns-remote",
+    "strategy": st.dnsStrategy,
+    // Раздельный кэш обязателен при FakeIP: иначе выдуманные и настоящие
+    // ответы для одного домена перемешиваются в общем кэше.
+    //
+    // Но только для ядер ДО 1.14: там кэш общий, и развести его можно
+    // только этим ключом. С 1.14 сервер входит в ключ кэша всегда
+    // (`transportTag` в dnsCacheKey, dns/client.go v1.14.2), ключ стал
+    // пустым и объявлен устаревшим, а в 1.16 его уберут — и конфиг с ним
+    // перестанет приниматься. Автообновление ядра проверяет конфиг перед
+    // подменой, так что 1.16 просто не встал бы, и приложение застряло бы
+    // на старом ядре. Обе версии живут одновременно: Windows на 1.14.2,
+    // ядро Android собрано из 1.13.16 (mobile/go.mod).
+    if (st.dnsFakeIp && input.needsIndependentCache)
+      "independent_cache": true,
+    if (st.dnsClientSubnet.trim().isNotEmpty)
+      "client_subnet": st.dnsClientSubnet.trim(),
+  };
+  // dns-direct СПЕЦИАЛЬНО без detour. Была попытка проставить ему
+  // "detour": "direct" — sing-box падает на старте с "detour to an empty
+  // direct outbound makes no sense": DNS-сервер без детура и так дозванивается
+  // напрямую, а детур на пустой direct-outbound ядро считает бессмыслицей.
+  // ВАЖНО: `sing-box check` эту ошибку НЕ ловит — она возникает при старте
+  // сервиса, а не при разборе конфига. Проверять только реальным запуском.
+  //
+  // ПОД TUN «резолвить напрямую» НЕ РАБОТАЕТ, и это отдельная беда.
+  // Замерено на живой машине: через туннель `cp.cloudflare.com` даёт 204 за
+  // 0.1 с, а `yandex.ru` висит 11 секунд с `dns=0.000` — то есть DNS-запрос
+  // мимо туннеля не доходит вообще, ни к 1.1.1.1, ни к 77.88.8.8, ни к
+  // 8.8.8.8. `strict_route` тут ни при чём: A/B с ним и без него дал
+  // одинаковый результат.
+  //
+  // При этом сам outbound `direct` ЖИВ — по нему ядро ходит до
+  // прокси-сервера, и туннель поднимается. Не работает именно DNS.
+  //
+  // Отсюда развязка: «резолвить» и «маршрутизировать» — разные вещи, и
+  // связывать их не обязано. Под TUN резолвим ВСЁ через туннель (он
+  // заведомо работает), а трафик по-прежнему пускаем мимо по route.rules.
+  // Российский сайт получит адрес от зарубежного DNS, но пойдёт к нему
+  // напрямую — а это ровно то, что нужно.
+  //
+  // Цена: geoip-ru может промахнуться, если зарубежный DNS отдаст не тот
+  // адрес, что видит местный резолвер. Доменное правило geosite-ru при этом
+  // работает как прежде, а промах по IP несравнимо дешевле, чем нынешнее
+  // «российские сайты не открываются вовсе».
+  if (geoSiteReady) {
+    (config["dns"]["rules"] as List).add({
+      "rule_set": [_rsGeositeRu.tag],
+      "server": directDnsTag,
+    });
+  }
+  // То же и для личного списка «напрямую»: без этого домен уходит мимо
+  // туннеля, а его DNS-запрос — через туннель. Смысл обхода теряется.
+  final userDirectDomains = (userDirect?['domain_suffix'] as List?)?.cast<String>();
+  if (userDirectDomains != null && userDirectDomains.isNotEmpty) {
+    (config["dns"]["rules"] as List).add({
+      "domain_suffix": userDirectDomains,
+      "server": directDnsTag,
+    });
+  }
+  // Сервисы, помеченные «напрямую», тоже резолвим настоящим DNS. При
+  // включённом FakeIP без этого они получили бы выдуманный адрес, и
+  // правило маршрутизации по IP до них не добралось бы.
+  final directServices = byAction['direct'];
+  if (directServices != null && directServices.isNotEmpty) {
+    (config["dns"]["rules"] as List).add({
+      "domain_suffix": directServices,
+      "server": directDnsTag,
+    });
+  }
+  // FakeIP — САМЫМ последним правилом, когда всё, что требует настоящего
+  // адреса, уже разобрано правилами выше.
+  // ОБЯЗАТЕЛЬНО выше правила FakeIP: иначе внутреннее имя доедет до него и
+  // получит адрес из 198.18.0.0/15, с которым соединение уже не отличить от
+  // обычного — и оно уедет в туннель.
+  //
+  // Отказываем САМИ, а не спрашиваем кого-то. Три варианта проверены
+  // запуском, и первые два оказались хуже болезни:
+  //
+  //  * системный резолвер (`{"type":"local"}`) даёт ПЕТЛЮ: под нашим же TUN
+  //    у адаптера SilaTUN прописан наш DNS (172.19.0.2) — система
+  //    спрашивает нас, мы спрашиваем систему. Имя так и возвращало FakeIP,
+  //    ровно как без правила;
+  //  * `dns-direct` под TUN не доезжает вообще (см. длинный комментарий
+  //    выше), а `dns-remote` отдаёт ТАЙМАУТ 10 СЕКУНД: публичные резолверы
+  //    имена вида `.local` не обслуживают — `.local` вдобавок закреплён за
+  //    mDNS (RFC 6762), и обычному DNS его разрешать запрещено. Замерено:
+  //    10 090 мс на `mail.contoso.local` через 8.8.8.8.
+  //
+  // Локальный отказ — 80 мс. Это и есть поведение БЕЗ VPN: там внутреннее
+  // имя получает NXDOMAIN мгновенно, и программа сразу переходит к
+  // следующему кандидату. С FakeIP она вместо отказа получала выдуманный
+  // адрес, уходила с ним в туннель и висела до таймаута — снаружи ровно
+  // «с включённым VPN почта не работает».
+  //
+  // Чего правило НЕ даёт: если машина в корпоративной сети, где `.local`
+  // разрешает внутренний сервер, мы его тоже не спросим. Для этого нужен
+  // DNS физического адаптера — отдельная задача.
+  (config["dns"]["rules"] as List).add({
+    "domain_suffix": kPrivateDomainSuffixes,
+    "action": "reject",
+    "method": "default",
+  });
+
+  // Срок жизни выдуманного адреса — 1 с, как у fake-ip в Clash. Сам sing-box
+  // отдаёт 600 с, а таблицу «адрес → домен» держит только в памяти ядра.
+  // После любого перезапуска ядра Windows ещё десять минут раздаёт старые
+  // адреса из своего кэша, а новое ядро о них не знает: в журнале «missing
+  // fakeip record», соединение рвётся (так и было 01.10.2026 после
+  // переподключения). Хуже того, новое ядро раздаёт адреса с начала
+  // диапазона заново, и старый адрес из кэша может уже означать другой
+  // сайт. Ответ FakeIP приходит из самого ядра мгновенно, так что короткий
+  // срок ничего не стоит.
+  if (st.dnsFakeIp) {
+    (config["dns"]["rules"] as List).add({
+      "query_type": ["A", "AAAA"],
+      "server": "dns-fake",
+      "rewrite_ttl": 1,
+    });
+  }
+
+  if (input.tunMode) {
+    // Стек сверяем с возможностями ядра. Конфиг с неподдерживаемым стеком
+    // не даёт предупреждения — он роняет ядро на старте, и приложение
+    // перестаёт подключаться вообще. Лучше молча взять рабочий и сказать
+    // об этом в лог, чем оставить человека без сети.
+    // `mixed` тоже требует gVisor — он использует его для UDP.
+    var tunStack = st.tunStack;
+    if ((tunStack == 'gvisor' || tunStack == 'mixed') && !input.gvisorSupported) {
+      warnings.add('log.tunStackFallback');
+      tunStack = 'system';
+    }
+    final androidExcluded = input.appRulesUsePaths
+        ? const <String>[]
+        : androidExcludedPackages(st.appRules, ruDirect: ruMode);
+    config["inbounds"] = [
+      {
+        "type": "tun",
+        "tag": "tun-in",
+        "interface_name": st.tunName,
+        // Без IPv6-адреса адаптер не перехватывает IPv6 вообще — такой
+        // трафик уходит напрямую мимо туннеля, и если IPv6 к конкретному
+        // сайту не работает (нередкая ситуация), браузер по Happy Eyeballs
+        // долго ждёт таймаута IPv6, прежде чем откатиться на IPv4 (который
+        // у нас через туннель отрабатывает нормально) — выглядит как
+        // "жуткий пинг"/зависание, хотя сам туннель ни при чём.
+        "address": [
+          st.tunIpv4,
+          if (st.tunIpv6Enabled) st.tunIpv6,
+        ],
+        "auto_route": true,
+        "strict_route": st.strictRoute,
+        "stack": tunStack,
+        "mtu": st.tunMtu,
+        // На Android «эта программа — напрямую» = программа ВНЕ VPN целиком,
+        // а не только правило маршрута. Иначе банк, Госуслуги, маркетплейс
+        // видят VPN всё равно: Android сообщает о нём любой программе
+        // (TRANSPORT_VPN у сети), куда бы ни шёл её трафик, — и отказываются
+        // работать. Так же делает экран «Per-app proxy» в Karing. Список
+        // уходит в SilaVpnService как excludePackage ->
+        // addDisallowedApplication. Правило package_name -> direct ниже
+        // остаётся: программе, которую система всё же пустит в туннель
+        // (например, пакет не найден), оно даст тот же маршрут.
+        // В режиме «РФ напрямую» сюда же сами попадают российские
+        // приложения — см. kRuDirectApps.
+        if (androidExcluded.isNotEmpty) "exclude_package": androidExcluded,
+      }
+    ];
+    // Свой xray.exe (мосты для xhttp-серверов) ходит до прокси-сервера как
+    // обычный процесс — и auto_route заворачивает его собственный коннект
+    // обратно в TUN. Если при этом активен как раз xhttp-сервер, sing-box по
+    // final:"proxy" отправляет этот коннект в socks-мост, то есть ОБРАТНО В
+    // ТОТ ЖЕ xray: получается петля, трафик ходит по кругу и наружу не
+    // выходит вообще (в UI это видно как "Отправлено" растёт, "Скачано" = 0,
+    // в браузере — ERR_CONNECTION_RESET). Своё ядро sing-box из туннеля
+    // исключает само (auto_detect_interface), но про чужой процесс не знает.
+    //
+    // Исключаем по ПУТИ процесса, а не по имени: под именем xray.exe у
+    // пользователя работает личный v2rayN, и уводить его трафик мимо VPN
+    // молча мы не вправе. Плюс страховка по IP самих серверов — на случай,
+    // если process-матчинг на Windows не отработает.
+    final bypassCidrs = input.bypassCidrs;
+    config["route"] = {
+      if (ruleSetDecls.isNotEmpty) "rule_set": ruleSetDecls,
+      "rules": [
+        // TUN отдаёт роутеру голый IP — без sniff доменные правила (geosite,
+        // реклама) применять просто не к чему, домен берётся из TLS SNI.
+        {"action": "sniff"},
+        // Перехват DNS: запросы приложений к любому серверу разворачиваются
+        // на наш. Без этого программы с зашитым DNS (а таких много) ходят
+        // мимо туннеля, и разделение трафика для них не работает вовсе.
+        if (st.dnsHijack) {"protocol": "dns", "action": "hijack-dns"},
+        // Вывод собственного моста Xray из туннеля — ТОЛЬКО на рабочем столе.
+        //
+        // Там мост это отдельный процесс `xray.exe`, и `auto_route`
+        // заворачивает в туннель трафик всех процессов машины, включая его.
+        // Его коннект до прокси-сервера уходил обратно в тот же туннель —
+        // замкнутый круг, наружу не выходило ничего.
+        //
+        // На Android правила быть не должно, и дело не в том, что путь к
+        // .exe там бессмыслен и просто никогда не совпадёт. Вред тоньше:
+        // САМО НАЛИЧИЕ правила по процессу заставляет роутер определять
+        // владельца КАЖДОГО соединения — то есть звать
+        // `findConnectionOwner` в нашей службе, который для неопознанных
+        // соединений честно бросает исключение. Туннель при этом поднят,
+        // а трафик не идёт.
+        //
+        // Петля здесь невозможна и без правила: мосты работают внутри
+        // нашего же процесса, а он исключён из туннеля целиком
+        // (`addDisallowedApplication` в openTun).
+        // Вместе с мостом Xray выводим и КОПИЮ ядра, которой работают
+        // пробники теста задержки (см. _probeCorePath). Без этого замер
+        // идёт через измеряемый же туннель и врёт втрое, а автовыбор потом
+        // рвёт живое соединение по выдуманным цифрам.
+        //
+        // Здесь именно путь копии, а не `_singBoxPath`: правило по пути не
+        // отличает копии одного файла, и указание рабочего ядра увело бы
+        // мимо туннеля ЕГО СОБСТВЕННЫЙ трафик — проверено, наружу тогда не
+        // выходит ничего.
+        if (input.coreRunsAsProcess)
+          {
+            "process_path": input.processPathsDirect,
+            "outbound": "direct",
+          },
+        if (bypassCidrs.isNotEmpty)
+          {
+            "ip_cidr": bypassCidrs,
+            // Только порты серверов, а не весь адрес — см. proxyPorts выше.
+            if (proxyPorts.isNotEmpty) "port": proxyPorts.toList()..sort(),
+            "outbound": "direct",
+          },
+        // QUIC (HTTP/3 у браузеров, YouTube) — отказ, и браузер тут же
+        // переходит на обычный HTTPS по TCP. Через туннель поверх TCP QUIC
+        // ведёт себя плохо: на сервере это выглядело как ~50 с почти нуля и
+        // потом рывок до 20 Мбит/с, а у человека — подвисающее видео; с
+        // выключенным в браузере QUIC подвисания пропали.
+        //
+        // По протоколу, а не «UDP на 443»: sniff выше распознаёт QUIC, и
+        // другой UDP на 443 (DTLS, чужие VPN внутри туннеля) не страдает.
+        // Строго ПОСЛЕ двух правил выше: наши мосты ходят к серверу xhttp
+        // и по HTTP/3, то есть тем же QUIC, и должны уйти напрямую раньше.
+        // reject, а не тишина: ответ «порт недоступен» переводит браузер на
+        // TCP сразу, молчание — только после таймаута.
+        if (st.blockQuic) {"protocol": "quic", "action": "reject"},
+        ...splitRules(),
+      ],
+      "final": "proxy",
+      "auto_detect_interface": true,
+      // Чем резолвить домены, встреченные в полях подключения (адрес
+      // сервера у outbound). Без этого ключа sing-box 1.12+ ругается
+      // депрекейтом, а начиная с 1.13.16 просто ОТКАЗЫВАЕТСЯ стартовать:
+      // «to continuing using this feature, set ENABLE_DEPRECATED_MISSING_
+      // DOMAIN_RESOLVER=true». Поймано при проверке кандидата на
+      // автообновление — с текущим ядром конфиг работал, а с новым падал.
+      //
+      // ИМЕННО системный резолвер, а не dns-direct и тем более не
+      // dns-remote. Этим ключом ядро узнаёт адрес самого прокси-сервера —
+      // то есть резолвит ДО того, как поднялся хоть какой-то туннель, по
+      // голому физическому каналу. Публичный адрес тут ставить нельзя: у
+      // провайдера он может быть закрыт, и тогда всё встаёт намертво —
+      // без резолва нет прокси, без прокси нет DNS. Поймано debug-логом:
+      //   dns: lookup failed for <хост сервера>: context deadline exceeded
+      // по 10 секунд и по кругу, при полностью исправном туннеле.
+      // dns-direct, а не системный резолвер: под TUN системный сам ходит
+      // через туннель. Резолвить тут по сути нечего — адреса серверов уже
+      // подставлены в конфиг (_bakeServerIps), — но ключ обязателен, без
+      // него свежие ядра не стартуют.
+      "default_domain_resolver": "dns-direct",
+    };
+  } else {
+    config["inbounds"] = [
+      {
+        "type": "mixed",
+        "tag": "mixed-in",
+        // 0.0.0.0 открывает прокси для других устройств в локальной сети —
+        // ровно то, что в Karing называется "разрешить доступ из локальной сети".
+        "listen": st.allowLan ? "0.0.0.0" : "127.0.0.1",
+        "listen_port": st.localPort,
+      }
+    ];
+    // Здесь sniff не нужен: домен приходит прямо в SOCKS/HTTP-запросе
+    // от браузера, ничего вынюхивать из TLS не требуется.
+    config["route"] = {
+      if (ruleSetDecls.isNotEmpty) "rule_set": ruleSetDecls,
+      "rules": splitRules(),
+      "final": "proxy",
+      // См. комментарий в TUN-ветке: без этого ключа свежие ядра не
+      // стартуют, а резолвить адрес прокси-сервера обязан системный
+      // резолвер — единственный, который работает на любой сети.
+      // dns-direct, а не системный резолвер: под TUN системный сам ходит
+      // через туннель. Резолвить тут по сути нечего — адреса серверов уже
+      // подставлены в конфиг (_bakeServerIps), — но ключ обязателен, без
+      // него свежие ядра не стартуют.
+      "default_domain_resolver": "dns-direct",
+    };
+  }
+
+  return (config: config, warnings: warnings);
 }

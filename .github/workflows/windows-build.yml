@@ -100,6 +100,12 @@ jobs:
           & .\sing-box.exe version | Select-Object -First 1
           & .\xray.exe version | Select-Object -First 1
 
+      # The tests include test/core_config_test.dart: the configs the app
+      # writes for each platform and mode go through `sing-box check` of the
+      # pinned sing-box above (it finds sing-box.exe in the repository root).
+      - name: Run the tests
+        run: flutter test
+
       - name: Install Inno Setup
         run: |
           $ErrorActionPreference = "Stop"
