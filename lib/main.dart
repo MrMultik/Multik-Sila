@@ -2864,6 +2864,8 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // ключ — тег outbound'а сервера; отсутствие ключа значит "ещё не тестировали",
   // null значит "протестировали, недоступен"
   final Map<String, int?> _latencyMs = {};
+  // Когда закончился последний полный (не отменённый) прогон теста задержки.
+  DateTime? _latencyMeasuredAt;
   bool _testingLatency = false;
 
   Process? _coreProcess; // sing-box
@@ -7320,14 +7322,20 @@ del "%~f0"
     // системный прокси больше никогда бы не включился.
     _stopRequested = false;
 
-    // Перед подключением выбираем самый быстрый сервер. Тест гоняем только
-    // если задержки ещё не измерены: гонять его на каждое нажатие — это
-    // лишние секунды ожидания там, где цифры уже есть.
+    // Перед подключением выбираем самый быстрый сервер. Тест гоняем, если
+    // задержки не измерены или цифрам больше двух минут. Раньше — только при
+    // пустых цифрах, и «Авто» подключался по замеру получасовой давности, а то
+    // и снятому под нагрузкой прошлого подключения. Сейчас, до подъёма
+    // туннеля, канал свободен — это и есть честный замер «как без VPN», а
+    // нажатия подряд в пределах двух минут лишних секунд не добавляют.
     // Сервер выбирает приложение только в режиме «Авто». Если человек указал
     // сервер сам, его выбор и есть ответ — перевыбирать нечего.
     if (_autoServerMode && _settings.autoSelectOnConnect && _servers.length > 1) {
       final measured = _servers.where((s) => _latencyMs.containsKey(s.outbound['tag'])).length;
-      if (measured < _servers.length) {
+      final measuredAt = _latencyMeasuredAt;
+      final stale = measuredAt == null ||
+          DateTime.now().difference(measuredAt) > const Duration(minutes: 2);
+      if (measured < _servers.length || stale) {
         _appendLog(t('log.autoSelectBeforeConnect'));
         await _testAllLatencies();
       }
@@ -7914,6 +7922,7 @@ del "%~f0"
       ]);
     }
 
+    if (!_cancelLatency) _latencyMeasuredAt = DateTime.now();
     if (mounted) setState(() => _testingLatency = false);
     if (_servers.length <= _latencyVerboseLimit) {
       final summary = _servers.map((s) {
@@ -8061,21 +8070,54 @@ del "%~f0"
       final tag = s.outbound['tag'] as String;
       final endpoint = _serverEndpoint(s);
       if (endpoint == null) return;
+      final InternetAddress address;
       try {
         // Имя разрешаем ДО секундомера: иначе первый замер включал поиск в
         // DNS и был в разы больше следующих.
-        final address = await _resolveForProbe(endpoint.$1);
-        final sw = Stopwatch()..start();
-        final socket = await Socket.connect(address, endpoint.$2,
-            sourceAddress: source, timeout: timeout);
-        sw.stop();
-        socket.destroy();
-        if (mounted) setState(() => _latencyMs[tag] = sw.elapsedMilliseconds);
+        address = await _resolveForProbe(endpoint.$1);
       } catch (e) {
         _noteLatencyFailure(s.name, e);
+        return;
       }
+      int? best;
+      for (var i = 0; i < _connectSamples && !_cancelLatency; i++) {
+        if (i > 0) await Future.delayed(const Duration(milliseconds: 100));
+        try {
+          final sw = Stopwatch()..start();
+          final socket = await Socket.connect(address, endpoint.$2,
+              sourceAddress: source, timeout: timeout);
+          sw.stop();
+          socket.destroy();
+          final ms = sw.elapsedMilliseconds;
+          if (best == null || ms < best) best = ms;
+        } catch (e) {
+          // Не ответил с первого раза — второй таймаут ждать незачем: на
+          // списке из мёртвых серверов это утроило бы весь тест. Сорвалась
+          // одна из следующих — сервер жив, цифра у нас уже есть.
+          if (best == null) {
+            _noteLatencyFailure(s.name, e);
+            return;
+          }
+        }
+      }
+      if (best != null && mounted) setState(() => _latencyMs[tag] = best);
     }, concurrency: _connectConcurrency);
   }
+
+  /// Рукопожатий на сервер в замере «до сервера»; в цифру идёт лучшее.
+  ///
+  /// Одно рукопожатие — лотерея. На канале пользователя 2026-10-01 рукопожатия
+  /// с одним и тем же сервером подряд давали 63, 222, 47, 129, 140 мс: по одной
+  /// пробе серверы менялись местами от прогона к прогону, и «Авто» выбирал
+  /// случайно. Лучшее из нескольких — это время самого пути без очередей на
+  /// нём (там же — 39 мс); оно и отличает близкий сервер от далёкого.
+  ///
+  /// Почему пять, а не три: всплески на том канале длились секундами, и три
+  /// пробы подряд иногда целиком попадали в один (лучшее из трёх — 85, 100,
+  /// 132 мс при пути в 39). Пауза между пробами — чтобы они не шли одной
+  /// пачкой. Рукопожатие ничего не весит, серверы меряются параллельно, так что
+  /// пять вместо одного — меньше секунды на весь список.
+  static const int _connectSamples = 5;
 
   /// Адрес сервера для пробы: литерал как есть, имя — через системный DNS.
   /// Заодно наполняет кэш, которым пользуется запекание адресов в конфиг.
