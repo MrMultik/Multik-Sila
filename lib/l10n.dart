@@ -408,6 +408,7 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Версии ядер, пути, обновления',
     'en': 'Core versions, paths, updates',
   },
+  'section.aboutHintMobile': {'ru': 'Версии и обновление', 'en': 'Versions and updates'},
   'about.app': {'ru': 'Приложение', 'en': 'Application'},
   'about.build': {'ru': 'Сборка', 'en': 'Build'},
   'stats.apiStatus': {
@@ -442,6 +443,7 @@ const Map<String, Map<String, String>> _strings = {
   },
   'section.updates': {'ru': 'Обновления', 'en': 'Updates'},
   'section.updatesHint': {'ru': 'Ядра и наборы правил', 'en': 'Cores and rule sets'},
+  'section.updatesHintMobile': {'ru': 'Приложение и наборы правил', 'en': 'The app and rule sets'},
   'section.misc': {'ru': 'Служебное', 'en': 'Advanced'},
   'section.miscHint': {'ru': 'Порт Clash API', 'en': 'Clash API port'},
 

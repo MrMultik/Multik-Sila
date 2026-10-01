@@ -4335,21 +4335,10 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   /// Качается мимо туннеля — приложение исключено из своего VPN, — то есть
   /// так же, как человек скачал бы файл сам.
   Future<String> _runApkUpdate(String version, String url) async {
-    final client = http.Client();
     try {
       _appendLog(tp('log.appDownloading', {'v': version}));
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(tp('log.appDownloading', {'v': version}))),
-        );
-      }
       final path = await AndroidVpn.updateApkPath();
-      final resp = await client
-          .send(http.Request('GET', Uri.parse(url)))
-          .timeout(const Duration(minutes: 1));
-      if (resp.statusCode != 200) throw 'HTTP ${resp.statusCode}';
-      await resp.stream.pipe(File(path).openWrite()).timeout(const Duration(minutes: 15));
-      final size = await File(path).length();
+      final size = await _downloadWithProgress(url, path, tp('log.appDownloading', {'v': version}));
       // Меньше мегабайта — не APK, а страница ошибки или обрывок.
       if (size < 1024 * 1024) throw '$size ${t('unit.b')}';
       _appendLog(tp('log.apkReady', {'v': version}));
@@ -4357,8 +4346,82 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     } catch (e) {
       _appendLog(tp('log.appUpdateFailed', {'e': e}));
       return '';
+    }
+  }
+
+  /// Качает файл потоком в [path] и всё это время держит окно с полосой
+  /// прогресса. Возвращает число скачанных байт; окно закрывается само, в
+  /// том числе при ошибке.
+  ///
+  /// Раньше APK (под сотню мегабайт) качался молча: мелькала строка внизу
+  /// экрана, и дальше минуту ничего не происходило — со стороны приложение
+  /// выглядело зависшим. Установщик Windows вдобавок шёл целиком в память.
+  ///
+  /// Таймаут — на ПАУЗУ в потоке (две минуты без единого байта), а не на всю
+  /// загрузку: на медленной линии честная загрузка может идти дольше любого
+  /// общего предела.
+  Future<int> _downloadWithProgress(String url, String path, String title) async {
+    final progress = ValueNotifier<(int, int?)>((0, null));
+    var dialogOpen = false;
+    if (mounted) {
+      dialogOpen = true;
+      unawaited(showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            title: Text(title),
+            content: ValueListenableBuilder<(int, int?)>(
+              valueListenable: progress,
+              builder: (_, v, _) {
+                final (got, total) = v;
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    LinearProgressIndicator(
+                        value: total != null && total > 0 ? got / total : null),
+                    const SizedBox(height: 12),
+                    Text(total != null && total > 0
+                        ? '${formatBytes(got)} / ${formatBytes(total)}'
+                        : formatBytes(got)),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      ).then((_) => dialogOpen = false));
+    }
+    final client = http.Client();
+    try {
+      final resp = await client
+          .send(http.Request('GET', Uri.parse(url)))
+          .timeout(const Duration(minutes: 1));
+      if (resp.statusCode != 200) throw 'HTTP ${resp.statusCode}';
+      final total = resp.contentLength;
+      final sink = File(path).openWrite();
+      var got = 0;
+      var shown = 0;
+      try {
+        await resp.stream.timeout(const Duration(minutes: 2)).forEach((chunk) {
+          sink.add(chunk);
+          got += chunk.length;
+          // Перерисовка на каждый кусок (их тысячи) ни к чему — раз в полмегабайта.
+          if (got - shown >= 512 * 1024) {
+            shown = got;
+            progress.value = (got, total);
+          }
+        });
+        progress.value = (got, total);
+      } finally {
+        await sink.close();
+      }
+      return got;
     } finally {
       client.close();
+      if (dialogOpen && mounted) Navigator.of(context, rootNavigator: true).pop();
     }
   }
 
@@ -4371,14 +4434,13 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   Future<bool> _runInstallerUpdate(String version, String url) async {
     try {
       _appendLog(tp('log.appDownloading', {'v': version}));
-      final resp = await http.get(Uri.parse(url)).timeout(const Duration(minutes: 10));
-      if (resp.statusCode != 200 || resp.bodyBytes.length < 1024 * 1024) {
-        _appendLog(tp('log.appUpdateFailed', {'e': 'HTTP ${resp.statusCode}'}));
-        return false;
-      }
       final path =
           '${Directory.systemTemp.path}${Platform.pathSeparator}MultikSila-$version-setup.exe';
-      await File(path).writeAsBytes(resp.bodyBytes, flush: true);
+      final size = await _downloadWithProgress(url, path, tp('log.appDownloading', {'v': version}));
+      if (size < 1024 * 1024) {
+        _appendLog(tp('log.appUpdateFailed', {'e': '$size ${t('unit.b')}'}));
+        return false;
+      }
       _appendLog(tp('log.appStaged', {'v': version}));
       await Process.start(
         path,
@@ -10618,8 +10680,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ..._sectionIcons.entries.map((e) => ListTile(
                 leading: Icon(e.value),
                 title: Text(t('section.${e.key}')),
-                subtitle:
-                    Text(t('section.${e.key}Hint'), style: const TextStyle(fontSize: 11)),
+                // На Android ядра обновляются вместе с приложением и путей к
+                // ним нет — подписи «ядра и наборы правил», «пути» там врут.
+                subtitle: Text(
+                    t(!Env.coresUpdateSeparately && const {'updates', 'about'}.contains(e.key)
+                        ? 'section.${e.key}HintMobile'
+                        : 'section.${e.key}Hint'),
+                    style: const TextStyle(fontSize: 11)),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => setState(() => _openSection = e.key),
               )),
