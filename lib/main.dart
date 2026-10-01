@@ -19,6 +19,7 @@ import 'legacy_data.dart';
 import 'onboarding.dart';
 import 'platform_env.dart';
 import 'prefs_keys.dart';
+import 'quic_probe.dart';
 import 'route_check.dart';
 import 'qr_import.dart';
 import 'system_proxy.dart';
@@ -8134,13 +8135,17 @@ del "%~f0"
     } else if (_settings.latencyMode == 'connect') {
       // Hysteria2 работает поверх QUIC, то есть по UDP: его порт TCP-соединения
       // не принимает вообще (проверено — connect к нему падает мгновенно, тогда
-      // как к VLESS проходит за 0.1 с). Такие серверы TCP-проверкой не измерить
-      // в принципе, поэтому для них поднимаем пробное ядро, как в сквозном режиме.
+      // как к VLESS проходит за 0.1 с). Их меряет проба QUIC за один круг (см.
+      // quic_probe.dart), а пробное ядро — только тех, кто на неё не ответил.
       final udpOnly = _servers.where((s) => _udpOnlyProtocols.contains(s.protocol)).toList();
       final tcpAble = _servers.where((s) => !_udpOnlyProtocols.contains(s.protocol)).toList();
       await Future.wait([
         if (tcpAble.isNotEmpty) _testLatenciesByConnect(tcpAble),
-        if (udpOnly.isNotEmpty) _testSingboxLatencies(udpOnly),
+        if (udpOnly.isNotEmpty)
+          () async {
+            final silent = await _testQuicLatencies(udpOnly);
+            if (silent.isNotEmpty) await _testSingboxLatencies(silent);
+          }(),
       ]);
     } else {
       final singboxServers = _servers.where((s) => s.engine == 'singbox').toList();
@@ -8236,9 +8241,68 @@ del "%~f0"
     final udpOnly =
         _servers.where((s) => _udpOnlyProtocols.contains(s.protocol)).toList();
     if (tcpAble.isNotEmpty) await _testLatenciesByConnect(tcpAble);
-    if (udpOnly.isNotEmpty) {
-      _appendLog(tp('log.latencyUdpSkipped', {'n': udpOnly.length}));
+    // Пробных ядер здесь нет, но проба QUIC их и не требует.
+    final silent = udpOnly.isEmpty ? const <ParsedServer>[] : await _testQuicLatencies(udpOnly);
+    if (silent.isNotEmpty) {
+      _appendLog(tp('log.latencyUdpSkipped', {'n': silent.length}));
     }
+  }
+
+  /// Hysteria2 и TUIC — одним кругом до сервера, как TCP-рукопожатие у
+  /// остальных (см. quic_probe.dart), лучшее из [_connectSamples].
+  /// Возвращает тех, кого так измерить не вышло: не ответили, не та
+  /// обфускация, не QUIC. Их — пробному ядру, как раньше.
+  ///
+  /// Потеря одного датаграмма — не смерть сервера (у TCP за неудачей стоит
+  /// таймаут, у UDP — просто пропавший пакет), поэтому сдаёмся после двух
+  /// промахов подряд без единого ответа.
+  Future<List<ParsedServer>> _testQuicLatencies(List<ParsedServer> servers) async {
+    InternetAddress? source;
+    if (_tunMode && _runningEngine != null && Env.coreRunsAsProcess) {
+      // Под своим TUN — мимо туннеля, как и TCP-проба. Адаптер не нашёлся —
+      // мерить через туннель бессмысленно, отдаём всех пробному ядру.
+      source = await _physicalSourceAddress(_servers);
+      if (source == null) return servers;
+    }
+    final silent = <ParsedServer>[];
+    await _runLimited(servers, (s) async {
+      final tag = s.outbound['tag'] as String;
+      final target = quicProbeTarget(s.outbound);
+      if (target == null) {
+        silent.add(s);
+        return;
+      }
+      final InternetAddress address;
+      try {
+        address = await _resolveForProbe(target.host);
+      } catch (_) {
+        silent.add(s);
+        return;
+      }
+      int? best;
+      var misses = 0;
+      for (var i = 0; i < _connectSamples && !_cancelLatency; i++) {
+        if (i > 0) await Future.delayed(const Duration(milliseconds: 100));
+        int? ms;
+        try {
+          ms = await quicRoundTrip(address, target.port,
+              salamander: target.salamander,
+              source: source,
+              timeout: const Duration(seconds: 2));
+        } catch (_) {}
+        if (ms == null) {
+          if (best == null && ++misses >= 2) break;
+          continue;
+        }
+        if (best == null || ms < best) best = ms;
+      }
+      if (best == null) {
+        silent.add(s);
+        return;
+      }
+      if (mounted) setState(() => _latencyMs[tag] = best);
+    }, concurrency: _connectConcurrency);
+    return silent;
   }
 
   // Хост и порт самого сервера. У sing-box-outbound лежат прямо в полях,
@@ -9762,12 +9826,20 @@ del "%~f0"
                     ),
                   ),
                   Expanded(
-                    child: Text(
-                      _hiddenUnavailable > 0
-                          ? tp('servers.hideDeadCount', {'n': _hiddenUnavailable})
-                          : t('servers.hideDead'),
-                      style: const TextStyle(fontSize: 12),
-                    ),
+                    child: Builder(builder: (_) {
+                      // Счётчик считает список, а надпись стоит НАД ним и
+                      // строится раньше — без пересчёта здесь она показывала
+                      // число с прошлой перерисовки. После теста задержки у
+                      // всех серверов уже были цифры, а под галкой оставалось
+                      // «скрыто: 1» — тот, чей ответ пришёл последним.
+                      _visibleServers();
+                      return Text(
+                        _hiddenUnavailable > 0
+                            ? tp('servers.hideDeadCount', {'n': _hiddenUnavailable})
+                            : t('servers.hideDead'),
+                        style: const TextStyle(fontSize: 12),
+                      );
+                    }),
                   ),
                 ],
               ),
