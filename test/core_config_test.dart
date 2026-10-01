@@ -174,9 +174,15 @@ void main() {
       expect(c['dns'].containsKey('independent_cache'), isFalse);
     });
 
-    test('Russian domains resolve through the tunnel on Windows TUN', () {
+    // Port 53 past the tunnel gets no answer under TUN on Windows; DNS over
+    // HTTPS does (see the comment at dns-ru in buildSingboxConfig).
+    test('Russian domains resolve over HTTPS to a Russian resolver, directly', () {
       final ru = _dnsRules(c).firstWhere((r) => (r['rule_set'] as List?)?.contains('geosite-ru') ?? false);
-      expect(ru['server'], 'dns-remote');
+      expect(ru['server'], 'dns-ru');
+      final server = (c['dns']['servers'] as List).firstWhere((s) => s['tag'] == 'dns-ru') as Map;
+      expect(server['type'], 'https');
+      expect(server.containsKey('detour'), isFalse);
+      expect((c['dns']['servers'] as List).where((s) => s['tag'] == 'dns-ru'), hasLength(1));
     });
 
     test('the TUN inbound has no package list on Windows', () {
@@ -241,9 +247,10 @@ void main() {
       expect(_rules(c).any((r) => r.containsKey('process_path')), isFalse);
     });
 
-    test('Russian domains resolve directly', () {
+    test('Russian domains resolve directly, with no DoH server added', () {
       final ru = _dnsRules(c).firstWhere((r) => (r['rule_set'] as List?)?.contains('geosite-ru') ?? false);
       expect(ru['server'], 'dns-direct');
+      expect((c['dns']['servers'] as List).any((s) => s['tag'] == 'dns-ru'), isFalse);
     });
 
     test('sing-box accepts it', () async {
