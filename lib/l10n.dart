@@ -685,7 +685,7 @@ const Map<String, Map<String, String>> _strings = {
   },
   'sub.keptSaved': {
     'ru': 'оставлен сохранённый список: серверов {count}, обновлён {when}',
-    'en': 'kept the saved list: {count} servers, updated {when}',
+    'en': 'kept the saved list (servers: {count}, updated {when})',
   },
   'sub.savedEarlier': {'ru': 'ранее', 'en': 'earlier'},
   'sub.loading': {'ru': 'Загружаю подписку', 'en': 'Loading subscription'},
