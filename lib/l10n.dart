@@ -218,6 +218,13 @@ const Map<String, Map<String, String>> _strings = {
   'profile.edit': {'ru': 'Изменить профиль', 'en': 'Edit profile'},
   'profile.refresh': {'ru': 'Обновить подписку', 'en': 'Refresh subscription'},
   'profile.delete': {'ru': 'Удалить профиль', 'en': 'Delete profile'},
+  'profile.deleteConfirm': {
+    'ru': 'Удалить профиль «{name}»? Его серверы и сохранённая копия подписки пропадут — '
+        'вернуть их можно, только добавив ссылку заново.',
+    'en': 'Delete the profile "{name}"? Its servers and the saved copy of the subscription '
+        'will be gone — the only way back is to add the link again.',
+  },
+  'profile.deleteYes': {'ru': 'Удалить', 'en': 'Delete'},
   'profile.addNone': {'ru': 'Добавь профиль подписки', 'en': 'Add a subscription profile'},
 
   // --- Маршрутизация ---

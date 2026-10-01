@@ -5710,6 +5710,22 @@ del "%~f0"
   Future<void> _deleteActiveProfile() async {
     final profile = _activeProfile;
     if (profile == null) return;
+    // Кнопка стоит в одном ряду с «обновить» и «QR», и раньше удаляла сразу,
+    // вместе с сохранённой копией подписки: одно промахнувшееся нажатие — и
+    // профиль с ключами пропал безвозвратно (так и случилось на эмуляторе
+    // 01.10.2026: ни вопроса, ни отмены).
+    final sure = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(t('profile.delete')),
+        content: Text(tp('profile.deleteConfirm', {'name': profile.name})),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(t('common.cancel'))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(t('profile.deleteYes'))),
+        ],
+      ),
+    );
+    if (sure != true || !mounted) return;
 
     _stopAllXrayBridges();
     setState(() {
