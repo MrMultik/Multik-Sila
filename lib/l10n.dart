@@ -307,6 +307,22 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'No update feed set — see Settings, “Updates”',
   },
   'app.upToDate': {'ru': 'Установлена последняя версия', 'en': 'You have the latest version'},
+  'app.checkFailed': {
+    'ru': 'Не удалось проверить обновления: {e}',
+    'en': 'Could not check for updates: {e}',
+  },
+  'app.checkGithubLimit': {
+    'ru': 'GitHub временно ограничил запросы с этого адреса (лимит 60 в час) — попробуйте позже',
+    'en': 'GitHub is limiting requests from this address for now (60 an hour) — try again later',
+  },
+  'app.checkNoAsset': {
+    'ru': 'в релизе {v} нет файла для этого устройства',
+    'en': 'release {v} has no file for this device',
+  },
+  'app.checkBadFeed': {
+    'ru': 'ссылка на обновления отдаёт не то, что ожидалось',
+    'en': 'the update feed does not answer with what was expected',
+  },
   'app.updateTitle': {'ru': 'Вышло обновление', 'en': 'An update is available'},
   'app.updateText': {
     'ru': 'Версия {v} (у вас {cur}). Приложение скачает её, закроется и '
@@ -1424,6 +1440,10 @@ const Map<String, Map<String, String>> _strings = {
   'log.appUpdateBad': {
     'ru': 'В скачанном архиве нет сборки приложения — обновление отменено',
     'en': 'The downloaded archive has no app build — the update was cancelled',
+  },
+  'log.appUpdateCheckFailed': {
+    'ru': 'Проверка обновления приложения не удалась: {e}',
+    'en': 'App update check failed: {e}',
   },
   'log.appUpdateFailed': {
     'ru': 'Не удалось обновить приложение: {e}',

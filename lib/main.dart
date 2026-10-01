@@ -3441,7 +3441,11 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       // Прав администратора он не требует, диалога о перезапуске тоже.
       _tunMode = Env.isAndroid ? true : (requested && admin);
     });
-    _appendLog(tp('log.adminState', {'admin': admin, 'tun': _tunMode}));
+    // На Android ни прав администратора, ни выбора TUN нет — строка там
+    // только сбивала с толку («Права администратора: false»).
+    if (!Env.isAndroid) {
+      _appendLog(tp('log.adminState', {'admin': admin, 'tun': _tunMode}));
+    }
     // Здесь, а не в initState: язык интерфейса известен только теперь.
     final migration = legacyDataMigration;
     if (migration != null) {
@@ -4098,7 +4102,18 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   /// приложения (см. _stageAppUpdate / _applyAppUpdateAndRestart). Запускать
   /// установщик из работающего приложения нельзя — он первым делом попросит
   /// это самое приложение закрыться.
+  /// Почему последняя проверка обновления не дала ответа; null — ответ был
+  /// (новая версия есть или её нет).
+  ///
+  /// Раньше любой сбой — 404 от фида, отказ GitHub, обрыв сети, релиз без
+  /// файла под этот процессор — превращался в «Установлена последняя
+  /// версия», и в журнале не оставалось ни строки. Так 01.10.2026 на эмуляторе
+  /// с 1.0.13 кнопка уверенно ответила «последняя», хотя на GitHub лежала
+  /// 1.0.15: адрес фида был испорчен, сервер отвечал 404.
+  String? _appUpdateError;
+
   Future<(String, String)?> _fetchAppUpdate() async {
+    _appUpdateError = null;
     final feed = _settings.updateFeedUrl.trim();
     if (feed.isEmpty) return null;
     try {
@@ -4107,7 +4122,14 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
         // GitHub без Accept отдаёт HTML-страницу вместо JSON.
         headers: const {'Accept': 'application/vnd.github+json'},
       ).timeout(const Duration(seconds: 20));
-      if (r.statusCode != 200) return null;
+      if (r.statusCode != 200) {
+        // 403 от GitHub без входа — почти всегда лимит: 60 запросов в час на
+        // адрес, а за VPN-сервером этот адрес общий у всех его клиентов.
+        _appUpdateError = r.statusCode == 403 && feed.contains('api.github.com')
+            ? t('app.checkGithubLimit')
+            : 'HTTP ${r.statusCode}';
+        return null;
+      }
       final j = jsonDecode(r.body) as Map<String, dynamic>;
 
       String version;
@@ -4156,17 +4178,28 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
               // установщика, обновиться всё же лучше, чем не обновиться.
               pick((n) => n.endsWith('.zip'));
         }
-        if (chosen == null) return null;
+        if (chosen == null) {
+          // Свою версию сравниваем и тут: в старом релизе файла под этот
+          // процессор может не быть, и это не повод для тревоги.
+          if (_compareVersions(version, kAppVersion) > 0) {
+            _appUpdateError = tp('app.checkNoAsset', {'v': version});
+          }
+          return null;
+        }
         url = '${chosen['browser_download_url'] ?? ''}'.trim();
       } else {
         version = '${j['version'] ?? ''}'.trim();
         url = '${j['url'] ?? ''}'.trim();
       }
 
-      if (version.isEmpty || url.isEmpty) return null;
+      if (version.isEmpty || url.isEmpty) {
+        _appUpdateError = t('app.checkBadFeed');
+        return null;
+      }
       if (_compareVersions(version, kAppVersion) <= 0) return null;
       return (version, url);
-    } catch (_) {
+    } catch (e) {
+      _appUpdateError = e is FormatException ? t('app.checkBadFeed') : '$e';
       return null;
     }
   }
@@ -4387,11 +4420,16 @@ del "%~f0"
     if (silent && !_settings.autoUpdateApp) return;
     final found = await _fetchAppUpdate();
     if (found == null) {
+      final error = _appUpdateError;
+      // В журнал — всегда, в том числе при тихой проверке на старте: иначе
+      // «обновление не пришло» не с чего разбирать.
+      if (error != null) _appendLog(tp('log.appUpdateCheckFailed', {'e': error}));
       if (!silent && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(t(_settings.updateFeedUrl.trim().isEmpty
-              ? 'app.noFeed'
-              : 'app.upToDate'))),
+          SnackBar(
+              content: Text(error != null
+                  ? tp('app.checkFailed', {'e': error})
+                  : t(_settings.updateFeedUrl.trim().isEmpty ? 'app.noFeed' : 'app.upToDate'))),
         );
       }
       return;
@@ -10038,8 +10076,22 @@ class _AboutBlockState extends State<_AboutBlock> {
   }
 
   Future<void> _load() async {
-    final sb = await _version('sing-box.exe');
-    final xr = await _version('xray.exe');
+    String? sb, xr;
+    if (Env.coreRunsAsProcess) {
+      sb = await _version('sing-box.exe');
+      xr = await _version('xray.exe');
+    } else {
+      // На Android ядра вкомпилированы в приложение: файлов нет, версии
+      // отдаёт сама библиотека. Без этого экран писал «версия не
+      // определяется» про ядра, которые на месте и работают, и советовал
+      // положить сборку рядом с приложением — на телефоне.
+      try {
+        final v = await AndroidVpn.coreVersions();
+        String? number(String s) => RegExp(r'\d+\.\d+\.\d+').firstMatch(s)?.group(0);
+        sb = number(v.singbox);
+        xr = number(v.xray);
+      } catch (_) {}
+    }
     if (!mounted) return;
     setState(() {
       _singBox = sb;
@@ -10074,31 +10126,36 @@ class _AboutBlockState extends State<_AboutBlock> {
         _row('Xray', _loading ? '…' : (_xray ?? unknown)),
         // Ядро без версии автообновление не трогает — сравнивать не с чем.
         // Молчать об этом нельзя: человек будет ждать обновлений, которых нет.
-        if (!_loading && (_singBox == null || _xray == null))
+        // На Android ядра обновляются вместе с приложением — там и подсказка,
+        // и папка (/system/bin — каталог самого Android), и кнопка проверки
+        // ядер ни к чему.
+        if (!_loading && Env.coresUpdateSeparately && (_singBox == null || _xray == null))
           Padding(
             padding: const EdgeInsets.only(top: 8),
             child: Text(t('about.unknownHint'),
                 style: const TextStyle(fontSize: 12, height: 1.35)),
           ),
         const Divider(height: 24),
-        _row(t('about.folder'), _dir),
+        if (Env.coreRunsAsProcess) _row(t('about.folder'), _dir),
         _row(t('about.logFile'), 'app_log.txt'),
         const SizedBox(height: 16),
-        OutlinedButton.icon(
-          icon: _checking
-              ? const SizedBox(
-                  width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-              : const Icon(Icons.system_update_alt, size: 18),
-          label: Text(t('about.checkCores')),
-          onPressed: _checking
-              ? null
-              : () async {
-                  setState(() => _checking = true);
-                  await widget.onCheckCores();
-                  if (mounted) setState(() => _checking = false);
-                },
-        ),
-        const SizedBox(height: 8),
+        if (Env.coresUpdateSeparately) ...[
+          OutlinedButton.icon(
+            icon: _checking
+                ? const SizedBox(
+                    width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.system_update_alt, size: 18),
+            label: Text(t('about.checkCores')),
+            onPressed: _checking
+                ? null
+                : () async {
+                    setState(() => _checking = true);
+                    await widget.onCheckCores();
+                    if (mounted) setState(() => _checking = false);
+                  },
+          ),
+          const SizedBox(height: 8),
+        ],
         OutlinedButton.icon(
           icon: const Icon(Icons.download_for_offline_outlined, size: 18),
           label: Text(t('about.checkApp')),
@@ -11151,15 +11208,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ],
           ],
           if (_openSection == 'updates') ...[
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(t('set.checkCores')),
-              subtitle: Text(
-                  t('hint.checkCores'),
-                  style: TextStyle(fontSize: 12)),
-              value: _checkCores,
-              onChanged: (v) => setState(() => _checkCores = v),
-            ),
+            // Ядра отдельно от приложения обновляются только на Windows. На
+            // Android они внутри APK, а оба переключателя объясняли про
+            // «Windows не даст перезаписать запущенный файл».
+            if (Env.coresUpdateSeparately)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(t('set.checkCores')),
+                subtitle: Text(
+                    t('hint.checkCores'),
+                    style: TextStyle(fontSize: 12)),
+                value: _checkCores,
+                onChanged: (v) => setState(() => _checkCores = v),
+              ),
             _field(_updateFeed, t('set.updateFeed'), hint: t('hint.updateFeed')),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -11170,14 +11231,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
               onChanged: (v) => setState(() => _autoUpdateApp = v),
             ),
             const Divider(height: 20),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text(t('set.autoUpdateCores')),
-              subtitle: Text(t('hint.autoUpdateCores'),
-                  style: const TextStyle(fontSize: 12)),
-              value: _autoUpdateCores,
-              onChanged: (v) => setState(() => _autoUpdateCores = v),
-            ),
+            if (Env.coresUpdateSeparately)
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(t('set.autoUpdateCores')),
+                subtitle: Text(t('hint.autoUpdateCores'),
+                    style: const TextStyle(fontSize: 12)),
+                value: _autoUpdateCores,
+                onChanged: (v) => setState(() => _autoUpdateCores = v),
+              ),
             _field(_ruleSetDays, t('set.ruleSetDays'),
                 hint: t('hint.ruleSetDays')),
             Padding(
