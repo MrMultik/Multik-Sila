@@ -13,6 +13,7 @@ import 'package:yaml/yaml.dart';
 import 'android_vpn.dart';
 import 'diagnostics.dart';
 import 'elevate.dart';
+import 'github_releases.dart';
 import 'l10n.dart';
 import 'legacy_data.dart';
 import 'onboarding.dart';
@@ -1230,7 +1231,10 @@ class AppSettings {
     // сгодится любой хостинг, отдающий JSON (см. _fetchAppUpdate — он
     // понимает и формат GitHub, и простой манифест `{version, url}`).
     this.updateFeedUrl =
-        'https://api.github.com/repos/MrMultik/Multik-Sila/releases/latest',
+        // Страница, а не API: у API лимит 60 запросов в час на адрес (см.
+        // github_releases.dart). Сохранённый у прежних установок адрес API
+        // распознаётся так же.
+        'https://github.com/MrMultik/Multik-Sila/releases/latest',
     this.autoUpdateApp = true,
     this.ruleSetRefreshDays = 1,
     this.geoSiteEnabled = true,
@@ -3874,7 +3878,13 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   /// `1.2.3`, всё с дефисом отбрасываем.
   ///
   /// Черновики пропускаем: их ассеты могут быть не выложены.
+  ///
+  /// Сначала — лента `releases.atom`, а не API: у API без входа 60 запросов в
+  /// час на адрес, и за VPN-сервером его делят все клиенты (см.
+  /// github_releases.dart). API остался запасным путём.
   Future<Map<String, dynamic>?> _latestRelease(String repo) async {
+    final viaAtom = await _latestReleaseFromAtom(repo);
+    if (viaAtom != null) return viaAtom;
     try {
       final r = await http
           .get(Uri.parse('https://api.github.com/repos/$repo/releases?per_page=20'))
@@ -3896,6 +3906,30 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
         }
       }
       return best;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// То же, что ждут от ответа API (`tag_name` и `assets`), но по ленте
+  /// релизов. Черновиков в ленте нет; файл ядра для Windows строится по
+  /// имени, которое его релиз использует всегда. Если файла по этому адресу
+  /// не окажется, скачивание просто не удастся — ядро останется прежним.
+  Future<Map<String, dynamic>?> _latestReleaseFromAtom(String repo) async {
+    try {
+      final r = await http
+          .get(Uri.parse('https://github.com/$repo/releases.atom'))
+          .timeout(const Duration(seconds: 20));
+      if (r.statusCode != 200) return null;
+      final tag = newestCleanTag(tagsFromReleasesAtom(r.body));
+      if (tag == null) return null;
+      final name = coreWindowsAssetName(repo, tag.replaceFirst(RegExp(r'^v'), ''));
+      return {
+        'tag_name': tag,
+        'assets': [
+          if (name != null) {'name': name, 'browser_download_url': githubAssetUrl(repo, tag, name)},
+        ],
+      };
     } catch (_) {
       return null;
     }
@@ -3930,16 +3964,7 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
 
   // Сравнение версий по числам, а не строкой: «26.7.28» строкой меньше
   // «26.3.27» ровно до первой различающейся цифры, и лексикографика тут врёт.
-  int _compareVersions(String a, String b) {
-    final pa = a.split('.').map((e) => int.tryParse(e) ?? 0).toList();
-    final pb = b.split('.').map((e) => int.tryParse(e) ?? 0).toList();
-    for (var i = 0; i < math.max(pa.length, pb.length); i++) {
-      final x = i < pa.length ? pa[i] : 0;
-      final y = i < pb.length ? pb[i] : 0;
-      if (x != y) return x.compareTo(y);
-    }
-    return 0;
-  }
+  int _compareVersions(String a, String b) => compareVersionNumbers(a, b);
 
   // Качает релиз, достаёт из архива один нужный .exe и кладёт рядом как
   // <файл>.new. Подменять работающий бинарь на ходу нельзя, поэтому замена
@@ -4087,6 +4112,56 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // что с ядрами (<файл>.new), только применение вынесено наружу.
   String get _stagingDir => '$_workDir${Platform.pathSeparator}update_staging';
 
+  /// Почему последняя проверка обновления не дала ответа; null — ответ был
+  /// (новая версия есть или её нет).
+  ///
+  /// Раньше любой сбой — 404 от фида, отказ GitHub, обрыв сети, релиз без
+  /// файла под этот процессор — превращался в «Установлена последняя
+  /// версия», и в журнале не оставалось ни строки. Так 01.10.2026 на эмуляторе
+  /// с 1.0.13 кнопка уверенно ответила «последняя», хотя на GitHub лежала
+  /// 1.0.15: адрес фида был испорчен, сервер отвечал 404.
+  String? _appUpdateError;
+
+  /// Обновление приложения по страницам GitHub, без API (см.
+  /// github_releases.dart): тег — из перенаправления `releases/latest`, файл —
+  /// по имени, которое ему всегда даёт tools/release.ps1, с проверкой, что он
+  /// на месте. `answered: false` — страница ответила не так, как ожидалось;
+  /// тогда пробуем API.
+  Future<({bool answered, (String, String)? update})> _appUpdateViaGithubPages(
+      String repo) async {
+    const noAnswer = (answered: false, update: null);
+    final client = http.Client();
+    try {
+      final req = http.Request('GET', Uri.parse('https://github.com/$repo/releases/latest'))
+        ..followRedirects = false;
+      final res = await client.send(req).timeout(const Duration(seconds: 20));
+      await res.stream.drain<void>();
+      final tag = tagFromReleaseLocation(res.headers['location']);
+      if (tag == null) return noAnswer;
+      final version = tag.replaceFirst(RegExp(r'^v'), '');
+      if (_compareVersions(version, kAppVersion) <= 0) return (answered: true, update: null);
+
+      final names = Env.isAndroid
+          // Процессоры — от родного к совместимым, как и в разборе ответа API.
+          ? [for (final abi in await AndroidVpn.supportedAbis()) appApkName(version, abi.toLowerCase())]
+          // Установщик, а zip — запасной путь (см. _fetchAppUpdate).
+          : [appSetupName(version), appZipName(version)];
+      for (final name in names) {
+        final url = githubAssetUrl(repo, tag, name);
+        final head = http.Request('HEAD', Uri.parse(url))..followRedirects = false;
+        final r = await client.send(head).timeout(const Duration(seconds: 20));
+        await r.stream.drain<void>();
+        if (r.statusCode >= 200 && r.statusCode < 400) return (answered: true, update: (version, url));
+      }
+      _appUpdateError = tp('app.checkNoAsset', {'v': version});
+      return (answered: true, update: null);
+    } catch (_) {
+      return noAnswer;
+    } finally {
+      client.close();
+    }
+  }
+
   /// Забирает манифест и возвращает (версия, ссылка на zip), если там что-то
   /// новее установленного.
   ///
@@ -4102,23 +4177,22 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   /// приложения (см. _stageAppUpdate / _applyAppUpdateAndRestart). Запускать
   /// установщик из работающего приложения нельзя — он первым делом попросит
   /// это самое приложение закрыться.
-  /// Почему последняя проверка обновления не дала ответа; null — ответ был
-  /// (новая версия есть или её нет).
   ///
-  /// Раньше любой сбой — 404 от фида, отказ GitHub, обрыв сети, релиз без
-  /// файла под этот процессор — превращался в «Установлена последняя
-  /// версия», и в журнале не оставалось ни строки. Так 01.10.2026 на эмуляторе
-  /// с 1.0.13 кнопка уверенно ответила «последняя», хотя на GitHub лежала
-  /// 1.0.15: адрес фида был испорчен, сервер отвечал 404.
-  String? _appUpdateError;
-
+  /// Фид на GitHub сначала спрашивается страницами, без API (см.
+  /// _appUpdateViaGithubPages); API — только если страница не ответила.
   Future<(String, String)?> _fetchAppUpdate() async {
     _appUpdateError = null;
     final feed = _settings.updateFeedUrl.trim();
     if (feed.isEmpty) return null;
+    final repo = githubRepoOfFeed(feed);
+    if (repo != null) {
+      final viaPages = await _appUpdateViaGithubPages(repo);
+      if (viaPages.answered) return viaPages.update;
+    }
     try {
       final r = await http.get(
-        Uri.parse(feed),
+        // Фид GitHub в любой записи — запасным путём через API.
+        Uri.parse(repo != null ? 'https://api.github.com/repos/$repo/releases/latest' : feed),
         // GitHub без Accept отдаёт HTML-страницу вместо JSON.
         headers: const {'Accept': 'application/vnd.github+json'},
       ).timeout(const Duration(seconds: 20));
