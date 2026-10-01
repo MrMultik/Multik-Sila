@@ -1596,6 +1596,13 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Проверка сервера «{name}» не прошла (подряд: {n})',
     'en': 'Health check failed for "{name}" (in a row: {n})',
   },
+  'log.awgSharedKeyHint': {
+    'ru': 'AmneziaWG: если этот же конфиг включён ещё на одном устройстве, они отбивают сервер '
+        'друг у друга и связь то есть, то нет. Каждому устройству нужен свой клиент в панели.',
+    'en': 'AmneziaWG: if the same config is also active on another device, the two take the server '
+        'from each other and the connection comes and goes. Each device needs its own client '
+        'in the panel.',
+  },
   'log.healthRestart': {
     'ru': 'Связи нет несколько проверок подряд — перезапускаю ядро',
     'en': 'No connectivity for several checks in a row — restarting the core',

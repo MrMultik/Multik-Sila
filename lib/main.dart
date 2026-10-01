@@ -3119,6 +3119,8 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   Process? _awgBridgeProcess;
   // Серверы, которые awg-bridge не принял (битый ключ, пересекающиеся H1–H4).
   final Set<String> _awgRejected = {};
+  // Серверы AWG, по которым подсказка про общий конфиг уже была в журнале.
+  final Set<String> _awgSharedKeyHinted = {};
   // Серверы, которые Xray отказался принимать (см. xrayConfigRejection):
   // в общем мосте их нет, и выбрать их нельзя.
   final Set<String> _xrayRejected = {};
@@ -8197,11 +8199,25 @@ del "%~f0"
   // Порты пробного моста AmneziaWG (у Xray — 17400+).
   static const int _awgProbeBasePort = 17700;
 
-  /// Замер серверов AmneziaWG: отдельный пробный `awg-bridge` на служебных
-  /// портах, рабочий мост не трогается. Порт моста принимает и HTTP-прокси,
-  /// поэтому меряет тот же код, что и серверы Xray. В первый запрос входит
-  /// рукопожатие туннеля — оно и есть «подключение» у этого протокола.
+  /// Замер серверов AmneziaWG. Порт моста принимает и HTTP-прокси, поэтому
+  /// меряет тот же код, что и серверы Xray. В первый запрос входит рукопожатие
+  /// туннеля — оно и есть «подключение» у этого протокола.
+  ///
+  /// Пока работает основной мост — только через него. Пробный мост с теми же
+  /// ключами — это второй клиент того же пира, а сервер WireGuard отвечает
+  /// тому, кто последним прошёл рукопожатие: рабочий туннель глохнет, пока сам
+  /// не переподключится (~15 с). В 1.0.14 так каждый тест задержки и обрывал
+  /// соединение через AWG. Отдельный пробный мост — только без подключения.
   Future<void> _testAwgLatencies(List<ParsedServer> servers) async {
+    if (_awgBridgeProcess != null) {
+      final live = servers.where((s) => !_awgRejected.contains(s.outbound['tag'])).toList();
+      await _runLimited(live, (s) async {
+        final tag = s.outbound['tag'] as String;
+        final elapsed = await _measureViaHttpProxy(_bridgePortFor(tag), s.name);
+        if (elapsed != null && mounted) setState(() => _latencyMs[tag] = elapsed);
+      });
+      return;
+    }
     if (!File(_awgBridgePath).existsSync()) {
       _appendLog(t('log.awgBridgeMissing'));
       return;
@@ -9224,6 +9240,16 @@ del "%~f0"
       'name': _selectedServer?.name ?? '-',
       'n': _healthFails,
     }));
+    // Один конфиг WireGuard на двух устройствах — два клиента одного пира:
+    // сервер отвечает тому, кто последним прошёл рукопожатие, и оба то
+    // работают, то глохнут. Снаружи это неотличимо от плохого сервера, а
+    // лечится только в панели. Разобрано 2026-10-01 на живом сервере.
+    final failing = _selectedServer;
+    if (failing != null &&
+        failing.engine == 'awg' &&
+        _awgSharedKeyHinted.add(failing.outbound['tag'] as String)) {
+      _appendLog(t('log.awgSharedKeyHint'));
+    }
     // Строка под щитом обязана говорить то же, что проверка. Раньше провал
     // уходил только в лог, и под мёртвым сервером оставалось зелёное
     // «трафик проходит» от прошлой удачной проверки.
