@@ -685,7 +685,7 @@ const Map<String, Map<String, String>> _strings = {
   },
   'sub.keptSaved': {
     'ru': 'оставлен сохранённый список: серверов {count}, обновлён {when}',
-    'en': 'kept the saved list (servers: {count}, updated {when})',
+    'en': 'kept the saved list: {count} servers, updated {when}',
   },
   'sub.savedEarlier': {'ru': 'ранее', 'en': 'earlier'},
   'sub.loading': {'ru': 'Загружаю подписку', 'en': 'Loading subscription'},
@@ -1188,13 +1188,11 @@ const Map<String, Map<String, String>> _strings = {
   'sub.formatLinks': {'ru': 'список ссылок', 'en': 'link list'},
   'sub.unknownFormat': {
     'ru': 'Формат подписки не распознан. Понимаем: список ссылок '
-        '(vless, vmess, trojan, hysteria2, ss, vpn:// от AmneziaWG), Clash YAML, '
-        'конфиги sing-box и Xray, файл .conf AmneziaWG. '
+        '(vless, vmess, trojan, hysteria2, ss), Clash YAML, конфиги sing-box и Xray. '
         'Формат выбирает панель по User-Agent — его можно сменить в '
         'настройках профиля.',
     'en': 'Subscription format not recognised. Supported: a link list '
-        '(vless, vmess, trojan, hysteria2, ss, AmneziaWG vpn://), Clash YAML, '
-        'sing-box and Xray configs, an AmneziaWG .conf file. '
+        '(vless, vmess, trojan, hysteria2, ss), Clash YAML, sing-box and Xray configs. '
         'The panel picks the format by the User-Agent, which you can change '
         'in the profile settings.',
   },
@@ -1596,13 +1594,6 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Проверка сервера «{name}» не прошла (подряд: {n})',
     'en': 'Health check failed for "{name}" (in a row: {n})',
   },
-  'log.awgSharedKeyHint': {
-    'ru': 'AmneziaWG: если этот же конфиг включён ещё на одном устройстве, они отбивают сервер '
-        'друг у друга и связь то есть, то нет. Каждому устройству нужен свой клиент в панели.',
-    'en': 'AmneziaWG: if the same config is also active on another device, the two take the server '
-        'from each other and the connection comes and goes. Each device needs its own client '
-        'in the panel.',
-  },
   'log.healthRestart': {
     'ru': 'Связи нет несколько проверок подряд — перезапускаю ядро',
     'en': 'No connectivity for several checks in a row — restarting the core',
@@ -1766,40 +1757,8 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'Start: server={name}, engine={engine}, tag={tag}, TUN={tun}, admin={admin}',
   },
   'log.bridgesStarting': {
-    'ru': 'Поднимаю мосты для серверов xhttp, REALITY и AmneziaWG...',
-    'en': 'Starting bridges for xhttp, REALITY and AmneziaWG servers...',
-  },
-  'log.awgBridgesReady': {
-    'ru': 'Мост AmneziaWG готов: серверов — {n}',
-    'en': 'The AmneziaWG bridge is ready: {n} servers',
-  },
-  'log.awgBridgeNotReady': {
-    'ru': 'Мост AmneziaWG не поднялся за 5 с (порт {port}) — возможны сбои первого соединения',
-    'en': 'The AmneziaWG bridge did not come up within 5 s (port {port}) — the first connection may fail',
-  },
-  'log.awgBridgeRestart': {
-    'ru': 'Мост AmneziaWG не отвечает на порту {port} — поднимаю заново',
-    'en': 'The AmneziaWG bridge is not answering on port {port} — restarting it',
-  },
-  'log.awgBridgeDied': {
-    'ru': 'Мост AmneziaWG завершился (код {code})',
-    'en': 'The AmneziaWG bridge exited (code {code})',
-  },
-  'log.awgBridgeMissing': {
-    'ru': 'Нет файла awg-bridge.exe рядом с приложением — серверы AmneziaWG работать не будут. Переустановите приложение.',
-    'en': 'awg-bridge.exe is missing next to the app — AmneziaWG servers will not work. Reinstall the app.',
-  },
-  'log.awgBridgeFailed': {
-    'ru': 'Мост AmneziaWG не запустился: {e}',
-    'en': 'The AmneziaWG bridge failed to start: {e}',
-  },
-  'log.awgRejected': {
-    'ru': 'Сервер «{name}» пропущен — AmneziaWG его не принимает: {reason}',
-    'en': 'Server "{name}" skipped — AmneziaWG does not accept it: {reason}',
-  },
-  'log.awgRejectedPick': {
-    'ru': 'Сервер «{name}» не поднимется: мост AmneziaWG отверг его конфиг (причина — выше в журнале)',
-    'en': 'Server "{name}" will not come up: the AmneziaWG bridge rejected its config (the reason is above in the log)',
+    'ru': 'Поднимаю мосты Xray для серверов xhttp и REALITY...',
+    'en': 'Starting Xray bridges for xhttp and REALITY servers...',
   },
   'log.noSingboxServers': {
     'ru': 'В этом профиле нет серверов для sing-box (все идут через Xray)',

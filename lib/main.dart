@@ -2073,241 +2073,6 @@ ParsedServer? parseShadowsocks(String line) {
   }
 }
 
-/// Строки маскировки AmneziaWG в секции [Interface] (в нижнем регистре).
-/// Jc…I5 — версии 1.x–2.0, остальное добавила 3.x. Список тот же, что знает
-/// мост (`awgbridge/bridge/config.go`): незнакомый ключ он отвергает.
-const Set<String> kAwgParamKeys = {
-  'jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'h1', 'h2', 'h3', 'h4',
-  'i1', 'i2', 'i3', 'i4', 'i5',
-  'headerprotectionkey', 'contentpaddingaddition', 'rekeyaftertime',
-  'rekeytimeout', 'rejectaftertime', 'keepalivetimeout',
-  'maxhandshakeattempts', 'randomtrailers', 'disablecookies',
-};
-
-// Строки [Interface], которые к туннелю через мост отношения не имеют: это
-// команды wg-quick про системный адаптер, а адаптера у нас нет.
-const Set<String> _wgQuickOnlyKeys = {
-  'listenport', 'table', 'preup', 'postup', 'predown', 'postdown',
-  'saveconfig', 'fwmark',
-};
-
-// Приманки AmneziaWG 1.5, которых в движке 3.1 уже нет. Они чисто клиентские
-// (сервер их не ждёт), так что конфиг с ними подключается и без них.
-const Set<String> _awgDroppedKeys = {'j1', 'j2', 'j3', 'itime'};
-
-/// Похоже ли содержимое на конфиг WireGuard / AmneziaWG (`.conf`).
-bool looksLikeWireGuardConf(String raw) =>
-    RegExp(r'^\s*\[Interface\]\s*$', multiLine: true, caseSensitive: false).hasMatch(raw);
-
-/// Клиентский `.conf` AmneziaWG (или обычного WireGuard) — в сервер, который
-/// поднимает мост `awg-bridge`.
-///
-/// Формат — как у wg-quick: секции `[Interface]` и `[Peer]`, строки
-/// `Ключ = Значение`. 3x-ui кладёт имя клиента комментарием перед `[Peer]`.
-/// Строки маскировки уходят в `params` КАК ЕСТЬ, не разобранные: числа,
-/// диапазоны и описания пакетов проверяет сам движок, и второй разбор здесь
-/// только добавил бы место, где можно разойтись с его правилами.
-///
-/// outbound — не outbound sing-box и не Xray, а запись конфига моста (см.
-/// `bridge.Server` в awgbridge): приложение добавляет к ней тег и порт.
-ParsedServer? parseAmneziaConf(String text, {String? name}) {
-  final interface = <String, String>{};
-  final peer = <String, String>{};
-  final params = <String, String>{};
-  String? comment;
-  Map<String, String>? section;
-  var peers = 0;
-
-  for (final rawLine in text.split('\n')) {
-    final line = rawLine.trim();
-    if (line.isEmpty) continue;
-    if (line.startsWith('#') || line.startsWith(';')) {
-      final c = line.substring(1).trim();
-      if (comment == null && c.isNotEmpty) comment = c;
-      continue;
-    }
-    if (line.startsWith('[')) {
-      final title = line.toLowerCase();
-      if (title == '[interface]') {
-        section = interface;
-      } else if (title == '[peer]') {
-        // Клиентский конфиг — это один сервер. Второй узел означал бы
-        // сетку из нескольких серверов, которой мост не умеет.
-        if (++peers > 1) return null;
-        section = peer;
-      } else {
-        section = null;
-      }
-      continue;
-    }
-    final eq = line.indexOf('=');
-    if (section == null || eq <= 0) continue;
-    final key = line.substring(0, eq).trim();
-    // Значение — всё после ПЕРВОГО знака равенства: ключи в base64
-    // сами заканчиваются на «=».
-    final value = line.substring(eq + 1).trim();
-    final lower = key.toLowerCase();
-
-    if (identical(section, peer)) {
-      peer[lower] = value;
-    } else if (kAwgParamKeys.contains(lower)) {
-      if (value.isNotEmpty) params[key] = value;
-    } else if (_wgQuickOnlyKeys.contains(lower) || _awgDroppedKeys.contains(lower)) {
-      continue;
-    } else if (const {'privatekey', 'address', 'dns', 'mtu'}.contains(lower)) {
-      interface[lower] = value;
-    } else {
-      // Незнакомая строка маскировки (версия новее нашей). Отдаём мосту:
-      // он откажет и назовёт ключ — это лучше, чем молча не подключиться.
-      if (value.isNotEmpty) params[key] = value;
-    }
-  }
-
-  List<String> list(String? v) =>
-      (v ?? '').split(',').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
-
-  final privateKey = interface['privatekey'] ?? '';
-  final publicKey = peer['publickey'] ?? '';
-  final endpoint = peer['endpoint'] ?? '';
-  final addresses = list(interface['address']);
-  if (privateKey.isEmpty || publicKey.isEmpty || endpoint.isEmpty || addresses.isEmpty) {
-    return null;
-  }
-
-  // Без единой строки маскировки это обычный WireGuard: тот же движок
-  // поднимает его точно так же.
-  final protocol = params.isEmpty ? 'wireguard' : 'amneziawg';
-  final allowed = list(peer['allowedips']);
-  return ParsedServer(
-    name: name ?? comment ?? '${protocol == 'wireguard' ? 'WireGuard' : 'AmneziaWG'} $endpoint',
-    protocol: protocol,
-    engine: 'awg',
-    outbound: {
-      "protocol": protocol,
-      "tag": "proxy",
-      "private_key": privateKey,
-      "addresses": addresses,
-      if (list(interface['dns']).isNotEmpty) "dns": list(interface['dns']),
-      if (_asInt(interface['mtu']) != null) "mtu": _asInt(interface['mtu']),
-      "public_key": publicKey,
-      if ((peer['presharedkey'] ?? '').isNotEmpty) "preshared_key": peer['presharedkey'],
-      "endpoint": endpoint,
-      if ((_asInt(peer['persistentkeepalive']) ?? 0) > 0)
-        "keepalive": _asInt(peer['persistentkeepalive']),
-      if (allowed.isNotEmpty) "allowed_ips": allowed,
-      if (params.isNotEmpty) "params": params,
-    },
-  );
-}
-
-/// Ссылка `vpn://…` приложения AmneziaVPN.
-///
-/// Живёт в двух видах. 3x-ui кладёт в подписку `vpn://` + base64url от
-/// обычного текста `.conf`. Само приложение Amnezia делится ключом, где под
-/// base64url лежит сжатый JSON (qCompress из Qt: четыре байта длины, дальше
-/// zlib), а текст конфига спрятан в `containers[].awg.last_config.config`.
-/// Ключи подписок Amnezia Free/Premium конфига не содержат вовсе (там
-/// обращение к их серверу) — такие не читаем.
-ParsedServer? parseVpnLink(String line) {
-  if (!line.startsWith('vpn://')) return null;
-  try {
-    var payload = line.substring('vpn://'.length).trim();
-    final hash = payload.indexOf('#');
-    String? name;
-    if (hash >= 0) {
-      name = Uri.decodeComponent(payload.substring(hash + 1));
-      payload = payload.substring(0, hash);
-    }
-    var b64 = payload.replaceAll('-', '+').replaceAll('_', '/');
-    while (b64.length % 4 != 0) {
-      b64 += '=';
-    }
-    final bytes = base64.decode(b64);
-
-    final plain = utf8.decode(bytes, allowMalformed: true);
-    if (looksLikeWireGuardConf(plain)) {
-      return parseAmneziaConf(plain, name: (name?.isNotEmpty ?? false) ? name : null);
-    }
-
-    if (bytes.length <= 4) return null;
-    final json = jsonDecode(utf8.decode(zlib.decode(bytes.sublist(4))));
-    if (json is! Map) return null;
-    final description = '${json['description'] ?? ''}'.trim();
-    for (final c in (json['containers'] as List? ?? const [])) {
-      if (c is! Map) continue;
-      final awg = c['awg'] ?? c['wireguard'];
-      if (awg is! Map) continue;
-      final last = awg['last_config'];
-      final lastConfig = last is String ? jsonDecode(last) : last;
-      final conf = lastConfig is Map ? '${lastConfig['config'] ?? ''}' : '';
-      if (!looksLikeWireGuardConf(conf)) continue;
-      return parseAmneziaConf(conf,
-          name: (name?.isNotEmpty ?? false)
-              ? name
-              : (description.isNotEmpty ? description : null));
-    }
-    return null;
-  } catch (e) {
-    return null;
-  }
-}
-
-/// Идёт ли сервер через мост. sing-box сам поднимает только свои
-/// протоколы; xhttp и REALITY держит Xray, AmneziaWG — awg-bridge, и в конфиге
-/// sing-box такие серверы стоят socks-outbound-ом на порт моста.
-bool isBridgedServer(ParsedServer s) => s.engine != 'singbox';
-
-/// Хост и порт сервера AmneziaWG из строки `Endpoint` (`host:port`,
-/// `[v6]:port`).
-(String, int)? awgEndpoint(Map<String, dynamic> outbound) {
-  final e = '${outbound['endpoint'] ?? ''}'.trim();
-  final colon = e.lastIndexOf(':');
-  if (colon <= 0) return null;
-  final port = int.tryParse(e.substring(colon + 1));
-  var host = e.substring(0, colon);
-  if (host.startsWith('[') && host.endsWith(']')) host = host.substring(1, host.length - 1);
-  if (port == null || port <= 0 || port > 65535 || host.isEmpty) return null;
-  return (host, port);
-}
-
-/// Конфиг для `awg-bridge`: серверы AmneziaWG с портами на петле.
-///
-/// [resolved] — уже разрешённые адреса серверов (имя -> IP). Под своим TUN
-/// мост не должен разрешать имя сам: запрос ушёл бы в туннель, которого ещё
-/// нет, — та же петля, из-за которой адреса запекаются в конфиг sing-box.
-Map<String, dynamic> buildAwgBridgeConfig(
-  List<ParsedServer> servers, {
-  required int Function(String tag) portOf,
-  Map<String, String?> resolved = const {},
-}) =>
-    {
-      "servers": [
-        for (final s in servers)
-          () {
-            final o = Map<String, dynamic>.from(s.outbound)..remove('protocol');
-            o['listen'] = '127.0.0.1:${portOf(o['tag'] as String)}';
-            final endpoint = awgEndpoint(s.outbound);
-            final ip = endpoint == null ? null : resolved[endpoint.$1];
-            if (endpoint != null && ip != null) {
-              o['endpoint'] = ip.contains(':') ? '[$ip]:${endpoint.$2}' : '$ip:${endpoint.$2}';
-            }
-            return o;
-          }(),
-      ],
-    };
-
-/// Отказ `awg-bridge` из-за конкретного сервера: «server <тег>: причина».
-({String tag, String reason})? awgBridgeRejection(String output) {
-  final m = RegExp(r'server (\S+): (.*)').firstMatch(output);
-  if (m == null) return null;
-  return (tag: m.group(1)!, reason: m.group(2)!.trim());
-}
-
-/// Убирает сервер из конфига моста AmneziaWG.
-void dropFromAwgConfig(Map<String, dynamic> config, String tag) {
-  (config['servers'] as List).removeWhere((s) => s is Map && s['tag'] == tag);
-}
-
 /// Блок TLS из полей Clash-записи. `force` — для протоколов, у которых TLS
 /// не опция, а часть протокола (trojan, hysteria2, tuic): у них ключа `tls`
 /// в YAML обычно нет вовсе.
@@ -3115,12 +2880,6 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // все порты готовы за 0,3 с). На Android — 89 экземпляров Xray внутри
   // приложения. Karing такие подписки держит, мы — падали.
   Process? _xrayBridgeProcess;
-  // Мост AmneziaWG — тоже один процесс на все такие серверы (awg-bridge).
-  Process? _awgBridgeProcess;
-  // Серверы, которые awg-bridge не принял (битый ключ, пересекающиеся H1–H4).
-  final Set<String> _awgRejected = {};
-  // Серверы AWG, по которым подсказка про общий конфиг уже была в журнале.
-  final Set<String> _awgSharedKeyHinted = {};
   // Серверы, которые Xray отказался принимать (см. xrayConfigRejection):
   // в общем мосте их нет, и выбрать их нельзя.
   final Set<String> _xrayRejected = {};
@@ -5171,18 +4930,7 @@ del "%~f0"
     String Function() format;
 
     final head = decoded.trimLeft();
-    if (looksLikeWireGuardConf(decoded)) {
-      // Раньше JSON: `.conf` тоже начинается с «[» (`[Interface]`) и в ветке
-      // ниже дал бы ноль серверов.
-      final server = parseAmneziaConf(decoded);
-      if (server != null) {
-        // Ссылка того же вида, что кладёт в подписку 3x-ui: с ней сервер из
-        // файла .conf можно показать QR-кодом и перенести на телефон.
-        server.link = 'vpn://${base64Url.encode(utf8.encode(decoded.trim())).replaceAll('=', '')}';
-        parsed.add(server);
-      }
-      format = () => 'AmneziaWG .conf';
-    } else if (head.startsWith('{') || head.startsWith('[')) {
+    if (head.startsWith('{') || head.startsWith('[')) {
       // Xray и sing-box различаются ключом outbound-а (`protocol` против
       // `type`), так что первый разбор на чужом формате просто даст ноль.
       final xray = parseXrayJson(decoded);
@@ -5212,8 +4960,7 @@ del "%~f0"
             parseVmess(line) ??
             parseTrojan(line) ??
             parseHysteria2(line) ??
-            parseShadowsocks(line) ??
-            parseVpnLink(line);
+            parseShadowsocks(line);
         if (server != null) {
           server.link = line;
           parsed.add(server);
@@ -6037,12 +5784,6 @@ del "%~f0"
   String get _configPath => '$_workDir${Platform.pathSeparator}config.json';
 
   String get _xrayPath => '$_appDir${Platform.pathSeparator}xray.exe';
-  // Мост AmneziaWG — наша сборка из awgbridge/, едет вместе с приложением.
-  String get _awgBridgePath => '$_appDir${Platform.pathSeparator}awg-bridge.exe';
-  // Конфиг моста AmneziaWG. Имя НЕ под шаблон xray_bridge_*.json намеренно:
-  // по тому шаблону берётся конфиг для проверки скачанного Xray
-  // (_anyXrayConfigPath), и этот файл он бы не понял.
-  String get _awgBridgeConfigPath => '$_workDir${Platform.pathSeparator}awg_bridge.json';
 
   // Лог только в памяти пропадает, если пришлось убивать процессы вручную
   // через Диспетчер задач (например, TUN-режим что-то подвесил и UI не
@@ -6086,10 +5827,8 @@ del "%~f0"
   // весь TUN-сеанс, и переключение между xhttp-серверами становится чистым
   // Clash API selector switch, без убийства/рестарта каких-либо процессов.
   int _bridgePortFor(String tag) {
-    // Счёт общий для мостов Xray и AmneziaWG: порт — по месту сервера среди
-    // всех, кто идёт через мост, так что двум серверам один порт не достанется.
-    final bridged = _servers.where(isBridgedServer).map((s) => s.outbound['tag'] as String).toList();
-    final index = bridged.indexOf(tag);
+    final xrayTags = _servers.where((s) => s.engine == 'xray').map((s) => s.outbound['tag'] as String).toList();
+    final index = xrayTags.indexOf(tag);
     return _xrayBridgeBasePort + (index >= 0 ? index : 0);
   }
 
@@ -6452,12 +6191,12 @@ del "%~f0"
 
   Future<void> _writeConfig() async {
     final singboxServers = _servers.where((s) => s.engine == 'singbox').toList();
-    final bridgedServers = _servers.where(isBridgedServer).toList();
+    final xraySeversForBridge = _servers.where((s) => s.engine == 'xray').toList();
 
     // socks, а не http — HTTP-прокси в принципе не переносит UDP, а браузеры
     // часто сначала пробуют HTTP/3 (QUIC поверх UDP). VLESS сам по себе UDP
     // поддерживает, ограничение было именно в транспорте моста.
-    final bridgeOutbounds = bridgedServers
+    final bridgeOutbounds = xraySeversForBridge
         .map((s) => {
               "type": "socks",
               "tag": s.outbound['tag'],
@@ -6486,7 +6225,7 @@ del "%~f0"
     // а после подмены в outbound'ах лежат уже адреса.
     final proxyHostNames = <String>{
       ...singboxServers.map((s) => s.outbound['server'] as String),
-      ...bridgedServers.map((s) => _serverEndpoint(s)?.$1).whereType<String>(),
+      ...xraySeversForBridge.map((s) => xrayOutboundAddress(s.outbound)).whereType<String>(),
     };
 
     // Порты самих серверов — чтобы страховка от петли (правило «адрес сервера
@@ -6503,7 +6242,7 @@ del "%~f0"
     // серверу именно на эти порты, их и оставляем прямыми. Всё остальное на
     // том же адресе — панель, сайт, что угодно — идёт обычным путём.
     final proxyPorts = <int>{};
-    for (final s in [...singboxServers, ...bridgedServers]) {
+    for (final s in [...singboxServers, ...xraySeversForBridge]) {
       final endpoint = _serverEndpoint(s);
       if (endpoint != null) proxyPorts.add(endpoint.$2);
     }
@@ -7113,7 +6852,7 @@ del "%~f0"
           // выходит ничего.
           if (Env.coreRunsAsProcess)
             {
-              "process_path": [_xrayPath, _awgBridgePath, _probeCorePath],
+              "process_path": [_xrayPath, _probeCorePath],
               "outbound": "direct",
             },
           if (bypassCidrs.isNotEmpty)
@@ -7319,11 +7058,11 @@ del "%~f0"
   // Порты, которые занимает НАШЕ хозяйство: локальный прокси, Clash API и
   // по мосту на каждый xhttp-сервер.
   Set<int> _ourPorts() {
-    final bridged = _servers.where(isBridgedServer).length;
+    final xrayCount = _servers.where((s) => s.engine == 'xray').length;
     return {
       _settings.localPort,
       _settings.clashApiPort,
-      for (var i = 0; i < bridged; i++) _xrayBridgeBasePort + i,
+      for (var i = 0; i < xrayCount; i++) _xrayBridgeBasePort + i,
     };
   }
 
@@ -7353,10 +7092,9 @@ del "%~f0"
     // _killStrayOnOurPorts про самоубийство на портах 1338+.
     final ours = <String>{
       if (_xrayBridgeProcess != null) '${_xrayBridgeProcess!.pid}',
-      if (_awgBridgeProcess != null) '${_awgBridgeProcess!.pid}',
       if (_coreProcess != null) '${_coreProcess!.pid}',
     };
-    for (final exe in [_singBoxPath, _xrayPath, _awgBridgePath]) {
+    for (final exe in [_singBoxPath, _xrayPath]) {
       try {
         final name = exe.split(Platform.pathSeparator).last;
         final escaped = exe.replaceAll("'", "''");
@@ -7397,7 +7135,6 @@ del "%~f0"
       // `dial tcp 127.0.0.1:134x: connection refused`.
       final ours = <String>{
         if (_xrayBridgeProcess != null) '${_xrayBridgeProcess!.pid}',
-        if (_awgBridgeProcess != null) '${_awgBridgeProcess!.pid}',
         if (_coreProcess != null) '${_coreProcess!.pid}',
       };
       final pids = <String>{};
@@ -7648,10 +7385,9 @@ del "%~f0"
     // Мосты для ВСЕХ Xray-серверов профиля поднимаем заранее (если ещё не
     // подняты) — тогда любое последующее переключение между серверами уже
     // не требует рестарта процессов.
-    if (_servers.any(isBridgedServer)) {
+    if (_servers.any((s) => s.engine == 'xray')) {
       _resetLog(t('log.bridgesStarting'));
       await _ensureAllXrayBridgesRunning();
-      await _ensureAwgBridgeRunning();
     }
     await _startSingboxCore();
   }
@@ -7694,20 +7430,7 @@ del "%~f0"
           {'n': (bridgesConfig['inbounds'] as List).length}));
     }
 
-    // Мост AmneziaWG — тоже один на все такие серверы, тем же генератором,
-    // что на Windows. Что движок не примет, служба выкинет сама
-    // (startAwgBridge).
-    String? awgBridge;
-    final awgServers = _servers.where((s) => s.engine == 'awg').toList();
-    _awgRejected.clear();
-    if (awgServers.isNotEmpty) {
-      final awgConfig = await _buildAwgBridgeConfig(awgServers, _bridgePortFor);
-      awgBridge = const JsonEncoder.withIndent('  ').convert(awgConfig);
-      await File(_awgBridgeConfigPath).writeAsString(awgBridge);
-      _appendLog(tp('log.awgBridgesReady', {'n': awgServers.length}));
-    }
-
-    await AndroidVpn.start(config: config, bridges: bridges, awgBridge: awgBridge);
+    await AndroidVpn.start(config: config, bridges: bridges);
     // Состояние щита придёт от службы через поток — здесь его не трогаем,
     // иначе на экране будет «подключено» раньше, чем ядро действительно
     // поднялось.
@@ -7715,7 +7438,7 @@ del "%~f0"
 
   Future<void> _startSingboxCore() async {
     final singboxServers = _servers.where((s) => s.engine == 'singbox').toList();
-    final hasBridgeCandidate = _servers.any(isBridgedServer);
+    final hasBridgeCandidate = _servers.any((s) => s.engine == 'xray');
     if (singboxServers.isEmpty && !hasBridgeCandidate) {
       _resetLog(t('log.noSingboxServers'));
       return;
@@ -7744,6 +7467,17 @@ del "%~f0"
     try {
       File(_legacyXrayConfigPath).deleteSync();
     } catch (_) {}
+    // AmneziaWG был только в 1.0.14 и убран. Обновление из zip ничего не
+    // удаляет, так что его мост и конфиг (с ключами сервера) остались бы рядом.
+    for (final leftover in [
+      '$_appDir${Platform.pathSeparator}awg-bridge.exe',
+      '$_workDir${Platform.pathSeparator}awg_bridge.json',
+      '$_workDir${Platform.pathSeparator}awg_probe.json',
+    ]) {
+      try {
+        File(leftover).deleteSync();
+      } catch (_) {}
+    }
 
     _resetLog(t('log.generatingConfig'));
     await _writeConfig();
@@ -7877,129 +7611,9 @@ del "%~f0"
         : tp('log.bridgeNotReady', {'name': 'Xray', 'port': firstPort}));
   }
 
-  // Останавливает ВСЕ мосты — и Xray, и AmneziaWG. Имя осталось с тех пор,
-  // когда мост был один.
   void _stopAllXrayBridges() {
     _xrayBridgeProcess?.kill();
     _xrayBridgeProcess = null;
-    _awgBridgeProcess?.kill();
-    _awgBridgeProcess = null;
-  }
-
-  /// Конфиг моста AmneziaWG с уже разрешёнными адресами серверов.
-  Future<Map<String, dynamic>> _buildAwgBridgeConfig(
-      List<ParsedServer> servers, int Function(String tag) portOf) async {
-    final resolved = <String, String?>{};
-    await Future.wait([
-      for (final s in servers)
-        () async {
-          final endpoint = awgEndpoint(s.outbound);
-          if (endpoint == null) return;
-          try {
-            resolved[endpoint.$1] = (await _resolveForProbe(endpoint.$1)).address;
-          } catch (_) {
-            // Не разрешилось — оставляем имя: мост попробует сам и, если не
-            // выйдет, назовёт этот сервер в отказе.
-          }
-        }(),
-    ]);
-    return buildAwgBridgeConfig(servers, portOf: portOf, resolved: resolved);
-  }
-
-  /// Пишет конфиг моста AmneziaWG и выкидывает из него серверы, которые
-  /// движок не принимает, — по одному, пока `awg-bridge -test` не пройдёт.
-  /// Один общий процесс на все серверы означает, что без этого отказ одного
-  /// (опечатка в ключе, пересекающиеся H1–H4) ронял бы все.
-  Future<void> _dropRejectedByAwg(Map<String, dynamic> config, String path) async {
-    final names = {for (final s in _servers) s.outbound['tag'] as String: s.name};
-    for (var attempt = 0; attempt < 64; attempt++) {
-      await File(path).writeAsString(const JsonEncoder.withIndent('  ').convert(config));
-      if ((config['servers'] as List).isEmpty) return;
-      final ProcessResult r;
-      try {
-        r = await Process.run(_awgBridgePath, ['-test', '-c', path])
-            .timeout(const Duration(seconds: 20));
-      } catch (e) {
-        _appendLog(tp('log.awgBridgeFailed', {'e': e}));
-        (config['servers'] as List).clear();
-        continue;
-      }
-      if (r.exitCode == 0) return;
-      final output = '${r.stdout}\n${r.stderr}'.trim();
-      final rejection = awgBridgeRejection(output);
-      if (rejection == null) {
-        _appendLog(tp('log.awgBridgeFailed', {'e': output}));
-        (config['servers'] as List).clear();
-        continue;
-      }
-      if (_awgRejected.add(rejection.tag)) {
-        _appendLog(tp('log.awgRejected',
-            {'name': names[rejection.tag] ?? rejection.tag, 'reason': rejection.reason}));
-      }
-      dropFromAwgConfig(config, rejection.tag);
-    }
-  }
-
-  // Подстраховка перед переключением на сервер AmneziaWG — как
-  // _ensureXrayBridge для Xray.
-  Future<void> _ensureAwgBridge(ParsedServer server) async {
-    if (!Env.coreRunsAsProcess) return;
-    if (_awgRejected.contains(server.outbound['tag'])) {
-      _appendLog(tp('log.awgRejectedPick', {'name': server.name}));
-      return;
-    }
-    await _ensureAwgBridgeRunning();
-  }
-
-  /// Поднимает мост для ВСЕХ серверов AmneziaWG профиля одним процессом —
-  /// так же и затем же, что общий мост Xray: переключение между серверами
-  /// остаётся сменой селектора в Clash API. Если мост уже работает, не трогает.
-  Future<void> _ensureAwgBridgeRunning() async {
-    if (!Env.coreRunsAsProcess) return;
-    final awgServers = _servers.where((s) => s.engine == 'awg').toList();
-    if (awgServers.isEmpty) return;
-    if (!File(_awgBridgePath).existsSync()) {
-      _appendLog(t('log.awgBridgeMissing'));
-      return;
-    }
-
-    final running = _awgBridgeProcess;
-    if (running != null) {
-      final alive = awgServers.where((s) => !_awgRejected.contains(s.outbound['tag']));
-      if (alive.isEmpty) return;
-      final port = _bridgePortFor(alive.first.outbound['tag'] as String);
-      if (await _waitForPort(port, timeout: const Duration(milliseconds: 400))) return;
-      _appendLog(tp('log.awgBridgeRestart', {'port': port}));
-      running.kill();
-      _awgBridgeProcess = null;
-    }
-
-    _awgRejected.clear();
-    final config = await _buildAwgBridgeConfig(awgServers, _bridgePortFor);
-    final path = _awgBridgeConfigPath;
-    await _dropRejectedByAwg(config, path);
-    final servers = config['servers'] as List;
-    if (servers.isEmpty) return;
-
-    final process = await Process.start(_awgBridgePath, ['-c', path]);
-    _awgBridgeProcess = process;
-    unawaited(process.exitCode.then((code) {
-      if (!identical(_awgBridgeProcess, process)) return;
-      _awgBridgeProcess = null;
-      _appendLog(tp('log.awgBridgeDied', {'code': code}));
-    }));
-    process.stdout.transform(SystemEncoding().decoder).listen((data) {
-      _appendLog('[awg] $data');
-    });
-    process.stderr.transform(SystemEncoding().decoder).listen((data) {
-      _appendLog('[awg stderr] $data');
-    });
-
-    final firstPort = int.parse('${(servers.first as Map)['listen']}'.split(':').last);
-    final ready = await _waitForPort(firstPort);
-    _appendLog(ready
-        ? tp('log.awgBridgesReady', {'n': servers.length})
-        : tp('log.awgBridgeNotReady', {'port': firstPort}));
   }
 
   // Остановка обязана быть асинхронной и дожидаться возврата прокси.
@@ -8099,8 +7713,6 @@ del "%~f0"
     // конкретный мост почему-то не поднялся или упал.
     if (newServer.engine == 'xray') {
       await _ensureXrayBridge(newServer);
-    } else if (newServer.engine == 'awg') {
-      await _ensureAwgBridge(newServer);
     }
     if (_runningEngine == 'singbox' && _coreIsLive) {
       final tag = newServer.outbound['tag'] as String;
@@ -8191,73 +7803,6 @@ del "%~f0"
   // Протоколы поверх UDP/QUIC — их порт TCP-подключений не принимает,
   // поэтому режим «до сервера» к ним неприменим.
   static const Set<String> _udpOnlyProtocols = {'hysteria2', 'hysteria', 'tuic'};
-
-  // AmneziaWG и WireGuard — тоже UDP, но распознаются по движку: у моста
-  // протоколов два, а суть одна.
-  bool _isUdpOnly(ParsedServer s) => s.engine == 'awg' || _udpOnlyProtocols.contains(s.protocol);
-
-  // Порты пробного моста AmneziaWG (у Xray — 17400+).
-  static const int _awgProbeBasePort = 17700;
-
-  /// Замер серверов AmneziaWG. Порт моста принимает и HTTP-прокси, поэтому
-  /// меряет тот же код, что и серверы Xray. В первый запрос входит рукопожатие
-  /// туннеля — оно и есть «подключение» у этого протокола.
-  ///
-  /// Пока работает основной мост — только через него. Пробный мост с теми же
-  /// ключами — это второй клиент того же пира, а сервер WireGuard отвечает
-  /// тому, кто последним прошёл рукопожатие: рабочий туннель глохнет, пока сам
-  /// не переподключится (~15 с). В 1.0.14 так каждый тест задержки и обрывал
-  /// соединение через AWG. Отдельный пробный мост — только без подключения.
-  Future<void> _testAwgLatencies(List<ParsedServer> servers) async {
-    if (_awgBridgeProcess != null) {
-      final live = servers.where((s) => !_awgRejected.contains(s.outbound['tag'])).toList();
-      await _runLimited(live, (s) async {
-        final tag = s.outbound['tag'] as String;
-        final elapsed = await _measureViaHttpProxy(_bridgePortFor(tag), s.name);
-        if (elapsed != null && mounted) setState(() => _latencyMs[tag] = elapsed);
-      });
-      return;
-    }
-    if (!File(_awgBridgePath).existsSync()) {
-      _appendLog(t('log.awgBridgeMissing'));
-      return;
-    }
-    final probeConfigPath = '$_workDir${Platform.pathSeparator}awg_probe.json';
-    final ports = <String, int>{
-      for (var i = 0; i < servers.length; i++)
-        servers[i].outbound['tag'] as String: _awgProbeBasePort + i,
-    };
-    final config = await _buildAwgBridgeConfig(servers, (tag) => ports[tag]!);
-    await _dropRejectedByAwg(config, probeConfigPath);
-    final kept = {for (final o in config['servers'] as List) (o as Map)['tag']};
-    servers = servers.where((s) => kept.contains(s.outbound['tag'])).toList();
-    if (servers.isEmpty) return;
-
-    Process? probe;
-    try {
-      probe = await Process.start(_awgBridgePath, ['-c', probeConfigPath]);
-      _probeProcesses.add(probe);
-      _watchProbeErrors(probe, 'awg');
-      final ready = <ParsedServer>[];
-      await _runLimited(servers, (s) async {
-        if (await _waitForPort(ports[s.outbound['tag']]!)) ready.add(s);
-      });
-      await _runLimited(ready, (s) async {
-        final tag = s.outbound['tag'] as String;
-        final elapsed = await _measureViaHttpProxy(ports[tag]!, s.name);
-        if (elapsed != null && mounted) setState(() => _latencyMs[tag] = elapsed);
-      });
-    } catch (e) {
-      _appendLog(tp('log.latencyError', {'name': 'AmneziaWG', 'e': e}));
-    } finally {
-      probe?.kill();
-      if (probe != null) _probeProcesses.remove(probe);
-      // В файле ключи серверов — держать его незачем.
-      try {
-        File(probeConfigPath).deleteSync();
-      } catch (_) {}
-    }
-  }
 
   /// Сколько проверок держим одновременно.
   ///
@@ -8353,26 +7898,19 @@ del "%~f0"
       // не принимает вообще (проверено — connect к нему падает мгновенно, тогда
       // как к VLESS проходит за 0.1 с). Такие серверы TCP-проверкой не измерить
       // в принципе, поэтому для них поднимаем пробное ядро, как в сквозном режиме.
-      // AmneziaWG — тоже UDP, но его поднимает не sing-box, а свой мост.
-      final awg = _servers.where((s) => s.engine == 'awg').toList();
-      final udpOnly = _servers
-          .where((s) => s.engine != 'awg' && _udpOnlyProtocols.contains(s.protocol))
-          .toList();
-      final tcpAble = _servers.where((s) => !_isUdpOnly(s)).toList();
+      final udpOnly = _servers.where((s) => _udpOnlyProtocols.contains(s.protocol)).toList();
+      final tcpAble = _servers.where((s) => !_udpOnlyProtocols.contains(s.protocol)).toList();
       await Future.wait([
         if (tcpAble.isNotEmpty) _testLatenciesByConnect(tcpAble),
         if (udpOnly.isNotEmpty) _testSingboxLatencies(udpOnly),
-        if (awg.isNotEmpty) _testAwgLatencies(awg),
       ]);
     } else {
       final singboxServers = _servers.where((s) => s.engine == 'singbox').toList();
       final xrayServers = _servers.where((s) => s.engine == 'xray').toList();
-      final awgServers = _servers.where((s) => s.engine == 'awg').toList();
 
       await Future.wait([
         if (singboxServers.isNotEmpty) _testSingboxLatencies(singboxServers),
         if (xrayServers.isNotEmpty) _testXrayLatencies(xrayServers),
-        if (awgServers.isNotEmpty) _testAwgLatencies(awgServers),
       ]);
     }
 
@@ -8454,8 +7992,10 @@ del "%~f0"
       return;
     }
 
-    final tcpAble = _servers.where((s) => !_isUdpOnly(s)).toList();
-    final udpOnly = _servers.where(_isUdpOnly).toList();
+    final tcpAble =
+        _servers.where((s) => !_udpOnlyProtocols.contains(s.protocol)).toList();
+    final udpOnly =
+        _servers.where((s) => _udpOnlyProtocols.contains(s.protocol)).toList();
     if (tcpAble.isNotEmpty) await _testLatenciesByConnect(tcpAble);
     if (udpOnly.isNotEmpty) {
       _appendLog(tp('log.latencyUdpSkipped', {'n': udpOnly.length}));
@@ -8471,7 +8011,6 @@ del "%~f0"
       final port = s.outbound['server_port'];
       return (host is String && port is int) ? (host, port) : null;
     }
-    if (s.engine == 'awg') return awgEndpoint(s.outbound);
     final settings = s.outbound['settings'];
     if (settings is! Map) return null;
     for (final key in const ['vnext', 'servers']) {
@@ -8575,7 +8114,7 @@ del "%~f0"
 
     var tried = 0;
     for (final s in servers) {
-      if (_isUdpOnly(s)) continue;
+      if (_udpOnlyProtocols.contains(s.protocol)) continue;
       final endpoint = _serverEndpoint(s);
       if (endpoint == null) continue;
       if (tried++ >= 3) break;
@@ -8619,9 +8158,6 @@ del "%~f0"
 
     // Xray-серверы и так меряются по прогретому соединению — переиспользуем.
     if (xray.isNotEmpty) await _testXrayLatencies(xray);
-    // AmneziaWG меряется тем же кодом, что Xray: через свой пробный мост.
-    final awg = servers.where((s) => s.engine == 'awg').toList();
-    if (awg.isNotEmpty) await _testAwgLatencies(awg);
     if (singbox.isEmpty) return;
 
     final probeConfigPath = '$_workDir${Platform.pathSeparator}singbox_probe.json';
@@ -9240,16 +8776,6 @@ del "%~f0"
       'name': _selectedServer?.name ?? '-',
       'n': _healthFails,
     }));
-    // Один конфиг WireGuard на двух устройствах — два клиента одного пира:
-    // сервер отвечает тому, кто последним прошёл рукопожатие, и оба то
-    // работают, то глохнут. Снаружи это неотличимо от плохого сервера, а
-    // лечится только в панели. Разобрано 2026-10-01 на живом сервере.
-    final failing = _selectedServer;
-    if (failing != null &&
-        failing.engine == 'awg' &&
-        _awgSharedKeyHinted.add(failing.outbound['tag'] as String)) {
-      _appendLog(t('log.awgSharedKeyHint'));
-    }
     // Строка под щитом обязана говорить то же, что проверка. Раньше провал
     // уходил только в лог, и под мёртвым сервером оставалось зелёное
     // «трафик проходит» от прошлой удачной проверки.
@@ -9507,18 +9033,6 @@ del "%~f0"
   // tls/reality, для Xray — в streamSettings.security. Пользователю важно
   // именно это, а не то, что написано в названии сервера.
   String _securityLabel(ParsedServer s) {
-    if (s.engine == 'awg') {
-      if (s.protocol == 'wireguard') return 'WireGuard · udp';
-      // Строки 3.x в конфиге — значит, сервер на AmneziaWG 3.
-      final params = s.outbound['params'];
-      final v3 = params is Map &&
-          params.keys.any((k) => const {
-                'headerprotectionkey', 'contentpaddingaddition', 'randomtrailers',
-                'disablecookies', 'rekeyaftertime', 'rekeytimeout',
-                'rejectaftertime', 'keepalivetimeout', 'maxhandshakeattempts',
-              }.contains('$k'.toLowerCase()));
-      return '${v3 ? 'AmneziaWG 3' : 'AmneziaWG'} · udp';
-    }
     if (s.engine == 'xray') {
       final ss = s.outbound['streamSettings'];
       if (ss is Map) {
@@ -10447,8 +9961,6 @@ class _AboutBlock extends StatefulWidget {
 class _AboutBlockState extends State<_AboutBlock> {
   String? _singBox;
   String? _xray;
-  // Версия движка AmneziaWG в мосте (awg-bridge), например 3.1.20260828.
-  String? _awg;
   bool _loading = true;
   bool _checking = false;
 
@@ -10473,42 +9985,13 @@ class _AboutBlockState extends State<_AboutBlock> {
     }
   }
 
-  // Мост печатает «awg-bridge 1.0.0 (amneziawg-go v3.1.20260828)» — человеку
-  // важна версия протокола, то есть движка.
-  Future<String?> _awgVersion() async {
-    try {
-      final path = '$_dir${Platform.pathSeparator}awg-bridge.exe';
-      if (!await File(path).exists()) return null;
-      final r = await Process.run(path, ['-version']).timeout(const Duration(seconds: 10));
-      return RegExp(r'amneziawg-go v([\d.]+)').firstMatch('${r.stdout}')?.group(1);
-    } catch (_) {
-      return null;
-    }
-  }
-
   Future<void> _load() async {
-    String? sb, xr, awg;
-    if (Env.coreRunsAsProcess) {
-      sb = await _version('sing-box.exe');
-      xr = await _version('xray.exe');
-      awg = await _awgVersion();
-    } else {
-      // На Android ядра вкомпилированы в приложение: файлов нет, версии
-      // отдаёт сама библиотека. Раньше экран искал здесь .exe и писал
-      // «версия не определяется» про ядра, которые на месте и работают.
-      try {
-        final v = await AndroidVpn.coreVersions();
-        String? number(String s) => RegExp(r'\d+\.\d+\.\d+').firstMatch(s)?.group(0);
-        sb = number(v.singbox);
-        xr = number(v.xray);
-        awg = number(v.awg);
-      } catch (_) {}
-    }
+    final sb = await _version('sing-box.exe');
+    final xr = await _version('xray.exe');
     if (!mounted) return;
     setState(() {
       _singBox = sb;
       _xray = xr;
-      _awg = awg;
       _loading = false;
     });
   }
@@ -10537,7 +10020,6 @@ class _AboutBlockState extends State<_AboutBlock> {
         if (kBuildStamp.isNotEmpty) _row(t('about.build'), kBuildStamp),
         _row('sing-box', _loading ? '…' : (_singBox ?? unknown)),
         _row('Xray', _loading ? '…' : (_xray ?? unknown)),
-        _row('AmneziaWG', _loading ? '…' : (_awg ?? unknown)),
         // Ядро без версии автообновление не трогает — сравнивать не с чем.
         // Молчать об этом нельзя: человек будет ждать обновлений, которых нет.
         if (!_loading && (_singBox == null || _xray == null))

@@ -1,4 +1,4 @@
-# One command to cut a release: build, package, publish.
+﻿# One command to cut a release: build, package, publish.
 #
 # Exists so that shipping a fix does not turn into a manual sequence of build,
 # clean, compile installer, zip, upload - which is where mistakes creep in.
@@ -18,10 +18,6 @@
 # The zip deliberately excludes sing-box.exe and xray.exe. The app updates the
 # cores on its own schedule and may already hold a newer build than the one
 # bundled here; overwriting them on every app update would roll them back.
-#
-# awg-bridge.exe (AmneziaWG) is different: it is built from this repository
-# (tools\build_awg_bridge.ps1) and has no update channel of its own, so it
-# ships in both packages and is replaced with the app.
 #
 # The same script builds the release on GitHub Actions
 # (.github/workflows/windows-build.yml), so what is published can be traced
@@ -82,7 +78,6 @@ function Get-Unshippable([string[]]$Files, [switch]$NoCores) {
     $p = $f.Replace("/", "\")
     $ok = $p -eq $exeName -or ($p -like "*.dll" -and $p -notlike "*\*") -or
           $p -eq "data\app.so" -or $p -eq "data\icudtl.dat" -or $p -like "data\flutter_assets\*" -or
-          $p -eq "awg-bridge.exe" -or
           (-not $NoCores -and ($p -eq "sing-box.exe" -or $p -eq "xray.exe"))
     if (-not $ok) { $f }
   }
@@ -129,7 +124,7 @@ if ($Stage -ne "package") {
   # is a convenience, not the safeguard: whatever it misses stops the release
   # at Assert-ReleaseFolder below.
   Write-Host "cleaning working files out of the build folder"
-  foreach ($f in @("config.json", "xray_config.json", "awg_bridge.json", "app_log.txt", "app_log.txt.prev.txt",
+  foreach ($f in @("config.json", "xray_config.json", "app_log.txt", "app_log.txt.prev.txt",
                    "startup_log.txt", "capture.txt", "tundiag.txt", "tundebug.txt")) {
     Remove-Item (Join-Path $rel $f) -Force -ErrorAction SilentlyContinue
   }
@@ -140,10 +135,6 @@ if ($Stage -ne "package") {
     Remove-Item (Join-Path $rel $d) -Recurse -Force -ErrorAction SilentlyContinue
   }
   Assert-ReleaseFolder
-
-  # The AmneziaWG bridge first: the Flutter build installs it next to the exe.
-  Write-Host "building awg-bridge"
-  & (Join-Path $PSScriptRoot "build_awg_bridge.ps1") -Root $Root
 
   Write-Host "building"
   # The build stamp is what tells two builds of the same version apart on the

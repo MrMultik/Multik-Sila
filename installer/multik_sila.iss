@@ -102,9 +102,6 @@ Source: "{#BuildDir}\data\flutter_assets\*"; DestDir: "{app}\data\flutter_assets
 ; только вперёд по версии.
 Source: "{#BuildDir}\sing-box.exe"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "{#BuildDir}\xray.exe"; DestDir: "{app}"; Flags: onlyifdoesntexist
-; Мост AmneziaWG — наша собственная сборка (awgbridge\), своего канала
-; обновления у него нет: едет с приложением и заменяется вместе с ним.
-Source: "{#BuildDir}\awg-bridge.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
@@ -126,6 +123,12 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 ; вернёт его элевированным, и TUN поднимется сам.
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall
 
+[InstallDelete]
+; AmneziaWG был только в 1.0.14 и убран: его мост и конфиг (с ключами сервера)
+; при установке поверх иначе остались бы лежать.
+Type: files; Name: "{app}\awg-bridge.exe"
+Type: files; Name: "{app}\awg_bridge.json"
+
 [UninstallDelete]
 ; Рабочие файлы, которые приложение создаёт РЯДОМ С СОБОЙ уже после установки.
 ; Инсталлятор о них не знает, и без этой секции после удаления осталась бы
@@ -133,8 +136,6 @@ Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; F
 Type: files; Name: "{app}\config.json"
 Type: files; Name: "{app}\xray_config.json"
 Type: files; Name: "{app}\xray_bridge_*.json"
-; Конфиг моста AmneziaWG: в нём ключи серверов.
-Type: files; Name: "{app}\awg_bridge.json"
 ; *_probe*.json, а не *_probe.json: пробник одного сервера пишет
 ; xray_probe_single.json, и в нём адрес и ключи сервера.
 Type: files; Name: "{app}\*_probe*.json"
@@ -144,6 +145,9 @@ Type: files; Name: "{app}\startup_log.txt"
 ; Сохранённая копия последнего ответа подписки (серверы с ключами) — её
 ; приложение берёт, когда подписка не загрузилась.
 Type: files; Name: "{app}\sub_cache_*.txt"
+; Остатки AmneziaWG из 1.0.14 — см. [InstallDelete].
+Type: files; Name: "{app}\awg-bridge.exe"
+Type: files; Name: "{app}\awg_bridge.json"
 Type: files; Name: "{app}\sing-box.exe.new"
 Type: files; Name: "{app}\sing-box.exe.bak"
 Type: files; Name: "{app}\xray.exe.new"

@@ -22,18 +22,8 @@ require (
 	github.com/xtls/xray-core v1.260327.0
 )
 
-// gomobile здесь НЕ лишний, хотя его никто не импортирует: без него
-// `gomobile bind` падает с «no Go package in github.com/sagernet/gomobile/bind».
-// `go mod tidy` его вычищает — после tidy возвращать:
-//   go get github.com/sagernet/gomobile@v0.1.13
-require (
-	github.com/amnezia-vpn/amneziawg-go/v3 v3.1.20260828 // indirect
-	github.com/sagernet/gomobile v0.1.13 // indirect
-)
-
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect
-	github.com/MrMultik/Multik-Sila/awgbridge v0.0.0
 	github.com/ajg/form v1.5.1 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect
 	github.com/alexbrainman/sspi v0.0.0-20231016080023-1a75b4708caa // indirect
@@ -131,6 +121,7 @@ require (
 	github.com/sagernet/cronet-go/lib/windows_amd64 v0.0.0-20260712142643-1e5048bd5587 // indirect
 	github.com/sagernet/cronet-go/lib/windows_arm64 v0.0.0-20260712142643-1e5048bd5587 // indirect
 	github.com/sagernet/fswatch v0.1.2 // indirect
+	github.com/sagernet/gomobile v0.1.13 // indirect
 	github.com/sagernet/gvisor v0.0.0-20250811.0-sing-box-mod.1 // indirect
 	github.com/sagernet/netlink v0.0.0-20240612041022-b9a21c07ac6a // indirect
 	github.com/sagernet/nftables v0.3.0-mod.2 // indirect
@@ -190,6 +181,3 @@ require (
 	gvisor.dev/gvisor v0.0.0-20260122175437-89a5d21be8f0 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
-
-// Мост AmneziaWG — общий с настольной версией код из корня репозитория.
-replace github.com/MrMultik/Multik-Sila/awgbridge => ../awgbridge

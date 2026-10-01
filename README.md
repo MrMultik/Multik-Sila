@@ -68,8 +68,8 @@ app downloads to update itself. Install from the `.exe`.
 1. **Install** the app for your platform (see [Download](#download)).
 2. **Get a subscription.** Our Telegram bot
    **[@Sila_Multik_bot](https://t.me/Sila_Multik_bot)** hands out subscriptions,
-   renewals and support. Any other VLESS / VMess / Trojan / Hysteria2 / AmneziaWG
-   subscription works too.
+   renewals and support. Any other VLESS / VMess / Trojan / Hysteria2 subscription
+   works too.
 3. **Add it.** On first launch the setup wizard asks for it. Later you can add
    more from the **Servers** tab → **+**: paste a link, pick a file, paste the text
    itself, or scan a QR code.
@@ -90,11 +90,9 @@ On Android the tunnel is always system-wide, so there is nothing to choose.
 ## Features
 
 - **Subscriptions** by link, file, pasted text or QR code, in any common format:
-  plain link lists, **Clash YAML**, **sing-box JSON**, **Xray JSON**, and AmneziaWG
-  `.conf` files and `vpn://` keys. They refresh on their own, and if a refresh fails
-  the last good list is kept.
-- **Protocols:** VLESS (incl. REALITY and xhttp), VMess, Trojan, Hysteria2, Shadowsocks,
-  **AmneziaWG** (2.0 and 3.1, as served by 3x-ui) and WireGuard.
+  plain link lists, **Clash YAML**, **sing-box JSON** and **Xray JSON**. They refresh
+  on their own, and if a refresh fails the last good list is kept.
+- **Protocols:** VLESS (incl. REALITY and xhttp), VMess, Trojan, Hysteria2, Shadowsocks.
 - **Choose the server yourself or let the app do it.** Auto mode measures every
   server and picks the fastest; manual mode keeps exactly the one you chose.
 - **Split tunnelling:** Russian sites go direct, everything else through the VPN.
@@ -168,23 +166,19 @@ No. Profiles and settings are stored separately from the program and survive
 updates and even an uninstall.
 </details>
 
-## Why several engines
+## Why two engines
 
-sing-box provides native TUN support and does most of the work. Some servers go
-through another engine instead:
+sing-box provides native TUN support and does most of the work. Two kinds of servers
+go through Xray instead:
 
 - **`xhttp`** — sing-box does not support this transport at all;
 - **REALITY** — since Xray 26.9.9 a REALITY server rejects any handshake without the
   post-quantum X25519MLKEM768 key exchange, and sing-box 1.14 does not send one with
   any of its fingerprints. The Xray client does, and it works with older servers too.
-- **AmneziaWG** — neither sing-box nor Xray speaks it. These servers run on
-  [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) in our own small bridge
-  (`awgbridge/`), on a userspace network stack: no extra network adapter and no
-  administrator rights.
 
-Each such engine runs as a bridge — one Xray and one AmneziaWG bridge for all their
-servers — that offers a local SOCKS5 port, and sing-box still does all the routing,
-in both modes and on Android.
+Xray runs as a bridge — one process for all such servers — that offers a local
+SOCKS5 port per server, and sing-box still does all the routing, in both modes and
+on Android.
 
 ## Building from source
 
@@ -205,13 +199,6 @@ builds and weigh about 90 MB together. Place them next to the application `.exe`
 - `sing-box.exe` — [SagerNet/sing-box releases](https://github.com/SagerNet/sing-box/releases), the `windows-amd64` build;
 - `xray.exe` — [XTLS/Xray-core releases](https://github.com/XTLS/Xray-core/releases), the `Xray-windows-64.zip` archive.
 
-The AmneziaWG bridge is ours and is built from `awgbridge/` (needs Go); the script
-puts `awg-bridge.exe` where the build picks it up:
-
-```
-powershell -File tools\build_awg_bridge.ps1
-```
-
 The installer needs [Inno Setup 6](https://jrsoftware.org/isdl.php):
 
 ```
@@ -225,9 +212,9 @@ The result lands in `installer\output\`.
 <summary><b>Android</b></summary>
 
 The engine is a library here, so it is built first. `mobile\build_aar.ps1` needs the
-Go toolchain and the Android NDK; it produces `silacore.aar` (sing-box, an Xray
-wrapper for `xhttp` and REALITY, and the AmneziaWG bridge). The `.aar` is not stored in
-the repository — it weighs about 55 MB.
+Go toolchain and the Android NDK; it produces `silacore.aar` (sing-box plus an Xray
+wrapper for `xhttp` and REALITY). The `.aar` is not stored in the repository — it
+weighs about 55 MB.
 
 ```
 powershell -File mobile\build_aar.ps1

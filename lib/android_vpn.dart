@@ -32,17 +32,13 @@ class AndroidVpn {
   /// [config] — тот же JSON sing-box, что десктопная версия пишет в
   /// `config.json`. [bridges] — конфиги мостов Xray для xhttp-серверов, по
   /// одному на сервер; на Windows они лежат файлами `xray_bridge_*.json`.
-  /// [awgBridge] — конфиг моста AmneziaWG, один на все такие серверы (на
-  /// Windows — `awg_bridge.json`); null, если таких серверов нет.
   static Future<void> start({
     required String config,
     List<String> bridges = const [],
-    String? awgBridge,
   }) async {
     await _commands.invokeMethod<bool>('start', {
       'config': config,
       'bridges': bridges,
-      'awgBridge': awgBridge,
     });
   }
 
@@ -54,13 +50,9 @@ class AndroidVpn {
   /// Версии обоих ядер — спрашиваются у самих ядер, а не хранятся числом
   /// в коде. На Windows на этом уже обжигались: установленная сборка Xray
   /// оказалась новее «последнего релиза», и версия по памяти врала.
-  static Future<({String singbox, String xray, String awg})> coreVersions() async {
+  static Future<({String singbox, String xray})> coreVersions() async {
     final map = await _commands.invokeMapMethod<String, String>('coreVersions');
-    return (
-      singbox: map?['singbox'] ?? '',
-      xray: map?['xray'] ?? '',
-      awg: map?['awg'] ?? '',
-    );
+    return (singbox: map?['singbox'] ?? '', xray: map?['xray'] ?? '');
   }
 
   /// Процессоры телефона, от родного к совместимым: по ним выбирается APK

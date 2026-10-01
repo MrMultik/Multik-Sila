@@ -9,7 +9,6 @@ import android.provider.Settings
 import androidx.core.content.FileProvider
 import java.io.File
 import com.multiksila.libbox.Libbox
-import com.multiksila.silaawg.Silaawg
 import com.multiksila.silaxray.Silaxray
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -99,9 +98,6 @@ class MainActivity : FlutterActivity() {
                         .setAction(SilaVpnService.ACTION_START)
                         .putExtra(SilaVpnService.EXTRA_CONFIG, config)
                         .putExtra(SilaVpnService.EXTRA_XRAY_BRIDGES, bridges)
-                        // Конфиг моста AmneziaWG — один на все такие серверы,
-                        // того же вида, что awg_bridge.json на Windows.
-                        .putExtra(SilaVpnService.EXTRA_AWG_BRIDGE, call.argument<String>("awgBridge"))
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         startForegroundService(intent)
                     } else {
@@ -127,7 +123,6 @@ class MainActivity : FlutterActivity() {
                     mapOf(
                         "singbox" to runCatching { Libbox.version() }.getOrDefault(""),
                         "xray" to runCatching { Silaxray.version() }.getOrDefault(""),
-                        "awg" to runCatching { Silaawg.version() }.getOrDefault(""),
                     )
                 )
 

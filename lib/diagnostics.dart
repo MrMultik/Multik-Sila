@@ -59,8 +59,7 @@ class _ConfigViewScreenState extends State<ConfigViewScreen> {
         if (name == 'config.json' ||
             name == 'core_log.txt' ||
             name == 'core_panic.txt' ||
-            name.startsWith('xray_bridge_') ||
-            name == 'awg_bridge.json') {
+            name.startsWith('xray_bridge_')) {
           found.add(e);
         }
       }
