@@ -5907,9 +5907,23 @@ del "%~f0"
   // VPN и нужен), подключение ждало до полутора минут на трёх наборах.
   // Скачанное кладётся рядом как <файл>.new и применяется при следующем
   // старте ядра — см. _applyPendingRuleSet.
+  bool _ruleSetRefreshRunning = false;
+
   Future<void> _refreshRuleSetsInBackground() async {
     final days = _settings.ruleSetRefreshDays;
     if (days <= 0) return;
+    // Зовут дважды: при старте приложения и после раскладки наборов из
+    // комплекта. Два прогона разом писали бы один .new одновременно.
+    if (_ruleSetRefreshRunning) return;
+    _ruleSetRefreshRunning = true;
+    try {
+      await _refreshRuleSetsOnce(days);
+    } finally {
+      _ruleSetRefreshRunning = false;
+    }
+  }
+
+  Future<void> _refreshRuleSetsOnce(int days) async {
     for (final rs in const [_rsGeositeRu, _rsGeoipRu, _rsAds]) {
       final file = File(_ruleSetPath(rs));
       try {
@@ -5934,6 +5948,7 @@ del "%~f0"
 
   Future<List<RuleSetSpec>> _ensureRuleSets(List<RuleSetSpec> needed) async {
     final ready = <RuleSetSpec>[];
+    var usedBundle = false;
     for (final rs in needed) {
       final file = File(_ruleSetPath(rs));
       // Скачанное фоном обновление применяется ЗДЕСЬ, до старта ядра, а не в
@@ -5951,8 +5966,20 @@ del "%~f0"
         final bundled = await rootBundle.load('assets/rulesets/${rs.file}');
         await file.parent.create(recursive: true);
         await file.writeAsBytes(bundled.buffer.asUint8List(), flush: true);
+        // Копия из комплекта — давняя (наборам в нём месяцы), а свежесть
+        // фоновое обновление судит по дате файла. Записанная только что, она
+        // считалась свежей ещё сутки; а установщик при каждом обновлении
+        // приложения стирает папку наборов, так что у часто обновляющихся
+        // правила России и рекламы фактически не обновлялись никогда
+        // (01.10.2026 у пользователя стояли наборы от 30.07). Помечаем копию
+        // старой и сразу просим свежую: она ляжет рядом как .new и встанет
+        // при следующем подключении.
+        try {
+          await file.setLastModified(DateTime(2000));
+        } catch (_) {}
         _appendLog(tp('log.rulesetBundled', {'file': rs.file}));
         ready.add(rs);
+        usedBundle = true;
         continue;
       } catch (_) {
         // в комплекте нет — пробуем сеть
@@ -5975,6 +6002,9 @@ del "%~f0"
         _appendLog(tp('log.rulesetFailed', {'file': rs.file, 'e': e}));
       }
     }
+    // Один раз, когда все наборы уже на диске: обновление берёт только те,
+    // что лежат (качать набор рекламы тому, кто её не блокирует, незачем).
+    if (usedBundle) unawaited(_refreshRuleSetsInBackground());
     return ready;
   }
 
