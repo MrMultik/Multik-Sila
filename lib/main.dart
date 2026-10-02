@@ -633,14 +633,22 @@ String serverCoreKey(ParsedServer s) {
   final o = jsonDecode(jsonEncode(s.outbound)) as Map<String, dynamic>;
   final stream = o['streamSettings'];
   final xrayReality = stream is Map ? stream['realitySettings'] : null;
+  // serverName — тоже: у сервера с несколькими разрешёнными именами панель
+  // подставляет одно наугад на каждую выдачу (живая подписка 02.10.2026, 6
+  // пар выдач из 6), и любое из них сервер примет. У обычного TLS имя не
+  // трогаем: там это адрес, а не маскировка.
   if (xrayReality is Map) {
     xrayReality
       ..remove('shortId')
-      ..remove('spiderX');
+      ..remove('spiderX')
+      ..remove('serverName');
   }
   final tls = o['tls'];
   final singboxReality = tls is Map ? tls['reality'] : null;
-  if (singboxReality is Map) singboxReality.remove('short_id');
+  if (singboxReality is Map) {
+    singboxReality.remove('short_id');
+    (tls as Map).remove('server_name');
+  }
   return '${s.engine}|${jsonEncode(o)}';
 }
 
@@ -2866,11 +2874,24 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   String Function()? _subStatus;
   ParsedServer? _selectedServer;
 
+  /// Выбранный сервер по профилям: id профиля → имя сервера (имена в
+  /// подписке уникальны, см. dedupeServerNames; теги srv_N — нет, они по
+  /// порядку). Раньше выбор жил только в памяти, и после перезапуска
+  /// приложения всегда стоял первый сервер списка — у пользователя
+  /// (02.10.2026) «не сохранил выбранный сервер».
+  Map<String, String> _rememberedServer = {};
+  static const String _selectedServerPrefsKey = 'selected_server_by_profile';
+
   // ключ — тег outbound'а сервера; отсутствие ключа значит "ещё не тестировали",
   // null значит "протестировали, недоступен"
   final Map<String, int?> _latencyMs = {};
   // Когда закончился последний полный (не отменённый) прогон теста задержки.
   DateTime? _latencyMeasuredAt;
+  /// Последний полный замер по профилям, чтобы после перезапуска у серверов
+  /// стояли цифры, а не «— мс»: id профиля → {'at': мс эпохи, 'ms': {имя:
+  /// задержка или null}}. По имени — по той же причине, что и выбор сервера.
+  Map<String, dynamic> _savedLatencies = {};
+  static const String _latencyPrefsKey = 'latency_by_profile';
   bool _testingLatency = false;
 
   Process? _coreProcess; // sing-box
@@ -2953,7 +2974,11 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       return;
     }
     final server = _selectedServer;
-    if (mounted) {
+    // Экран открыли заново при работающем туннеле — это не новое
+    // подключение, и «Проверяю…» под щитом выглядело именно им (пользователь,
+    // 02.10.2026: «делает будто новое подключение»). Проверяем молча, на экран
+    // — только итог.
+    if (mounted && !_reattaching) {
       setState(() {
         _connectionCheckKey = 'check.running';
         _connectionOk = false;
@@ -2969,6 +2994,7 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       return;
     }
     final key = ok ? 'check.ok' : 'check.failed';
+    _reattaching = false;
     setState(() {
       _connectionOk = ok;
       _connectionCheckKey = key;
@@ -2992,6 +3018,10 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
 
   /// Номер последней начатой проверки трафика (см. _verifyConnection).
   int _verifySeq = 0;
+
+  /// Экран открыт заново, а туннель жил всё это время: первая проверка
+  /// трафика идёт без «Проверяю…» (см. _verifyConnection).
+  bool _reattaching = false;
 
   String? _runningEngineValue;
 
@@ -3115,6 +3145,9 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   }
 
   String get _clashApiBase => 'http://127.0.0.1:${_settings.clashApiPort}';
+  /// Журнал на Android дописывается между открытиями экрана (см. initState);
+  /// больше этого — начинаем новый, прежний уходит в .prev.txt.
+  static const int _androidLogLimit = 1024 * 1024;
   static const String _profilesPrefsKey = kProfilesPrefsKey;
   static const String _activeProfilePrefsKey = kActiveProfilePrefsKey;
 
@@ -3122,11 +3155,29 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   void initState() {
     super.initState();
     try {
+      final current = File(_logFilePath);
+      // Android: экран закрывают и открывают по десять раз за сеанс, а
+      // туннель живёт в службе всё это время. Новый файл на каждое открытие
+      // стирал историю сеанса: у пользователя (02.10.2026) сервер сменился
+      // через 4 с после повторного открытия, и по журналу было уже не понять
+      // почему. Поэтому дописываем, а прошлое показываем в журнале экрана;
+      // в .prev файл уходит только по размеру.
+      if (Env.isAndroid && current.existsSync() && current.lengthSync() < _androidLogLimit) {
+        final lines = current.readAsLinesSync();
+        final tail = lines.length > 300 ? lines.sublist(lines.length - 300) : lines;
+        _log = tail
+            .map((l) => l.replaceFirst(RegExp(r'^\[[^\]]*\] '), ''))
+            .join('\n');
+        current.writeAsStringSync(
+          '=== ${DateTime.now().toIso8601String()} ===\n',
+          mode: FileMode.append,
+          flush: true,
+        );
+      } else {
       // Прошлый лог сохраняем как app_log.prev.txt, а не затираем. Разбор
       // проблем выхода упирался ровно в это: приложение пишет в лог, ЧТО и
       // на каком шаге оно закрывает, но следующий же запуск стирал файл — и
       // от сеанса, который «завис при выходе», не оставалось ни строчки.
-      final current = File(_logFilePath);
       if (current.existsSync()) {
         try {
           current.copySync('$_logFilePath.prev.txt');
@@ -3139,6 +3190,7 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
         mode: FileMode.write,
         flush: true,
       );
+      }
     } catch (_) {}
     // Окно, трей, реестр и подмена ядер — всё это настольное и на Android
     // не просто бесполезно, а падает: плагинов там нет, и вызов уходит в
@@ -3220,6 +3272,8 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     });
     AndroidVpn.isRunning().then((running) {
       if (mounted && running) {
+        _appendLog(t('log.reattached'));
+        _reattaching = true;
         setState(() => _runningEngine = 'singbox');
         // Служба жила, пока экрана не было: сервер — у неё (если список уже
         // загружен; иначе это сделает загрузка списка).
@@ -3444,6 +3498,17 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     // «автовыбор перед подключением» — она и означала это же самое, пока
     // выбор не стал отдельным.
     final savedAuto = prefs.getBool(_autoServerPrefsKey);
+    try {
+      final raw = prefs.getString(_selectedServerPrefsKey);
+      if (raw != null) {
+        _rememberedServer = (jsonDecode(raw) as Map)
+            .map((k, v) => MapEntry(k as String, v as String));
+      }
+    } catch (_) {}
+    try {
+      final raw = prefs.getString(_latencyPrefsKey);
+      if (raw != null) _savedLatencies = jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {}
     if (!mounted) return;
     setState(() {
       if (savedSort != null && _serverSortValues.contains(savedSort)) {
@@ -4830,7 +4895,12 @@ del "%~f0"
       }
     } else if (_settings.autoConnectAfterLaunch &&
         _servers.isNotEmpty &&
-        _runningEngine == null) {
+        _runningEngine == null &&
+        // Android: экран открыли заново, а туннель в службе жив. Ответ
+        // службы (_bindAndroidVpn) мог ещё не прийти — спрашиваем сами, иначе
+        // «подключение при запуске» перезапустило бы ядро под человеком,
+        // возможно, с другим сервером.
+        !(Env.isAndroid && await AndroidVpn.isRunning())) {
       _appendLog(t('log.autoConnect'));
       await _startCore();
     }
@@ -4889,6 +4959,12 @@ del "%~f0"
       await _saveProfiles();
     }
     if (active != null) {
+      // Сохранённая копия подписки — на экран сразу, загрузка из сети
+      // следом (тот же список она не трогает: см. unchangedForCore). Иначе
+      // секунды загрузки на экране стоял первый сервер списка без цифр, а на
+      // Android так при КАЖДОМ открытии экрана — у пользователя (02.10.2026)
+      // «снова показало первый сервер», «будто завис экран».
+      await _showSavedSubscription(active);
       await _loadSubscription(active);
     }
     // Только после того, как подписка разобрана и список серверов заполнен —
@@ -4986,6 +5062,16 @@ del "%~f0"
     try {
       final file = File(_subCachePath(id));
       if (await file.exists()) await file.delete();
+    } catch (_) {}
+  }
+
+  /// Последний удачный ответ подписки — на экран до загрузки из сети.
+  Future<void> _showSavedSubscription(SubscriptionProfile profile) async {
+    if (profile.url.startsWith('file:') || _serverCache[profile.id] != null) return;
+    try {
+      final file = File(_subCachePath(profile.id));
+      if (!await file.exists()) return;
+      _applySubscriptionContent(profile, await file.readAsString());
     } catch (_) {}
   }
 
@@ -5239,6 +5325,7 @@ del "%~f0"
       setState(() {
         _servers = parsed;
         _selectedServer = parsed.where((s) => s.outbound['tag'] == keepTag).firstOrNull ??
+            _rememberedIn(profile.id, parsed) ??
             (parsed.isNotEmpty ? parsed.first : null);
         _subStatus = status;
       });
@@ -5253,8 +5340,10 @@ del "%~f0"
     _stopAllXrayBridges();
     setState(() {
       _servers = parsed;
-      _selectedServer = kept ?? (parsed.isNotEmpty ? parsed.first : null);
+      _selectedServer =
+          kept ?? _rememberedIn(profile.id, parsed) ?? (parsed.isNotEmpty ? parsed.first : null);
       _latencyMs.clear();
+      _restoreLatencies(profile.id, parsed);
       _subStatus = status;
     });
     // Работающее ядро держит ПРЕЖНИЙ список: его srv_3 — уже не тот сервер,
@@ -5293,7 +5382,61 @@ del "%~f0"
       if (!identical(running, _selectedServer)) {
         setState(() => _selectedServer = running);
       }
+      _rememberSelection();
       unawaited(_verifyConnection());
+    } catch (_) {}
+  }
+
+  /// Запомненный для профиля сервер в этом списке (см. _rememberedServer).
+  ParsedServer? _rememberedIn(String? profileId, List<ParsedServer> servers) {
+    final name = _rememberedServer[profileId];
+    if (name == null) return null;
+    return servers.where((s) => s.name == name).firstOrNull;
+  }
+
+  /// Запоминает выбранный сервер активного профиля — в файл настроек сразу:
+  /// на Android приложение могут выгрузить в любой момент.
+  void _rememberSelection() {
+    final profileId = _activeProfile?.id;
+    final name = _selectedServer?.name;
+    if (profileId == null || name == null || _rememberedServer[profileId] == name) return;
+    _rememberedServer[profileId] = name;
+    unawaited(_savePrefsString(_selectedServerPrefsKey, jsonEncode(_rememberedServer)));
+  }
+
+  /// Итог полного замера — в настройки, по имени сервера.
+  void _saveLatencies() {
+    final profileId = _activeProfile?.id;
+    if (profileId == null) return;
+    _savedLatencies[profileId] = {
+      'at': (_latencyMeasuredAt ?? DateTime.now()).millisecondsSinceEpoch,
+      'ms': {
+        for (final s in _servers)
+          if (_latencyMs.containsKey(s.outbound['tag'])) s.name: _latencyMs[s.outbound['tag']],
+      },
+    };
+    unawaited(_savePrefsString(_latencyPrefsKey, jsonEncode(_savedLatencies)));
+  }
+
+  /// Цифры последнего полного замера профиля — на только что загруженный
+  /// список (зовётся внутри setState). Время замера тоже: по нему «Авто»
+  /// решает, перемерять ли перед подключением.
+  void _restoreLatencies(String? profileId, List<ParsedServer> servers) {
+    final saved = _savedLatencies[profileId];
+    if (saved is! Map) return;
+    final ms = saved['ms'];
+    final at = saved['at'];
+    if (ms is! Map || at is! int) return;
+    for (final s in servers) {
+      if (ms.containsKey(s.name)) _latencyMs[s.outbound['tag'] as String] = ms[s.name] as int?;
+    }
+    _latencyMeasuredAt = DateTime.fromMillisecondsSinceEpoch(at);
+  }
+
+  Future<void> _savePrefsString(String key, String value) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(key, value);
     } catch (_) {}
   }
 
@@ -5319,8 +5462,10 @@ del "%~f0"
     if (cached != null) {
       setState(() {
         _servers = cached;
-        _selectedServer = cached.isNotEmpty ? cached.first : null;
+        _selectedServer =
+            _rememberedIn(profile.id, cached) ?? (cached.isNotEmpty ? cached.first : null);
         _latencyMs.clear();
+        _restoreLatencies(profile.id, cached);
         final count = cached.length;
         _subStatus = () => '${t('sub.profile')} "${profile.name}": '
             '${t('sub.cached')} — $count';
@@ -5941,8 +6086,12 @@ del "%~f0"
       _serverCache.remove(profile.id);
       _activeProfile = _profiles.isNotEmpty ? _profiles.first : null;
       _servers = _activeProfile != null ? (_serverCache[_activeProfile!.id] ?? []) : [];
-      _selectedServer = _servers.isNotEmpty ? _servers.first : null;
+      _selectedServer = _rememberedIn(_activeProfile?.id, _servers) ??
+          (_servers.isNotEmpty ? _servers.first : null);
       _latencyMs.clear();
+      _restoreLatencies(_activeProfile?.id, _servers);
+      _rememberedServer.remove(profile.id);
+      _savedLatencies.remove(profile.id);
       final next = _activeProfile;
       if (next == null) {
         _subStatus = () => t('profile.addNone');
@@ -6980,6 +7129,7 @@ del "%~f0"
         final best = candidates.first;
         if (best.outbound['tag'] != _selectedServer?.outbound['tag']) {
           setState(() => _selectedServer = best);
+          _rememberSelection();
           _appendLog(tp('log.autoSelectPicked',
               {'name': best.name, 'ms': _latencyMs[best.outbound['tag']]}));
         }
@@ -7327,7 +7477,9 @@ del "%~f0"
   }
 
   Future<void> _switchServer(ParsedServer newServer) async {
+    _reattaching = false;
     setState(() => _selectedServer = newServer);
+    _rememberSelection();
 
     // Выбор в списке — это ВЫБОР, а не команда подключиться.
     //
@@ -7558,7 +7710,10 @@ del "%~f0"
       ]);
     }
 
-    if (!_cancelLatency) _latencyMeasuredAt = DateTime.now();
+    if (!_cancelLatency) {
+      _latencyMeasuredAt = DateTime.now();
+      _saveLatencies();
+    }
     if (mounted) setState(() => _testingLatency = false);
     if (_servers.length <= _latencyVerboseLimit) {
       final summary = _servers.map((s) {

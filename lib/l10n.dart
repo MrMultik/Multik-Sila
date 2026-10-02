@@ -1570,6 +1570,10 @@ const Map<String, Map<String, String>> _strings = {
         'server shows up as unavailable right away. Without a connection it measures '
         'the same way as "to the server".',
   },
+  'log.reattached': {
+    'ru': 'Экран открыт заново — туннель работал всё это время',
+    'en': 'Screen reopened — the tunnel kept running all along',
+  },
   'log.noTraffic': {
     'ru': 'Через «{name}» за {s} с не прошло ни байта — подключения нет',
     'en': 'Nothing got through "{name}" in {s} s — no connection',

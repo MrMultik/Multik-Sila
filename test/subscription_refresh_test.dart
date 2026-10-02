@@ -71,6 +71,37 @@ void main() {
         isFalse);
   });
 
+  test('a REALITY SNI picked anew by the panel is still the same list', () {
+    // Сервер с несколькими serverNames: панель на каждую выдачу подставляет
+    // один из них наугад (живая подписка, 6 пар выдач из 6, 02.10.2026). Без
+    // этого показ сохранённого списка при открытии и выдача из сети следом
+    // «различались», и приложение переподключалось под человеком.
+    String reality(String sni) =>
+        'vless://33333333-3333-3333-3333-333333333333@r.example.com:443?security=reality&type=tcp'
+        '&sni=$sni&fp=chrome&pbk=PUBKEY&sid=aa11&flow=xtls-rprx-vision#R';
+    List<ParsedServer> viaXray(String link) {
+      final s = realityViaXray(parseVless(link)!..link = link);
+      s.outbound['tag'] = 'srv_0';
+      s.coreKey = serverCoreKey(s);
+      return [s];
+    }
+
+    List<ParsedServer> viaSingbox(String link) {
+      final s = parseVless(link)!..link = link;
+      s.outbound['tag'] = 'srv_0';
+      s.coreKey = serverCoreKey(s);
+      return [s];
+    }
+
+    expect(sameServersForCore(viaXray(reality('a.example.com')), viaXray(reality('b.example.com'))), isTrue);
+    expect(
+        sameServersForCore(viaSingbox(reality('a.example.com')), viaSingbox(reality('b.example.com'))), isTrue);
+    // У обычного TLS имя сервера — часть адреса: другое имя — другой сервер.
+    String tls(String sni) =>
+        'vless://33333333-3333-3333-3333-333333333333@r.example.com:443?security=tls&type=tcp&sni=$sni#T';
+    expect(sameServersForCore(viaSingbox(tls('a.example.com')), viaSingbox(tls('b.example.com'))), isFalse);
+  });
+
   test('servers without a fingerprint are never treated as unchanged', () {
     final bare = _parse([_a])..first.coreKey = '';
     expect(sameServersForCore(bare, bare), isFalse);
