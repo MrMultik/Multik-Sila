@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Close to the app's dark background, so the purple shield stands out. -->
-    <color name="ic_launcher_background">#17131F</color>
+    <!-- The dark background of the "M" icon; the glowing letter is the foreground. -->
+    <color name="ic_launcher_background">#15121F</color>
 </resources>

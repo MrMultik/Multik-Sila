@@ -1356,9 +1356,16 @@ SilaTUN, и рукопожатие завершает стек туннеля, �
   те же; выигрыш во времени ответа и в независимости от DNS сервера.
 - **FakeIP — `rewrite_ttl: 1`** (sing-box отдаёт 600 с и не помнит выданное
   после перезапуска — «missing fakeip record»).
-- **Значок — щит из установщика** везде: Windows (app_icon.ico, трей) и
-  Android (mipmap + адаптивный на тёмном фоне #17131F). До этого стоял
-  стандартный значок Flutter.
+- **Значок — светящаяся «M»** (выбор пользователя 02.10.2026 из четырёх
+  вариантов; щит из установщика, стоявший в 1.0.17, ему не понравился).
+  Исходники — `docs/assets/icon/*.svg`: `icon.svg` (крупные размеры),
+  `icon-small.svg` (16–48 px: без свечения, линия толще — иначе в трее каша),
+  `icon-android-foreground.svg` (буква в безопасной зоне адаптивного значка,
+  фон — цвет `ic_launcher_background` #15121F). Растр: Edge
+  `--headless=old --default-background-color=00000000 --screenshot` в 1024 px,
+  дальше уменьшение System.Drawing; один .ico (кадры PNG 16–256) лежит в трёх
+  местах — `windows/runner/resources/app_icon.ico`, `assets/tray_icon.ico`,
+  `installer/images/setup.ico`.
 
 ## AmneziaWG убран (01.10.2026)
 
