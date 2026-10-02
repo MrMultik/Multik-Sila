@@ -5907,7 +5907,15 @@ del "%~f0"
       _servers = _activeProfile != null ? (_serverCache[_activeProfile!.id] ?? []) : [];
       _selectedServer = _servers.isNotEmpty ? _servers.first : null;
       _latencyMs.clear();
-      if (_activeProfile == null) _subStatus = () => t('profile.addNone');
+      final next = _activeProfile;
+      if (next == null) {
+        _subStatus = () => t('profile.addNone');
+      } else if (_serverCache[next.id] != null) {
+        // Строка под профилем — про оставшийся профиль, как в _switchProfile.
+        // Без этого под ним висел итог удалённого («серверов: 2» над девятью).
+        final count = _servers.length;
+        _subStatus = () => '${t('sub.profile')} "${next.name}": ${t('sub.cached')} — $count';
+      }
     });
     await _dropSubCache(profile.id);
     await _saveProfiles();
