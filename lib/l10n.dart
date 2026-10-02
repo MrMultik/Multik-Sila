@@ -903,10 +903,11 @@ const Map<String, Map<String, String>> _strings = {
         'tunnel plays more smoothly, without stalls. Sites open as before.',
   },
   'hint.autoOnConnect': {
-    'ru': 'Если задержки ещё не измерены — тест запустится сам. Когда цифры уже есть, '
-        'повторно не гоняется.',
-    'en': 'If latencies are not measured yet, the test runs automatically. When numbers '
-        'already exist, it is not repeated.',
+    'ru': 'Только в режиме «Авто». Перед подключением тест запускается сам, если '
+        'задержки не измерены или цифрам больше двух минут; иначе берутся готовые.',
+    'en': 'Auto mode only. Before connecting, the test runs by itself if latencies are '
+        'not measured or are more than two minutes old; otherwise the existing '
+        'numbers are used.',
   },
   'hint.autoInterval': {'ru': '0 — не проверять по расписанию', 'en': '0 — no scheduled checks'},
   'hint.tolerance': {
@@ -1550,6 +1551,24 @@ const Map<String, Map<String, String>> _strings = {
   'check.ok': {
     'ru': 'Проверено: через сервер выходит',
     'en': 'Checked: traffic gets through',
+  },
+  'hint.latencyAndroid': {
+    'ru': 'Время соединения с каждым сервером напрямую, мимо VPN: цифры одинаковые '
+        'с подключением и без. Сломанный прокси так не виден — работает ли сервер '
+        'на деле, проверяет трафик после подключения.',
+    'en': 'The time to connect to each server directly, past the VPN: the numbers are '
+        'the same with and without a connection. A broken proxy is not caught this '
+        'way — whether a server really works is checked by traffic after connecting.',
+  },
+  'hint.latencyProxyAndroid': {
+    'ru': 'При подключённом VPN — настоящий запрос через каждый сервер: цифры больше '
+        '(от 100 мс) и зависят от нагрузки текущего соединения, зато нерабочий '
+        'сервер сразу виден как «недоступен». Без подключения меряется так же, как '
+        '«до сервера».',
+    'en': 'With the VPN connected, a real request through each server: bigger numbers '
+        '(100 ms and up) that depend on the load of the current connection, but a dead '
+        'server shows up as unavailable right away. Without a connection it measures '
+        'the same way as "to the server".',
   },
   'log.noTraffic': {
     'ru': 'Через «{name}» за {s} с не прошло ни байта — подключения нет',

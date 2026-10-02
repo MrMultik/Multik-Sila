@@ -2961,8 +2961,13 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     }
     final ok = await _probeActiveServer(timeout: _trafficCheckTimeout);
     if (!mounted || _runningEngineValue == null || seq != _verifySeq) return;
-    // Пока шла проверка, сервер сменили — её итог про прежний.
-    if (!identical(server, _selectedServer)) return;
+    // Пока шла проверка, сервер сменили — её итог про прежний. Проверяем
+    // заново: смена без _switchServer (загрузка списка, возврат на экран) свою
+    // проверку не заводит, и под щитом навсегда оставалось «Проверяю…».
+    if (!identical(server, _selectedServer)) {
+      unawaited(_verifyConnection());
+      return;
+    }
     final key = ok ? 'check.ok' : 'check.failed';
     setState(() {
       _connectionOk = ok;
@@ -2979,8 +2984,11 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     await _switchAwayFromUnhealthy();
   }
 
-  /// Сколько ждём трафика через только что выбранный сервер.
-  static const Duration _trafficCheckTimeout = Duration(seconds: 5);
+  /// Сколько ждём трафика через только что выбранный сервер. Было 5 с; по
+  /// просьбе пользователя (02.10.2026) — 15: на медленной мобильной сети
+  /// первое соединение (рукопожатие REALITY, TLS до проверочного сайта) не
+  /// всегда укладывалось в 5 и живой сервер браковался.
+  static const Duration _trafficCheckTimeout = Duration(seconds: 15);
 
   /// Номер последней начатой проверки трафика (см. _verifyConnection).
   int _verifySeq = 0;
@@ -3045,6 +3053,8 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // (мастер первого запуска заводит профиль до того, как экран существует).
   // Короткие приватные псевдонимы оставлены, чтобы не править сотню обращений.
   static const String _settingsPrefsKey = kSettingsPrefsKey;
+  // Android: способ замера один раз переведён на «до сервера» (02.10.2026).
+  static const String _latencyModeMigratedKey = 'android_latency_mode_migrated';
   Timer? _autoSelectTimer;
   Timer? _subUpdateTimer;
   // Повтор загрузки подписки после сбоя (см. _scheduleSubscriptionRetry).
@@ -3200,35 +3210,20 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       final error = status.error;
       if (error != null && error.isNotEmpty) _appendLog(error);
       _rescheduleHealthCheck();
-      // Туннель только что поднялся — в режиме «Авто» перемеряем серверы
-      // через само ядро и переходим на действительно лучший.
-      //
-      // До подъёма туннеля задержку на Android можно померить только
-      // TCP-рукопожатием (см. _testLatenciesWithoutProbes), и на бесплатных
-      // подписках эта цифра врёт: серверы за Cloudflare отвечают на
-      // рукопожатие за 40 мс, даже когда сами мертвы. Автовыбор вставал
-      // именно на них, проверка связи говорила «не выходит», и приложение
-      // перебирало такие же мёртвые по тем же цифрам. Через ядро замер
-      // сквозной — настоящий запрос через сам протокол.
-      //
-      // Только для сквозного замера. В режиме «до сервера» замер одинаков с
-      // туннелем и без (см. _testLatenciesWithoutProbes), повторять его сразу
-      // после подключения незачем, а мёртвый сервер ловит проверка трафика.
-      if (!wasRunning &&
-          status.running &&
-          _autoServerMode &&
-          _servers.length > 1 &&
-          _settings.latencyMode != 'connect') {
-        Future.delayed(const Duration(seconds: 2), () {
-          if (mounted && _runningEngine != null && !_testingLatency) {
-            _autoSelectBest(silent: true);
-          }
-        });
-      }
+      // Здесь раньше сразу после подъёма туннеля «Авто» перемерял серверы
+      // через само ядро — против мёртвых серверов, отвечающих на рукопожатие.
+      // Мёртвый сервер теперь ловит проверка трафика (_verifyConnection) и
+      // уводит с него за 15 с, а перемер сразу после подключения менял цифры
+      // у всех серверов — то самое «пингует с подключённого VPN». Кто выбрал
+      // «через сервер», получит такой замер по кнопке и по расписанию «Авто».
+      if (!wasRunning && status.running) unawaited(_adoptRunningSelection());
     });
     AndroidVpn.isRunning().then((running) {
       if (mounted && running) {
         setState(() => _runningEngine = 'singbox');
+        // Служба жила, пока экрана не было: сервер — у неё (если список уже
+        // загружен; иначе это сделает загрузка списка).
+        unawaited(_adoptRunningSelection());
       }
     });
   }
@@ -3466,6 +3461,18 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
           // Битые настройки не должны мешать приложению стартовать —
           // молча откатываемся на дефолты, они равны прежнему поведению.
         }
+      }
+      // Android: один раз переводим замер на «до сервера». У давних установок
+      // там сохранился другой способ (полный запрос через ядро при
+      // подключении), и правка 1.0.18 у пользователя не сработала: «пингует с
+      // подключённого VPN» (02.10.2026). Выбор остаётся — вернуть «через
+      // сервер» можно в настройках, и это уже будет его решение.
+      if (Env.isAndroid && !(prefs.getBool(_latencyModeMigratedKey) ?? false)) {
+        if (_settings.latencyMode != 'connect') {
+          _settings.latencyMode = 'connect';
+          unawaited(prefs.setString(_settingsPrefsKey, jsonEncode(_settings.toJson())));
+        }
+        unawaited(prefs.setBool(_latencyModeMigratedKey, true));
       }
       // orElse срабатывает и на свежей установке (сохранённого значения ещё
       // нет), поэтому здесь тот же дефолт, что и у поля, — иначе «РФ
@@ -5258,7 +5265,36 @@ del "%~f0"
       _appendLog(t('log.subChangedReconnect'));
       unawaited(_reconnectAfterSubscriptionChange());
     }
+    // Первый список при уже работающем ядре — экран открыли заново, а служба
+    // туннеля на Android всё это время жила. Сервер берём у ядра, а не первый
+    // в списке.
+    if (wasRunning && previous == null) unawaited(_adoptRunningSelection());
     return parsed.length;
+  }
+
+  /// Ставит выбранным тот сервер, через который РЕАЛЬНО идёт работающее ядро
+  /// (селектор `proxy` в Clash API), и проверяет трафик уже под него.
+  ///
+  /// На Android служба туннеля переживает закрытие экрана. Открытый заново,
+  /// он собирал состояние с нуля и показывал первый сервер списка, хотя
+  /// ядро шло через другой: у пользователя (02.10.2026) «не запоминает, к
+  /// какому серверу подключен», на эмуляторе — VLESS-Multik на экране при
+  /// работающем VLESS LTE.
+  Future<void> _adoptRunningSelection() async {
+    if (_runningEngine == null || _servers.isEmpty) return;
+    try {
+      final r = await http
+          .get(Uri.parse('$_clashApiBase/proxies/proxy'))
+          .timeout(const Duration(seconds: 3));
+      if (r.statusCode != 200 || !mounted) return;
+      final now = (jsonDecode(r.body) as Map)['now'];
+      final running = _servers.where((s) => s.outbound['tag'] == now).firstOrNull;
+      if (running == null) return;
+      if (!identical(running, _selectedServer)) {
+        setState(() => _selectedServer = running);
+      }
+      unawaited(_verifyConnection());
+    } catch (_) {}
   }
 
   /// Переподключение после того, как обновлённая подписка принесла другой
@@ -7553,34 +7589,23 @@ del "%~f0"
 
   /// Замер задержки там, где нельзя запустить пробное ядро (Android).
   ///
-  /// На Windows тест поднимает служебные процессы на портах 17390+ и меряет
-  /// сквозной путь, не трогая рабочее соединение. На Android чужие
-  /// исполняемые файлы запускать нельзя вовсе, а ядро там одно и оно занято
-  /// туннелем. Отсюда два пути, и выбор между ними не вопрос вкуса:
+  /// «До сервера» (`connect`, по умолчанию) — одинаково с туннелем и без:
+  /// время TCP-рукопожатия до сервера, лучшее из нескольких
+  /// (_testLatenciesByConnect), а Hysteria2/TUIC — проба QUIC за один круг
+  /// (quic_probe.dart). Приложение исключено из собственного VPN
+  /// (addDisallowedApplication в SilaVpnService), так что при поднятом
+  /// туннеле его сокеты идут мимо — замер тот же, что без подключения.
+  /// Мёртвый сервер, который отвечает на рукопожатие (бесплатные списки за
+  /// Cloudflare), ловит проверка трафика после подключения (_verifyConnection).
   ///
-  /// 1. Туннель поднят — спрашиваем РАБОТАЮЩЕЕ ядро через Clash API. Это
-  ///    честный сквозной замер через сам протокол, тот же, что даёт режим
-  ///    `proxy` на Windows, и активное соединение он не рвёт.
-  /// 2. Туннеля нет — меряем время TCP-подключения до сервера. Ядро для
-  ///    этого не нужно совсем.
-  ///
-  /// Величины разные, и это надо понимать: первая включает работу протокола
-  /// и путь до проверочного сайта (сотни миллисекунд), вторая — только
-  /// сетевую доступность сервера (десятки). Сравнивать серверы между собой
-  /// можно и той, и другой — лишь бы в пределах одного прогона.
-  ///
-  /// Протоколы поверх UDP (Hysteria2, TUIC) меряет проба QUIC (см.
-  /// quic_probe.dart) — без ядра.
-  ///
-  /// В режиме «до сервера» (по умолчанию) — ВСЕГДА второй путь, и при
-  /// поднятом туннеле тоже. Раньше с туннелем шёл первый, и человек видел
-  /// после подключения совсем другие цифры, чем до (у пользователя 01.10.2026:
-  /// 300 мс без подключения, 650–1160 мс с ним) — «пингует с подключённого
-  /// сервера». Прямой замер при поднятом туннеле честен: приложение исключено
-  /// из собственного VPN (addDisallowedApplication в SilaVpnService), его
-  /// сокеты идут мимо. Мёртвый сервер, который отвечает на рукопожатие
-  /// (бесплатные списки за Cloudflare), ловит проверка трафика после
-  /// подключения (_verifyConnection) и уводит с него за 5 секунд.
+  /// «Через сервер» (`proxy`) при поднятом туннеле — полный запрос через
+  /// каждый сервер РАБОТАЮЩИМ ядром (Clash API). Цифры при этом другие, чем
+  /// до подключения, и зависят от нагрузки соединения: у пользователя
+  /// 01.10.2026 было 300 мс до, 650–1160 мс после — «пингует с подключённого
+  /// VPN». Поэтому это не умолчание, и старые установки один раз переведены
+  /// на «до сервера» (_readPreferences). Без туннеля ядра нет, и «через
+  /// сервер» меряет так же, как «до сервера». «По готовому соединению»
+  /// (`warm`) держится на пробных ядрах — здесь оно идёт как «через сервер».
   Future<void> _testLatenciesWithoutProbes() async {
     if (_runningEngine != null && _settings.latencyMode != 'connect') {
       final timeoutMs = _settings.latencyTimeoutMs;
@@ -7596,10 +7621,7 @@ del "%~f0"
             final data = jsonDecode(resp.body) as Map<String, dynamic>;
             if (mounted) setState(() => _latencyMs[tag] = data['delay'] as int);
           } else {
-            // Неуспех Clash API раньше не писал в лог НИЧЕГО: исключения
-            // ловились, а честный отказ ядра проходил молча. Три сервера из
-            // пяти падали без единой строки, и на поиск причины ушёл лишний
-            // круг — при том что ядро прямо в ответе объясняет, что не так.
+            // Ядро прямо в ответе объясняет, что не так, — в журнал.
             _noteLatencyFailure(s.name, 'HTTP ${resp.statusCode} ${resp.body.trim()}');
           }
         } catch (e) {
@@ -9910,7 +9932,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _autoFilter = TextEditingController(text: s.autoSelectFilter);
     _autoLimit = TextEditingController(text: '${s.autoSelectLimit}');
     _latencyWarmup = s.latencyWarmup;
-    _latencyMode = s.latencyMode;
+    // На Android «по готовому соединению» нет (пробных ядер нет), а
+    // DropdownButton падает на значении, которого нет среди пунктов.
+    _latencyMode = !Env.canSpawnProbeCores && s.latencyMode == 'warm' ? 'proxy' : s.latencyMode;
     _autoFavFirst = s.autoSelectFavFirst;
     _autoOnConnect = s.autoSelectOnConnect;
     _tlsFragment = s.tlsFragment;
@@ -10478,7 +10502,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               items: [
                 DropdownMenuItem(value: 'proxy', child: Text(t('set.latencyProxy'))),
-                DropdownMenuItem(value: 'warm', child: Text(t('set.latencyWarm'))),
+                // На Android пробных ядер нет, а «по готовому соединению»
+                // держится именно на них (см. _testLatenciesWithoutProbes).
+                if (Env.canSpawnProbeCores)
+                  DropdownMenuItem(value: 'warm', child: Text(t('set.latencyWarm'))),
                 DropdownMenuItem(value: 'connect', child: Text(t('set.latencyConnect'))),
               ],
               onChanged: (v) => setState(() => _latencyMode = v ?? _latencyMode),
@@ -10488,8 +10515,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(
               switch (_latencyMode) {
+                'connect' when !Env.canSpawnProbeCores => t('hint.latencyAndroid'),
                 'connect' => t('hint.latencyConnect'),
                 'warm' => t('hint.latencyWarm'),
+                _ when !Env.canSpawnProbeCores => t('hint.latencyProxyAndroid'),
                 _ => t('hint.latencyProxy'),
               },
               style: const TextStyle(fontSize: 12, height: 1.35),
@@ -10499,6 +10528,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _presetPicker(t('set.presets'), AppSettings.latencyUrlPresets, _latencyUrl),
             _field(_latencyUrl, t('set.latencyUrl'),
                 hint: t('hint.latencyUrl')),
+            // Через Clash API ядро каждый раз открывает новое соединение —
+            // прогревать нечего, а на Android замер идёт только так.
+            if (Env.canSpawnProbeCores)
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: Text(t('set.latencyWarmup')),
