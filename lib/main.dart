@@ -2928,35 +2928,62 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   /// Запрос идёт СКВОЗЬ выбранный сервер (тем же путём, что и проверка связи),
   /// то есть проверяет не «порт открыт», а «наружу выходит».
   ///
-  /// Результат только показывается. Переключать сервер самостоятельно здесь
-  /// нельзя: человек нажал «Подключить» к КОНКРЕТНОМУ серверу, и подменять
-  /// его выбор без спроса — ровно то поведение, на которое он уже жаловался.
+  /// Трафику даётся [_trafficCheckTimeout]. Не прошёл — в режиме «Авто»
+  /// сразу уходим на следующий сервер (по задержке), и так по цепочке, пока
+  /// не найдётся рабочий или не кончатся серверы. Раньше здесь только писали
+  /// «наружу не выходит», а уводила с мёртвого сервера периодическая проверка
+  /// — после двух провалов, то есть через минуту с лишним; пользователь
+  /// попросил (01.10.2026): «подключился, пошла проверка, трафик за 5 секунд
+  /// не пошёл — пиши, что подключения нет, и переключай». В ручном режиме
+  /// сервер не меняем: человек нажал «Подключить» к КОНКРЕТНОМУ серверу, и
+  /// подменять его выбор без спроса — то, на что он уже жаловался; провал
+  /// виден под щитом.
   ///
   /// Зовётся при смене ядра (сеттер `_runningEngine`) И после каждой смены
   /// сервера в `_switchServer`. Второе обязательно: при переключении ядро то
   /// же, сеттер молчит, и под новым сервером висел итог прежнего. На эмуляторе
   /// так под REALITY-сервером, через который не шло ни байта, стояло
-  /// «Checked: traffic gets through».
+  /// «Checked: traffic gets through». При перезапуске ядра зовётся дважды
+  /// подряд — действует только последний вызов ([_verifySeq]), иначе два
+  /// провала одного сервера уводили бы через сервер.
   Future<void> _verifyConnection() async {
+    final seq = ++_verifySeq;
     if (_runningEngineValue == null) {
       if (mounted) setState(() => _connectionCheckKey = '');
       return;
     }
+    final server = _selectedServer;
     if (mounted) {
       setState(() {
         _connectionCheckKey = 'check.running';
         _connectionOk = false;
       });
     }
-    final ok = await _probeActiveServer();
-    if (!mounted || _runningEngineValue == null) return;
+    final ok = await _probeActiveServer(timeout: _trafficCheckTimeout);
+    if (!mounted || _runningEngineValue == null || seq != _verifySeq) return;
+    // Пока шла проверка, сервер сменили — её итог про прежний.
+    if (!identical(server, _selectedServer)) return;
     final key = ok ? 'check.ok' : 'check.failed';
     setState(() {
       _connectionOk = ok;
       _connectionCheckKey = key;
     });
-    _appendLog(t(key));
+    _appendLog(ok
+        ? t(key)
+        : tp('log.noTraffic', {'name': server?.name ?? '-', 's': _trafficCheckTimeout.inSeconds}));
+    if (ok || !_autoServerMode || !_settings.healthCheckAutoSwitch) return;
+    if (_busy || _stopRequested) return;
+    // Нет сети — виноваты не серверы, перебирать их незачем (см. _runHealthCheck).
+    if (!await _hasPhysicalNetwork()) return;
+    if (seq != _verifySeq || !identical(server, _selectedServer)) return;
+    await _switchAwayFromUnhealthy();
   }
+
+  /// Сколько ждём трафика через только что выбранный сервер.
+  static const Duration _trafficCheckTimeout = Duration(seconds: 5);
+
+  /// Номер последней начатой проверки трафика (см. _verifyConnection).
+  int _verifySeq = 0;
 
   String? _runningEngineValue;
 
@@ -3183,7 +3210,15 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       // именно на них, проверка связи говорила «не выходит», и приложение
       // перебирало такие же мёртвые по тем же цифрам. Через ядро замер
       // сквозной — настоящий запрос через сам протокол.
-      if (!wasRunning && status.running && _autoServerMode && _servers.length > 1) {
+      //
+      // Только для сквозного замера. В режиме «до сервера» замер одинаков с
+      // туннелем и без (см. _testLatenciesWithoutProbes), повторять его сразу
+      // после подключения незачем, а мёртвый сервер ловит проверка трафика.
+      if (!wasRunning &&
+          status.running &&
+          _autoServerMode &&
+          _servers.length > 1 &&
+          _settings.latencyMode != 'connect') {
         Future.delayed(const Duration(seconds: 2), () {
           if (mounted && _runningEngine != null && !_testingLatency) {
             _autoSelectBest(silent: true);
@@ -7526,12 +7561,20 @@ del "%~f0"
   /// сетевую доступность сервера (десятки). Сравнивать серверы между собой
   /// можно и той, и другой — лишь бы в пределах одного прогона.
   ///
-  /// Протоколы поверх UDP (Hysteria2, TUIC) вторым способом не измеряются
-  /// в принципе: их порт TCP-соединений не принимает. Без работающего ядра
-  /// они останутся без цифры — это честнее, чем показать заведомо
-  /// бессмысленное «недоступен».
+  /// Протоколы поверх UDP (Hysteria2, TUIC) меряет проба QUIC (см.
+  /// quic_probe.dart) — без ядра.
+  ///
+  /// В режиме «до сервера» (по умолчанию) — ВСЕГДА второй путь, и при
+  /// поднятом туннеле тоже. Раньше с туннелем шёл первый, и человек видел
+  /// после подключения совсем другие цифры, чем до (у пользователя 01.10.2026:
+  /// 300 мс без подключения, 650–1160 мс с ним) — «пингует с подключённого
+  /// сервера». Прямой замер при поднятом туннеле честен: приложение исключено
+  /// из собственного VPN (addDisallowedApplication в SilaVpnService), его
+  /// сокеты идут мимо. Мёртвый сервер, который отвечает на рукопожатие
+  /// (бесплатные списки за Cloudflare), ловит проверка трафика после
+  /// подключения (_verifyConnection) и уводит с него за 5 секунд.
   Future<void> _testLatenciesWithoutProbes() async {
-    if (_runningEngine != null) {
+    if (_runningEngine != null && _settings.latencyMode != 'connect') {
       final timeoutMs = _settings.latencyTimeoutMs;
       final url = _settings.latencyUrl;
       await _runLimited(_servers, (s) async {
@@ -8498,9 +8541,11 @@ del "%~f0"
   DateTime? _lastHealthRestart;
 
   /// Настоящий запрос через ТЕКУЩЕЕ соединение. `true` — сервер живой.
-  Future<bool> _probeActiveServer() async {
+  /// [timeout] — сколько ждать ответа; по умолчанию таймаут теста задержки.
+  Future<bool> _probeActiveServer({Duration? timeout}) async {
     final url = _settings.healthCheckUrl;
-    final timeout = Duration(milliseconds: _settings.latencyTimeoutMs + 1000);
+    final waitMs = timeout?.inMilliseconds ?? _settings.latencyTimeoutMs;
+    final httpTimeout = Duration(milliseconds: waitMs + 1000);
 
     // sing-box спрашиваем через его же Clash API: запрос уходит по текущему
     // выбранному outbound, и в TUN-режиме, и в обычном. Отдельного процесса
@@ -8510,8 +8555,8 @@ del "%~f0"
         final resp = await http
             .get(Uri.parse('$_clashApiBase/proxies/proxy/delay'
                 '?url=${Uri.encodeComponent(url)}'
-                '&timeout=${_settings.latencyTimeoutMs}'))
-            .timeout(timeout);
+                '&timeout=$waitMs'))
+            .timeout(httpTimeout);
         // 200 — прошло. Недоступный адрес Clash отдаёт как ошибку, и это
         // ровно то, что мы ловим.
         // 200 — прошло. Недоступный адрес Clash отдаёт как ошибку, и это
@@ -8548,8 +8593,8 @@ del "%~f0"
     final client = HttpClient()
       ..findProxy = (_) => 'PROXY 127.0.0.1:${_settings.localPort}';
     try {
-      final req = await client.getUrl(Uri.parse(url)).timeout(timeout);
-      final resp = await req.close().timeout(timeout);
+      final req = await client.getUrl(Uri.parse(url)).timeout(httpTimeout);
+      final resp = await req.close().timeout(httpTimeout);
       await resp.drain();
       return resp.statusCode >= 200 && resp.statusCode < 400;
     } catch (_) {

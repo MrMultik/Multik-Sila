@@ -1551,6 +1551,10 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Проверено: через сервер выходит',
     'en': 'Checked: traffic gets through',
   },
+  'log.noTraffic': {
+    'ru': 'Через «{name}» за {s} с не прошло ни байта — подключения нет',
+    'en': 'Nothing got through "{name}" in {s} s — no connection',
+  },
   'check.failed': {
     'ru': 'Соединение поднято, но наружу через него не выходит — выберите '
         'другой сервер',
