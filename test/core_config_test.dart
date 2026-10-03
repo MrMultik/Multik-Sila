@@ -243,6 +243,18 @@ void main() {
       expect(c['log']['output'], '/data/user/0/app/files/core_log.txt');
     });
 
+    test('the stack is gVisor whatever is set: TCP dies on the system stack', () {
+      // sing-box 1.14 не привязывает слушающий сокет системного стека к
+      // туннелю на Android, а приложение исключено из своего VPN — ответы
+      // уходили мимо туннеля (эмулятор, 03.10.2026: DNS есть, TCP нет).
+      expect(tun['stack'], 'gvisor');
+      for (final stack in ['system', 'mixed']) {
+        final other =
+            buildSingboxConfig(_input(android: true, settings: AppSettings()..tunStack = stack)).config;
+        expect(((other['inbounds'] as List).single as Map)['stack'], 'gvisor', reason: stack);
+      }
+    });
+
     test('no process rule (it would make the router look up every connection)', () {
       expect(_rules(c).any((r) => r.containsKey('process_path')), isFalse);
     });

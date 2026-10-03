@@ -18,7 +18,11 @@ param(
   [string]$Jdk = "C:\Program Files\Android\openjdk\jdk-21.0.8",
   # arm64 покрывает практически все современные телефоны; полный список нужен
   # для раздачи и для эмулятора (x86_64).
-  [string]$Target = "android/arm64,android/arm,android/amd64"
+  [string]$Target = "android/arm64,android/arm,android/amd64",
+  # Xray 26.9.30 требует Go 1.27 (go.mod: go 1.27). Системный Go на машине -
+  # 1.26.5, поэтому 1.27.1 лежит отдельно (go.dev, 02.10.2026) и берётся
+  # только здесь. gomobile/gobind надо пересобрать им же (go install ниже).
+  [string]$Go = "C:\dev\go1.27.1\go\bin"
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,6 +32,11 @@ $env:JAVA_HOME = $Jdk
 $env:ANDROID_HOME = $Sdk
 $env:ANDROID_SDK_ROOT = $Sdk
 $env:ANDROID_NDK_HOME = $Ndk
+# local: do not let the go command download another toolchain on its own.
+$env:GOTOOLCHAIN = "local"
+$env:Path = "$Go;$env:Path"
+$goVersion = (& go env GOVERSION)
+if ($goVersion -notmatch '^go1\.(2[7-9]|[3-9]\d)') { throw "need Go 1.27+, got $goVersion (pass -Go)" }
 $env:Path = "$((go env GOPATH))\bin;$Jdk\bin;$env:Path"
 
 # gomobile и gobind - форк SagerNet: официальный golang.org/x/mobile не умеет
@@ -44,7 +53,7 @@ if (-not (Test-Path "$((go env GOPATH))\bin\gomobile.exe")) {
 #   link: invalid reference to os.checkPidfdOnce
 # Версия ядра проставляется здесь же: без неё оно отвечает "unknown", а экран
 # "О программе" её показывает.
-$ld = "-X github.com/sagernet/sing-box/constant.Version=1.13.16 " +
+$ld = "-X github.com/sagernet/sing-box/constant.Version=1.14.2 " +
       "-X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0"
 
 # with_gvisor - сетевой стек для TUN, with_quic - Hysteria2/TUIC и QUIC-транспорты,

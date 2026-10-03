@@ -17,15 +17,20 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.system.OsConstants
+import com.multiksila.libbox.BridgeOptions
+import com.multiksila.libbox.BridgeSession
 import com.multiksila.libbox.CommandServer
 import com.multiksila.libbox.CommandServerHandler
 import com.multiksila.libbox.InterfaceUpdateListener
 import com.multiksila.libbox.Libbox
 import com.multiksila.libbox.LocalDNSTransport
+import com.multiksila.libbox.NeighborUpdateListener
 import com.multiksila.libbox.NetworkInterfaceIterator
 import com.multiksila.libbox.OverrideOptions
 import com.multiksila.libbox.PlatformInterface
+import com.multiksila.libbox.PlatformUser
 import com.multiksila.libbox.SetupOptions
+import com.multiksila.libbox.ShellSession
 import com.multiksila.libbox.StringIterator
 import com.multiksila.libbox.SystemProxyStatus
 import com.multiksila.libbox.TunOptions
@@ -129,16 +134,17 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         // смещением и затирают друг друга: журнал ядра получался рваным ровно
         // тогда, когда по нему надо было разбирать поломку. Сюда идут только
         // паники Go — то, чего в обычном логе не бывает вовсе.
-        try {
-            Libbox.redirectStderr(File(filesDir, "core_panic.txt").absolutePath)
-        } catch (e: Exception) {
-            android.util.Log.w("MultikSila", "не удалось перенаправить лог ядра: ${e.message}")
-        }
-
+        //
+        // С sing-box 1.14 этим занимается сам setup: stderr уходит в
+        // core/CrashReport-Android.log, а прошлый файл с паникой — в
+        // core/crash_reports/. До 1.14 это был отдельный redirectStderr в
+        // core_panic.txt (его экран «Конфиги ядер» показывает для старых
+        // установок).
         Libbox.setup(SetupOptions().apply {
             basePath = filesDir.absolutePath
             workingPath = working.absolutePath
             tempPath = temp.absolutePath
+            crashReportSource = "Android"
             // Обходной путь для нативного стека Android — включён у всех
             // клиентов на libbox, без него на части прошивок ядро падает
             // на старте потока.
@@ -373,9 +379,10 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             // Маршруты задаёт ядро, а не мы: список приходит уже с учётом
             // выбранного режима (весь трафик или обход РФ), и дублировать
             // эту логику здесь значило бы завести второй источник правды.
-            // .value, а не .value(): библиотека отдаёт адрес в обёртке
-            // StringBox с методом getValue(), и Kotlin видит его свойством.
-            builder.addDnsServer(options.dnsServerAddress.value)
+            // С sing-box 1.14 адресов DNS — список (раньше один, в обёртке
+            // StringBox).
+            val dnsServers = options.dnsServerAddress
+            while (dnsServers.hasNext()) builder.addDnsServer(dnsServers.next())
 
             var routes = options.inet4RouteAddress
             if (routes.hasNext()) {
@@ -722,12 +729,50 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
 
     override fun readWIFIState(): WIFIState? = null
 
-    /**
-     * Системные корневые сертификаты ядру не отдаём: доверять оно должно ровно
-     * тому, что записано в конфиге. Отдать сюда весь системный список значило
-     * бы молча расширить доверие на всё, что установлено в системе.
-     */
-    override fun systemCertificates(): StringIterator = emptyList<String>().toIterator()
+    // ------------------------------------------------------------------
+    // Появилось в sing-box 1.14: соседи по сети, оболочка и SFTP для его
+    // SSH-сервера, Tailscale, сетевые мосты. Ничем из этого конфиг Multik
+    // Sila не пользуется (и тегов сборки под них в .aar нет — см.
+    // mobile/build_aar.ps1), поэтому «нет» на всё. Отказ — исключением: оно
+    // уходит в Go ошибкой, а не роняет процесс.
+    // ------------------------------------------------------------------
+
+    override fun cancelNotification(identifier: String, typeID: Int) {
+        getSystemService(NotificationManager::class.java).cancel(identifier.hashCode())
+    }
+
+    override fun startNeighborMonitor(listener: NeighborUpdateListener) {}
+
+    override fun closeNeighborMonitor(listener: NeighborUpdateListener) {}
+
+    override fun registerMyInterface(name: String) {}
+
+    override fun usePlatformShell(): Boolean = false
+
+    override fun checkPlatformShell() = throw UnsupportedOperationException("no platform shell")
+
+    override fun openShellSession(
+        user: PlatformUser,
+        command: String,
+        environ: StringIterator,
+        term: String,
+        rows: Int,
+        cols: Int,
+    ): ShellSession = throw UnsupportedOperationException("no platform shell")
+
+    override fun lookupUser(username: String): PlatformUser =
+        throw UnsupportedOperationException("no platform users")
+
+    override fun lookupSFTPServer(): String = throw UnsupportedOperationException("no SFTP server")
+
+    override fun readSystemSSHHostKey(): String = throw UnsupportedOperationException("no SSH host key")
+
+    override fun tailscaleHostname(): String = ""
+
+    override fun usePlatformBridge(): Boolean = false
+
+    override fun createBridge(options: BridgeOptions): BridgeSession =
+        throw UnsupportedOperationException("no platform bridge")
 
     override fun clearDNSCache() {
         // Своего кэша DNS у нас нет — им занимается само ядро.
@@ -777,6 +822,12 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         statusListener?.invoke(running.get(), null)
         android.util.Log.d("MultikSila", message)
     }
+
+    // sing-box 1.14: отладочное падение по команде и SSH-агент — служебный
+    // канал ядра наружу не открыт, звать их некому.
+    override fun triggerNativeCrash() = throw UnsupportedOperationException("not supported")
+
+    override fun connectSSHAgent(): Int = throw UnsupportedOperationException("no SSH agent")
 
     // ------------------------------------------------------------------
     // Уведомление

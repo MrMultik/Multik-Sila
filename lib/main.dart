@@ -10899,6 +10899,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: (v) => setState(() => _ipv6Enabled = v),
           ),
           if (_ipv6Enabled) _field(_tunIpv6, t('set.tunIpv6')),
+          // На Android стек всегда gVisor (см. buildSingboxConfig) — выбор
+          // там ничего бы не менял.
+          if (Env.coreRunsAsProcess)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: DropdownButtonFormField<String>(
@@ -13108,6 +13111,16 @@ List<RuleSetSpec> ruleSetsWanted(AppSettings st, RoutingMode mode, {required boo
     // об этом в лог, чем оставить человека без сети.
     // `mixed` тоже требует gVisor — он использует его для UDP.
     var tunStack = st.tunStack;
+    // Android — только gVisor. Системный стек (и `mixed`, у которого TCP
+    // идёт им же) принимает TCP слушающим сокетом в НАШЕМ процессе, а
+    // приложение исключено из собственного VPN (addDisallowedApplication в
+    // SilaVpnService — без этого замер «до сервера» шёл бы через туннель).
+    // sing-box до 1.13 привязывал этот сокет к интерфейсу туннеля на любой
+    // платформе с PlatformInterface; 1.14 делает так только на Apple
+    // (ForwarderBindInterface: C.IsDarwin), и ответы сокета уходят в Wi-Fi
+    // мимо туннеля. Итог на эмуляторе (03.10.2026): DNS работает, TCP — ни
+    // одного соединения, браузер стоит; с gVisor — HTTP 200.
+    if (!input.coreRunsAsProcess && input.tunMode) tunStack = 'gvisor';
     if ((tunStack == 'gvisor' || tunStack == 'mixed') && !input.gvisorSupported) {
       warnings.add('log.tunStackFallback');
       tunStack = 'system';

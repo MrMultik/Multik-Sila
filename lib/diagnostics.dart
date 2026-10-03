@@ -64,6 +64,18 @@ class _ConfigViewScreenState extends State<ConfigViewScreen> {
         }
       }
     } catch (_) {}
+    // Android, sing-box 1.14+: паники ядра пишет само ядро, в
+    // core/CrashReport-Android.log (до 1.14 — core_panic.txt выше).
+    try {
+      final core = Directory('${widget.appDir}${Platform.pathSeparator}core');
+      if (core.existsSync()) {
+        for (final e in core.listSync()) {
+          if (e is File && e.path.split(Platform.pathSeparator).last.startsWith('CrashReport-')) {
+            found.add(e);
+          }
+        }
+      }
+    } catch (_) {}
     found.sort((a, b) => a.path.compareTo(b.path));
     if (!mounted) return;
     setState(() {
