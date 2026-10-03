@@ -2004,6 +2004,38 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Взят сохранённый список серверов: {count}',
     'en': 'Using the saved server list: {count}',
   },
+  'set.qsTile': {
+    'ru': 'Кнопка в шторке',
+    'en': 'Quick settings tile',
+  },
+  'set.qsTileHint': {
+    'ru': 'Включать и выключать VPN из быстрых настроек, не открывая приложение',
+    'en': 'Turn the VPN on and off from quick settings without opening the app',
+  },
+  'set.qsTileAdd': {
+    'ru': 'Добавить',
+    'en': 'Add',
+  },
+  'set.qsTileAdded': {
+    'ru': 'Кнопка добавлена в шторку',
+    'en': 'The tile was added to quick settings',
+  },
+  'set.qsTileAlready': {
+    'ru': 'Кнопка уже есть в шторке',
+    'en': 'The tile is already in quick settings',
+  },
+  'set.qsTileDeclined': {
+    'ru': 'Кнопку не добавили',
+    'en': 'The tile was not added',
+  },
+  'set.qsTileManual': {
+    'ru': 'На этой версии Android: откройте шторку, нажмите карандаш и перетащите «Multik Sila» наверх',
+    'en': 'On this Android version: open quick settings, tap the pencil and drag "Multik Sila" up',
+  },
+  'set.qsTileFailed': {
+    'ru': 'Не получилось предложить кнопку — добавьте её карандашом в шторке',
+    'en': 'Could not offer the tile — add it with the pencil in quick settings',
+  },
   'log.profileReconnect': {
     'ru': 'Профиль сменился на «{name}» — переподключаюсь на его сервер',
     'en': 'The profile changed to "{name}" — reconnecting to its server',

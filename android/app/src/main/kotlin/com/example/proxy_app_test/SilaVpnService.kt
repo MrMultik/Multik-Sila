@@ -65,6 +65,13 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
     companion object {
         const val ACTION_START = "com.example.proxy_app_test.START"
         const val ACTION_STOP = "com.example.proxy_app_test.STOP"
+        /** Запуск с последним конфигом, на котором туннель поднимался (плитка). */
+        const val ACTION_START_LAST = "com.example.proxy_app_test.START_LAST"
+        private const val LAST_TUNNEL_FILE = "last_tunnel.json"
+
+        /** Есть ли с чем включиться без приложения (см. SilaTileService). */
+        fun hasLastConfig(context: Context): Boolean =
+            File(context.filesDir, LAST_TUNNEL_FILE).length() > 0
         const val EXTRA_CONFIG = "config"
         const val EXTRA_XRAY_BRIDGES = "xray_bridges"
 
@@ -173,7 +180,14 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             }
         }
 
-        val config = intent?.getStringExtra(EXTRA_CONFIG)
+        var config = intent?.getStringExtra(EXTRA_CONFIG)
+        var bridges = intent?.getStringArrayExtra(EXTRA_XRAY_BRIDGES)
+        if (intent?.action == ACTION_START_LAST) {
+            loadLastConfig()?.let { (savedConfig, savedBridges) ->
+                config = savedConfig
+                bridges = savedBridges
+            }
+        }
         if (config.isNullOrBlank()) {
             // Запуск без конфига — это перезапуск системой после того, как нас
             // выгрузили из памяти. Восстановить нечего: конфиг живёт на стороне
@@ -185,7 +199,9 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
 
         startForegroundNotification()
         try {
-            startTunnel(config, intent.getStringArrayExtra(EXTRA_XRAY_BRIDGES))
+            startTunnel(config!!, bridges)
+            saveLastConfig(config!!, bridges)
+            SilaTileService.refresh(this)
         } catch (e: Exception) {
             statusListener?.invoke(false, e.message ?: e.toString())
             stopTunnel()
@@ -292,9 +308,29 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
 
         stopDefaultInterfaceMonitorInternal()
         statusListener?.invoke(false, null)
+        SilaTileService.refresh(this)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
+
+    /**
+     * Последний конфиг, на котором туннель поднялся, — для плитки в шторке.
+     * В личной папке приложения, рядом с config.json, который пишет Dart.
+     */
+    private fun saveLastConfig(config: String, bridges: Array<String>?) {
+        runCatching {
+            val json = JSONObject()
+                .put("config", config)
+                .put("bridges", JSONArray().apply { bridges?.forEach { put(it) } })
+            File(filesDir, LAST_TUNNEL_FILE).writeText(json.toString())
+        }
+    }
+
+    private fun loadLastConfig(): Pair<String, Array<String>>? = runCatching {
+        val json = JSONObject(File(filesDir, LAST_TUNNEL_FILE).readText())
+        val list = json.optJSONArray("bridges") ?: JSONArray()
+        json.getString("config") to Array(list.length()) { list.getString(it) }
+    }.getOrNull()
 
     private fun closeBridges() {
         xrayBridges.values.forEach { bridge ->

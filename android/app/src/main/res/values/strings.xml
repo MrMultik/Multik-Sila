@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="tile_label" translatable="false">Multik Sila</string>
+    <string name="tile_on">Connected</string>
+    <string name="tile_off">Off</string>
+</resources>

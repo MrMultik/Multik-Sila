@@ -5445,6 +5445,7 @@ del "%~f0"
             .timeout(const Duration(seconds: 2));
         if (resp.statusCode == 204 || resp.statusCode == 200) {
           unawaited(_verifyConnection());
+          unawaited(_maybeOfferQsTile());
           return;
         }
       } catch (_) {}
@@ -5452,6 +5453,21 @@ del "%~f0"
       await Future.delayed(const Duration(milliseconds: 300));
     }
     _appendLog(tp('log.clashApiUnreachable', {'e': 'PUT /proxies/proxy'}));
+  }
+
+  /// Плитку в шторке быстрых настроек предлагаем ОДИН раз — после первого
+  /// подключения, когда человеку уже есть что включать и выключать. Дальше —
+  /// кнопкой в настройках («Запуск и автоматизация»).
+  static const String _qsTileAskedPrefsKey = 'qs_tile_asked';
+
+  Future<void> _maybeOfferQsTile() async {
+    if (!Env.isAndroid) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getBool(_qsTileAskedPrefsKey) ?? false) return;
+      await prefs.setBool(_qsTileAskedPrefsKey, true);
+      await AndroidVpn.requestAddTile();
+    } catch (_) {}
   }
 
   /// Запомненный для профиля сервер в этом списке (см. _rememberedServer).
@@ -10106,6 +10122,26 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  /// Плитка «Multik Sila» в шторку быстрых настроек (Android 13+ — системным
+  /// окном; ниже — подсказка, как добавить её карандашом в самой шторке).
+  Future<void> _addQsTile() async {
+    int code;
+    try {
+      code = await AndroidVpn.requestAddTile();
+    } catch (_) {
+      code = -1;
+    }
+    if (!mounted) return;
+    final key = switch (code) {
+      2 => 'set.qsTileAdded',
+      1 => 'set.qsTileAlready',
+      0 => 'set.qsTileDeclined',
+      -100 => 'set.qsTileManual',
+      _ => 'set.qsTileFailed',
+    };
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t(key))));
+  }
+
   late final TextEditingController _dnsDirect;
   late final TextEditingController _dnsRemote;
   late final TextEditingController _localPort;
@@ -10579,6 +10615,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         children: [
           if (_openSection == 'launch') ...[
+          if (Env.isAndroid)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.dashboard_customize_outlined),
+              title: Text(t('set.qsTile')),
+              subtitle: Text(t('set.qsTileHint'), style: const TextStyle(fontSize: 12)),
+              trailing: TextButton(onPressed: _addQsTile, child: Text(t('set.qsTileAdd'))),
+            ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: Text(t('set.autostart')),

@@ -1,7 +1,10 @@
 package com.example.proxy_app_test
 
 import android.app.Activity
+import android.app.StatusBarManager
+import android.content.ComponentName
 import android.content.Intent
+import android.graphics.drawable.Icon
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
@@ -114,6 +117,23 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "isRunning" -> result.success(SilaVpnService.tunnelRunning)
+
+                // Предложить плитку в шторку быстрых настроек системным окном.
+                // Есть только с Android 13; ниже плитку добавляют карандашом в
+                // самой шторке. Ответ — код StatusBarManager
+                // (TILE_ADD_REQUEST_RESULT_*), -100 — Android старше 13.
+                "requestAddTile" -> {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                        result.success(-100)
+                    } else {
+                        getSystemService(StatusBarManager::class.java).requestAddTileService(
+                            ComponentName(this, SilaTileService::class.java),
+                            getString(R.string.tile_label),
+                            Icon.createWithResource(this, R.drawable.ic_qs_tile),
+                            mainExecutor,
+                        ) { code -> result.success(code) }
+                    }
+                }
 
                 // Версии обоих ядер спрашиваем у самих ядер, а не помним
                 // числом в коде: на Windows уже ловили случай, когда

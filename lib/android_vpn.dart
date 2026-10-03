@@ -44,6 +44,13 @@ class AndroidVpn {
 
   static Future<void> stop() => _commands.invokeMethod<void>('stop');
 
+  /// Предложить плитку «Multik Sila» в шторку быстрых настроек (системное
+  /// окно, Android 13+). Возвращает код StatusBarManager: 2 — добавлена,
+  /// 1 — уже была, 0 — человек отказался, меньше нуля — ошибка; -100 —
+  /// Android старше 13, там плитку добавляют карандашом в самой шторке.
+  static Future<int> requestAddTile() async =>
+      await _commands.invokeMethod<int>('requestAddTile') ?? -1;
+
   static Future<bool> isRunning() async =>
       await _commands.invokeMethod<bool>('isRunning') ?? false;
 
