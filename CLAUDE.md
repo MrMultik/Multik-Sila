@@ -1435,6 +1435,19 @@ tcp и grpc) в outbound Xray с `engine: 'xray'`. `pqv` (ML-DSA-65) и `spx` б
   `/connections` пуст, в журнале ядра только `router: found package name`.
   Проверка из оболочки эмулятора без браузера:
   `adb shell 'printf "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n" | nc -w 8 example.com 80'`.
+- **Дескриптор TUN: у libbox своя копия (`dup` в `service.go`), оригинал наш.**
+  Закрывать оригинал обязаны мы — при остановке И при повторном `openTun`
+  (перезапуск ядра на живом VPN: проверка связи, возврат сети, смена профиля).
+  Раньше прежний `ParcelFileDescriptor` затирался, и с каждым перезапуском
+  открытых `/dev/tun` становилось больше; `detachFd` — тоже неверно (тогда
+  туннели не закрывал никто, tun0 жил после отключения). Проверка на эмуляторе:
+  `adb root`, `ls -l /proc/<pid>/fd | grep -c /dev/tun` (при VPN ровно 2),
+  сборка мусора — `kill -10 <pid>`. **Под `adb root` трафик оболочки идёт мимо
+  VPN** — проверять через `su 2000 sh -c "...nc..."`.
+- **Под libbox у sing-box всегда включён файл кэша** (`box.go`:
+  `|| options.PlatformLogWriter != nil`), и селектор при старте берёт последний
+  сохранённый выбор, а не `default` из конфига — выбор отдаётся ядру командой
+  Clash API после подъёма туннеля (`_pushSelectionToCore`).
 - libbox 1.14: 13 новых методов PlatformInterface и 2 у CommandServerHandler —
   заглушки; `redirectStderr` больше нет (паники пишет сам `setup` в
   `core/CrashReport-Android.log`); DNS туннеля приходит списком.
