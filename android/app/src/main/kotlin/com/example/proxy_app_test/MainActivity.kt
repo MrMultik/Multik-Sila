@@ -113,7 +113,7 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
 
-                "isRunning" -> result.success(SilaVpnService.instance != null)
+                "isRunning" -> result.success(SilaVpnService.tunnelRunning)
 
                 // Версии обоих ядер спрашиваем у самих ядер, а не помним
                 // числом в коде: на Windows уже ловили случай, когда

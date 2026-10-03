@@ -83,6 +83,17 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         /** Куда сообщать о смене состояния и об ошибках ядра. */
         @Volatile
         var statusListener: ((running: Boolean, error: String?) -> Unit)? = null
+
+        /**
+         * Туннель поднят — ядро запущено, а не просто служба жива.
+         *
+         * Раньше канал отвечал `instance != null`, и служба, у которой ядро не
+         * поднялось, считалась работающим VPN: на телефоне пользователя
+         * (03.10.2026) щит после повторного открытия горел «Protected», а Clash
+         * API на 9090 отвечал «connection refused».
+         */
+        val tunnelRunning: Boolean
+            get() = instance?.running?.get() == true
     }
 
     private var commandServer: CommandServer? = null
@@ -176,6 +187,11 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         } catch (e: Exception) {
             statusListener?.invoke(false, e.message ?: e.toString())
             stopTunnel()
+            // stopTunnel выходит сразу, если ядро так и не завелось, — и
+            // служба оставалась висеть с уведомлением, а приложение считало
+            // её работающим VPN. Закрываем её явно.
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
             return START_NOT_STICKY
         }
         // NOT_STICKY: система не должна поднимать туннель сама, без ведома

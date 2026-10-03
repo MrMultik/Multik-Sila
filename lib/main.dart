@@ -3268,7 +3268,14 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       // уводит с него за 15 с, а перемер сразу после подключения менял цифры
       // у всех серверов — то самое «пингует с подключённого VPN». Кто выбрал
       // «через сервер», получит такой замер по кнопке и по расписанию «Авто».
-      if (!wasRunning && status.running) unawaited(_adoptRunningSelection());
+      final pushTag = status.running ? _pendingCoreSelection : null;
+      if (pushTag != null) {
+        // Туннель подняли мы — наш выбор ядру (см. _startAndroidTunnel).
+        _pendingCoreSelection = null;
+        unawaited(_pushSelectionToCore(pushTag));
+      } else if (!wasRunning && status.running) {
+        unawaited(_adoptRunningSelection());
+      }
     });
     AndroidVpn.isRunning().then((running) {
       if (mounted && running) {
@@ -5298,6 +5305,30 @@ del "%~f0"
 
     final previous = _serverCache[profile.id];
     final unchangedForCore = previous != null && sameServersForCore(previous, parsed);
+
+    // Список для ядра другой, а ядро работает на прежнем — новый откладываем
+    // до следующего подключения (_applyPendingSubscription), соединение не
+    // трогаем. Раньше здесь шло переподключение: остановка и сразу запуск. На
+    // Android остановка службы асинхронная, старое ядро ещё держит порты (Clash
+    // API, мосты Xray), и новое падало на них — служба оставалась без ядра.
+    // В 1.0.19 это стало срабатывать при КАЖДОМ открытии экрана со списком,
+    // который меняется часами (бесплатные igareck): сначала показывается
+    // сохранённая копия, следом приходит свежая. У пользователя (03.10.2026):
+    // «нажимаю на щит — не работает», после открытия «Protected» без ядра.
+    // Копию на диск при этом не пишем: она должна совпадать со списком, на
+    // котором работает ядро, иначе после открытия экрана тег srv_N указал
+    // бы на чужой сервер.
+    if (!unchangedForCore &&
+        previous != null &&
+        parsed.isNotEmpty &&
+        _runningEngine != null &&
+        _activeProfile?.id == profile.id) {
+      _pendingSubscription[profile.id] = raw;
+      _appendLog(tp('log.subChangedLater', {'count': parsed.length}));
+      setState(() => _subStatus = () => tp('sub.appliesOnReconnect', {'count': parsed.length}));
+      return 0;
+    }
+    _pendingSubscription.remove(profile.id);
     _serverCache[profile.id] = parsed;
 
     // пока грузилась подписка, юзер мог переключиться на другой профиль —
@@ -5346,14 +5377,6 @@ del "%~f0"
       _restoreLatencies(profile.id, parsed);
       _subStatus = status;
     });
-    // Работающее ядро держит ПРЕЖНИЙ список: его srv_3 — уже не тот сервер,
-    // что srv_3 на экране. Переключение по такому списку попадало бы в чужой
-    // сервер, поэтому переподключаемся с новым. Только для первого списка
-    // (previous == null) этого не нужно: ядро без серверов не работает.
-    if (wasRunning && previous != null && parsed.isNotEmpty) {
-      _appendLog(t('log.subChangedReconnect'));
-      unawaited(_reconnectAfterSubscriptionChange());
-    }
     // Первый список при уже работающем ядре — экран открыли заново, а служба
     // туннеля на Android всё это время жила. Сервер берём у ядра, а не первый
     // в списке.
@@ -5385,6 +5408,33 @@ del "%~f0"
       _rememberSelection();
       unawaited(_verifyConnection());
     } catch (_) {}
+  }
+
+  /// Сервер, который ядро должно взять, когда туннель поднимется (Android).
+  String? _pendingCoreSelection;
+
+  /// Выбор сервера — ядру командой Clash API, с повторами: событие «туннель
+  /// поднят» может прийти чуть раньше, чем API начнёт отвечать. Затем
+  /// проверка трафика уже под нужный сервер.
+  Future<void> _pushSelectionToCore(String tag) async {
+    for (var attempt = 0; attempt < 10; attempt++) {
+      try {
+        final resp = await http
+            .put(
+              Uri.parse('$_clashApiBase/proxies/proxy'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({'name': tag}),
+            )
+            .timeout(const Duration(seconds: 2));
+        if (resp.statusCode == 204 || resp.statusCode == 200) {
+          unawaited(_verifyConnection());
+          return;
+        }
+      } catch (_) {}
+      if (!mounted || _runningEngine == null) return;
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+    _appendLog(tp('log.clashApiUnreachable', {'e': 'PUT /proxies/proxy'}));
   }
 
   /// Запомненный для профиля сервер в этом списке (см. _rememberedServer).
@@ -5440,15 +5490,24 @@ del "%~f0"
     } catch (_) {}
   }
 
-  /// Переподключение после того, как обновлённая подписка принесла другой
-  /// список серверов. Через обычные остановку и старт — тем же путём, что и
-  /// кнопка: другого, «облегчённого», пути перезапуска в приложении нет, и
-  /// заводить его ради редкого случая незачем.
-  Future<void> _reconnectAfterSubscriptionChange() async {
-    if (_busy) return;
-    await _stopCore();
-    if (!mounted || _servers.isEmpty) return;
-    await _startCore();
+  /// Подписки, пришедшие при работающем ядре с другим списком серверов:
+  /// id профиля -> ответ как есть. Применяются, когда ядро не работает
+  /// (см. _applySubscriptionContent).
+  final Map<String, String> _pendingSubscription = {};
+
+  /// Отложенная подписка активного профиля — в дело, если ядро не работает:
+  /// перед подключением и после отключения.
+  Future<void> _applyPendingSubscription() async {
+    final profile = _activeProfile;
+    if (profile == null || _runningEngine != null) return;
+    final raw = _pendingSubscription.remove(profile.id);
+    if (raw == null) return;
+    final count = _applySubscriptionContent(profile, raw);
+    if (count > 0) {
+      try {
+        await File(_subCachePath(profile.id)).writeAsString(raw, flush: true);
+      } catch (_) {}
+    }
   }
 
   Future<void> _switchProfile(SubscriptionProfile profile) async {
@@ -7102,6 +7161,8 @@ del "%~f0"
     // Снимаем флаг предыдущей остановки — иначе после первого «Остановить»
     // системный прокси больше никогда бы не включился.
     _stopRequested = false;
+    // Подписка, пришедшая с новым списком при работающем ядре, — теперь.
+    await _applyPendingSubscription();
 
     // Перед подключением выбираем самый быстрый сервер. Тест гоняем, если
     // задержки не измерены или цифрам больше двух минут. Раньше — только при
@@ -7220,6 +7281,14 @@ del "%~f0"
           {'n': (bridgesConfig['inbounds'] as List).length}));
     }
 
+    // Выбранный сервер ядру ещё и отдельной командой — когда туннель
+    // поднимется (_bindAndroidVpn). Одного `default` в конфиге на Android
+    // мало: под libbox sing-box всегда включает свой файл кэша (box.go:
+    // `|| options.PlatformLogWriter != nil`), и селектор при старте берёт
+    // оттуда ПОСЛЕДНИЙ выбранный сервер, а `default` игнорирует. «Авто»
+    // выбирало Atlanta, а ядро вставало на srv_0, когда-то выбранный руками
+    // (эмулятор, 03.10.2026); на Windows ядро — отдельный процесс без кэша.
+    _pendingCoreSelection = _selectedServer?.outbound['tag'] as String?;
     await AndroidVpn.start(config: config, bridges: bridges);
     // Состояние щита придёт от службы через поток — здесь его не трогаем,
     // иначе на экране будет «подключено» раньше, чем ядро действительно
@@ -7425,12 +7494,21 @@ del "%~f0"
     _stopRequested = true;
     if (Env.isAndroid) {
       await AndroidVpn.stop();
+      // Остановка — интент службе, то есть асинхронная. Ждём, пока служба
+      // скажет, что туннеля нет: остановка ядра идёт на главном потоке
+      // целиком, так что этот ответ значит «порты свободны». Иначе запуск
+      // следом (переподключение, быстрое «выкл/вкл») упирался в порты ещё
+      // живого ядра и падал.
+      for (var i = 0; i < 30 && await AndroidVpn.isRunning(); i++) {
+        await Future.delayed(const Duration(milliseconds: 100));
+      }
       // Опрос статистики гасит сеттер `_runningEngine`.
       _runningEngine = null;
       _unhealthy.clear();
       _rescheduleHealthCheck();
       _appendLog(t('log.coreStopped'));
       if (mounted) setState(() => _statsText = null);
+      await _applyPendingSubscription();
       return;
     }
     _coreProcess?.kill();
@@ -7444,6 +7522,7 @@ del "%~f0"
     await _restoreSystemProxy();
     _appendLog(t('log.coreStopped'));
     if (mounted) setState(() => _statsText = null);
+    await _applyPendingSubscription();
   }
 
   /// Нажатие на сервер в списке — это решение человека, и с этой минуты

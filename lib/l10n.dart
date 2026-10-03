@@ -2004,9 +2004,13 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Взят сохранённый список серверов: {count}',
     'en': 'Using the saved server list: {count}',
   },
-  'log.subChangedReconnect': {
-    'ru': 'Подписка принесла другой список серверов — переподключаюсь с новым',
-    'en': 'The subscription brought a different server list — reconnecting with it',
+  'log.subChangedLater': {
+    'ru': 'Подписка принесла другой список серверов ({count}) — он применится при следующем подключении, текущее соединение не трогаю',
+    'en': 'The subscription brought a different server list ({count}) — it applies on the next connect; the current connection is left alone',
+  },
+  'sub.appliesOnReconnect': {
+    'ru': 'Подписка обновилась: серверов {count}. Новый список — при следующем подключении',
+    'en': 'Subscription updated: {count} servers. The new list applies on the next connect',
   },
   'log.subFormat': {
     'ru': 'Подписка разобрана как {format}: серверов {count}, пропущено {skipped}',
