@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 
@@ -24,8 +26,23 @@ import android.service.quicksettings.TileService
 class SilaTileService : TileService() {
 
     companion object {
-        /** Перерисовать плитку: состояние туннеля сменилось. */
+        /** Плитка, которую сейчас видно (шторка открыта). */
+        @Volatile
+        private var listening: SilaTileService? = null
+
+        /**
+         * Перерисовать плитку: состояние туннеля сменилось.
+         *
+         * Если шторка открыта — сразу. requestListeningState одного мало:
+         * плитке, которая уже слушает, система повторно onStartListening не
+         * зовёт, и открытая во время подключения шторка до следующего
+         * открытия показывала «Выключено» при поднятом VPN (у пользователя,
+         * 03.10.2026).
+         */
         fun refresh(context: Context) {
+            listening?.let { tile ->
+                Handler(Looper.getMainLooper()).post { tile.update(SilaVpnService.tunnelRunning) }
+            }
             runCatching {
                 requestListeningState(context, ComponentName(context, SilaTileService::class.java))
             }
@@ -34,7 +51,13 @@ class SilaTileService : TileService() {
 
     override fun onStartListening() {
         super.onStartListening()
+        listening = this
         update(SilaVpnService.tunnelRunning)
+    }
+
+    override fun onStopListening() {
+        if (listening === this) listening = null
+        super.onStopListening()
     }
 
     override fun onClick() {
@@ -54,7 +77,8 @@ class SilaTileService : TileService() {
         }
         val intent = Intent(this, SilaVpnService::class.java).setAction(SilaVpnService.ACTION_START_LAST)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
-        // Состояние «включено» придёт от службы (refresh), когда ядро поднимется.
+        // Пока ядро поднимается — «Подключение…»; итог придёт от службы (refresh).
+        update(running = true, connecting = true)
     }
 
     private fun openApp() {
@@ -70,12 +94,18 @@ class SilaTileService : TileService() {
         }
     }
 
-    private fun update(running: Boolean) {
+    private fun update(running: Boolean, connecting: Boolean = false) {
         val tile = qsTile ?: return
         tile.state = if (running) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
         tile.label = getString(R.string.tile_label)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            tile.subtitle = getString(if (running) R.string.tile_on else R.string.tile_off)
+            tile.subtitle = getString(
+                when {
+                    connecting -> R.string.tile_connecting
+                    running -> R.string.tile_on
+                    else -> R.string.tile_off
+                }
+            )
         }
         tile.updateTile()
     }

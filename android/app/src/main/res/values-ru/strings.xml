@@ -2,4 +2,5 @@
 <resources>
     <string name="tile_on">Подключено</string>
     <string name="tile_off">Выключено</string>
+    <string name="tile_connecting">Подключение…</string>
 </resources>

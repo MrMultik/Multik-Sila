@@ -210,6 +210,7 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
             // её работающим VPN. Закрываем её явно.
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
+            SilaTileService.refresh(this)
             return START_NOT_STICKY
         }
         // NOT_STICKY: система не должна поднимать туннель сама, без ведома
