@@ -97,7 +97,6 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
     }
 
     private var commandServer: CommandServer? = null
-    private var tunDescriptor: ParcelFileDescriptor? = null
 
     /**
      * Мосты Xray для xhttp-серверов, по одному на сервер, ключ — тег сервера.
@@ -109,6 +108,9 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
     private val xrayBridges = mutableMapOf<String, XrayInstance>()
 
     private val running = AtomicBoolean(false)
+
+    /** Наш оригинал дескриптора туннеля (у ядра — своя копия). */
+    private var tunDescriptor: ParcelFileDescriptor? = null
     private var interfaceListener: InterfaceUpdateListener? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
@@ -281,6 +283,7 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         // месте.
         closeBridges()
 
+        // Свою копию дескриптора ядро закрыло само, оригинал — наш (см. openTun).
         try {
             tunDescriptor?.close()
         } catch (_: Exception) {
@@ -476,7 +479,17 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
 
         val descriptor = builder.establish()
             ?: throw IllegalStateException("Android не выдал интерфейс VPN — разрешение отозвано?")
+        // libbox работает со СВОЕЙ копией дескриптора (dup в service.go) и
+        // закрывает её сам; оригинал — наш, и закрывать его обязаны мы. При
+        // перезапуске ядра на живом VPN (проверка связи, возврат сети, смена
+        // профиля) openTun зовётся снова — прежний оригинал закрываем здесь же.
+        // Раньше его просто затирали: прежний туннель жил до случайной сборки
+        // мусора, а с каждым перезапуском открытых /dev/tun становилось больше
+        // (эмулятор, 03.10.2026: 2 → 3 → … → 6). У пользователя тогда же:
+        // «работает, потом какое-то подключение — и всё отваливается».
+        val previous = tunDescriptor
         tunDescriptor = descriptor
+        runCatching { previous?.close() }
         return descriptor.fd
     }
 
