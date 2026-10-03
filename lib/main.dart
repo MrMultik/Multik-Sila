@@ -4583,13 +4583,50 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   /// 1.0.17, хотя в .exe давно «M». Скрипт обновления теперь сбрасывает кэш
   /// сам (apply_update.bat), но его пишет ПРЕЖНЯЯ версия — поэтому и здесь,
   /// при первом запуске новой.
+  ///
+  /// Одного сброса кэша мало (у пользователя щит остался и после него):
+  /// проводник помнит значок по ПУТИ к .exe. Поэтому ярлыки, ведущие на наш
+  /// .exe, получают значок явным файлом — tray_icon.ico из комплекта, та же
+  /// «M», но путь, по которому у проводника старой записи нет. Установщик
+  /// создаёт ярлыки так же (multik_sila.iss, [Icons]); здесь — для тех, кто
+  /// обновляется через приложение и чьи ярлыки не пересоздаются.
   Future<void> _refreshShellIconsOnce() async {
     const key = 'shell_icons_refreshed_for';
     try {
       final prefs = await SharedPreferences.getInstance();
       if (prefs.getString(key) == kAppVersion) return;
       await prefs.setString(key, kAppVersion);
-      await Process.run('ie4uinit.exe', ['-show']);
+      final exe = Platform.resolvedExecutable;
+      final ico = [File(exe).parent.path, 'data', 'flutter_assets', 'assets', 'tray_icon.ico']
+          .join(Platform.pathSeparator);
+      String quote(String s) => "'${s.replaceAll("'", "''")}'";
+      final script = [
+        '\$exe = ${quote(exe)}; \$ico = ${quote(ico)}',
+        r'$sh = New-Object -ComObject WScript.Shell',
+        r'if (Test-Path -LiteralPath $ico) {',
+        r"  foreach ($d in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('CommonDesktopDirectory'), [Environment]::GetFolderPath('CommonPrograms'))) {",
+        r'    if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }',
+        r'    Get-ChildItem -LiteralPath $d -Filter *.lnk -Recurse -Depth 2 -ErrorAction SilentlyContinue | ForEach-Object {',
+        r'      try {',
+        r'        $l = $sh.CreateShortcut($_.FullName)',
+        r'        if ($l.TargetPath -ieq $exe -and $l.IconLocation -ne "$ico,0") { $l.IconLocation = "$ico,0"; $l.Save() }',
+        r'      } catch {}',
+        r'    }',
+        r'  }',
+        r'}',
+        r'& "$env:WINDIR\System32\ie4uinit.exe" -show',
+      ].join('\n');
+      // -EncodedCommand: UTF-16LE в base64 — путь с кириллицей (папка
+      // профиля) доходит до PowerShell без перекодировки консолью.
+      final bytes = <int>[for (final u in script.codeUnits) ...[u & 0xff, u >> 8]];
+      await Process.run('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-EncodedCommand',
+        base64Encode(bytes),
+      ]);
     } catch (_) {}
   }
 

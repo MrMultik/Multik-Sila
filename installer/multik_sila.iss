@@ -108,9 +108,13 @@ Source: "{#BuildDir}\sing-box.exe"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "{#BuildDir}\xray.exe"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
 [Icons]
-Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
+; Значок ярлыка — явно, отдельным файлом (та же «M», что в .exe). Проводник
+; кэширует значок по ПУТИ, и после смены значка в .exe ярлык со значком «из
+; программы» показывал старый щит 1.0.17 даже после сброса кэша (03.10.2026).
+; Новый путь — новая запись в кэше. Сменится значок снова — менять и путь.
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\data\flutter_assets\assets\tray_icon.ico"
 Name: "{group}\{cm:UninstallProgram,{#AppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\data\flutter_assets\assets\tray_icon.ico"; Tasks: desktopicon
 
 [Run]
 ; БЕЗ `skipifsilent` — иначе самообновление оставляет человека без приложения.
