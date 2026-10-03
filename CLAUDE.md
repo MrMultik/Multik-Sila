@@ -1418,6 +1418,27 @@ tcp и grpc) в outbound Xray с `engine: 'xray'`. `pqv` (ML-DSA-65) и `spx` б
 - До подключения Android меряет задержку TCP-подключением (так задумано): порт
   открыт ≠ протокол работает, поэтому мёртвый REALITY показывал «244 мс».
 
+## Ядра Android = Windows: sing-box 1.14.2, Xray 26.9.30 (03.10.2026)
+
+- `.aar` — `mobile/build_aar.ps1`; Xray 26.9.30 требует **Go 1.27** (лежит
+  отдельно в `C:\dev\go1.27.1`, системный — 1.26.5), `GOTOOLCHAIN=local`.
+  gomobile запускать из Bash (из PowerShell падал на «malformed env var =C:»).
+  Теги Xray (`v26.9.30`) — не версии Go-модуля: брать по коммиту тега
+  (`git ls-remote ... refs/tags/v26.9.30`). `sagernet/gomobile/bind` держится
+  импортом в `silacore/deps.go`, иначе `go mod tidy` его выкидывает и gobind
+  падает. `.aar` вырос 57 → 81 МБ, `libsilacore.so` 58,6 → 81,1 МБ на ABI.
+- **На Android стек TUN — только gVisor** (`buildSingboxConfig`, выбор стека на
+  Android спрятан). sing-box 1.14 привязывает слушающий TCP-сокет системного
+  стека к TUN только на Apple (`ForwarderBindInterface: C.IsDarwin`; в 1.13 —
+  на любой платформе с PlatformInterface), а приложение исключено из своего VPN
+  (`addDisallowedApplication`). Симптом: DNS идёт, TCP — ни одного соединения,
+  `/connections` пуст, в журнале ядра только `router: found package name`.
+  Проверка из оболочки эмулятора без браузера:
+  `adb shell 'printf "GET / HTTP/1.0\r\nHost: example.com\r\n\r\n" | nc -w 8 example.com 80'`.
+- libbox 1.14: 13 новых методов PlatformInterface и 2 у CommandServerHandler —
+  заглушки; `redirectStderr` больше нет (паники пишет сам `setup` в
+  `core/CrashReport-Android.log`); DNS туннеля приходит списком.
+
 ## Известные баги, уже исправленные (не переоткрывать)
 
 - `Uri.userInfo` не декодирует percent-encoding — UUID/пароли с `%3D` и т.п. нужно
