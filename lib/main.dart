@@ -3223,6 +3223,7 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
     // фид не получил от приложения ни одного запроса.
     _prefsLoaded.future.then((_) {
       if (!mounted) return;
+      if (Env.hasWindowAndTray) unawaited(_refreshShellIconsOnce());
       if (Env.coresUpdateSeparately) _checkCoreUpdates();
       // Намеренно без await: обновление наборов правил не должно задерживать
       // ни показ окна, ни автоподключение. Результат ляжет рядом как
@@ -4574,6 +4575,24 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
 
   /// Пишет .bat, который дожидается выхода приложения, делает копию текущей
   /// сборки, накатывает новую и запускает её. Затем выходит из приложения.
+  /// Windows: один раз на версию сбросить кэш значков проводника.
+  ///
+  /// Ярлык на рабочем столе берёт значок из .exe, но проводник держит его в
+  /// своём кэше. После обновления через приложение (zip, ярлык не
+  /// пересоздаётся) у пользователя 03.10.2026 на 1.0.21 так и висел щит
+  /// 1.0.17, хотя в .exe давно «M». Скрипт обновления теперь сбрасывает кэш
+  /// сам (apply_update.bat), но его пишет ПРЕЖНЯЯ версия — поэтому и здесь,
+  /// при первом запуске новой.
+  Future<void> _refreshShellIconsOnce() async {
+    const key = 'shell_icons_refreshed_for';
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (prefs.getString(key) == kAppVersion) return;
+      await prefs.setString(key, kAppVersion);
+      await Process.run('ie4uinit.exe', ['-show']);
+    } catch (_) {}
+  }
+
   Future<void> _applyAppUpdateAndRestart() async {
     final exe = Platform.resolvedExecutable;
     final batPath = '$_workDir${Platform.pathSeparator}apply_update.bat';
@@ -4656,6 +4675,7 @@ if not errorlevel 1 (
 set "APP=%~dp0"
 xcopy "%APP%update_staging\\*" "%APP%." /E /Y /I /Q >nul
 rmdir /S /Q "%APP%update_staging"
+ie4uinit.exe -show >nul 2>&1
 start "" "%APP%$exeName"
 del "%~f0"
 ''';

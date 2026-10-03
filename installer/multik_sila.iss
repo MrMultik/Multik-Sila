@@ -52,6 +52,10 @@ PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
 UninstallDisplayIcon={app}\{#AppExeName}
+; В конце установки — SHChangeNotify(SHCNE_ASSOCCHANGED): Explorer перечитывает
+; значки. Без этого ярлык на рабочем столе после смены значка программы так и
+; показывал старый из кэша (1.0.17 -> «M» в 1.0.18, замечено 03.10.2026).
+ChangesAssociations=yes
 ; Заявляем совместимость с Windows 10 и новее: TUN-адаптер и wintun на более
 ; старых системах не проверялись.
 MinVersion=10.0
