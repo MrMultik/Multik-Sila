@@ -3512,6 +3512,7 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
             .map((k, v) => MapEntry(k as String, v as String));
       }
     } catch (_) {}
+    _runningProfileId = prefs.getString(_runningProfilePrefsKey);
     try {
       final raw = prefs.getString(_latencyPrefsKey);
       if (raw != null) _savedLatencies = jsonDecode(raw) as Map<String, dynamic>;
@@ -5394,6 +5395,11 @@ del "%~f0"
   /// работающем VLESS LTE.
   Future<void> _adoptRunningSelection() async {
     if (_runningEngine == null || _servers.isEmpty) return;
+    // Теги srv_N у каждого профиля свои: srv_3 ядра, поднятого на другом
+    // профиле, в этом списке — чужой сервер. Раньше так при переключении
+    // профиля при включённом VPN на экран (и в сохранённый выбор этого
+    // профиля) попадал случайный сервер.
+    if (_runningProfileId != null && _runningProfileId != _activeProfile?.id) return;
     try {
       final r = await http
           .get(Uri.parse('$_clashApiBase/proxies/proxy'))
@@ -5408,6 +5414,17 @@ del "%~f0"
       _rememberSelection();
       unawaited(_verifyConnection());
     } catch (_) {}
+  }
+
+  /// Профиль, на списке которого поднято ядро. Хранится и в настройках:
+  /// после повторного открытия экрана (Android) ядро живёт, а память нет.
+  String? _runningProfileId;
+  static const String _runningProfilePrefsKey = 'running_profile_id';
+
+  void _setRunningProfile(String? id) {
+    if (_runningProfileId == id) return;
+    _runningProfileId = id;
+    if (id != null) unawaited(_savePrefsString(_runningProfilePrefsKey, id));
   }
 
   /// Сервер, который ядро должно взять, когда туннель поднимется (Android).
@@ -5535,7 +5552,17 @@ del "%~f0"
         _selectedServer = null;
         _latencyMs.clear();
       });
+      await _showSavedSubscription(profile);
       await _loadSubscription(profile);
+    }
+    // VPN работает на прежнем профиле — переподключаемся на этот, к его
+    // сохранённому серверу (в «Авто» — к самому быстрому). Иначе экран
+    // показывал сервер нового профиля как подключённый, а ядро работало на
+    // старом списке (пользователь, 03.10.2026: «меняю профили — должно быть
+    // сохранённое подключение, а не менять информацию о другом»).
+    if (_runningEngine != null && _runningProfileId != profile.id && _servers.isNotEmpty && !_busy) {
+      _appendLog(tp('log.profileReconnect', {'name': profile.name}));
+      await _startCore();
     }
   }
 
@@ -7197,6 +7224,7 @@ del "%~f0"
       }
       if (_stopRequested) return;
     }
+    _setRunningProfile(_activeProfile?.id);
     // Последняя проверка перед тем, как что-то поднимать.
     //
     // Отмена, нажатая во время автовыбора, до сих пор помогала только если
@@ -7585,7 +7613,7 @@ del "%~f0"
     if (newServer.engine == 'xray') {
       await _ensureXrayBridge(newServer);
     }
-    if (_runningEngine == 'singbox' && _coreIsLive) {
+    if (_runningEngine == 'singbox' && _coreIsLive && _runningProfileId == _activeProfile?.id) {
       final tag = newServer.outbound['tag'] as String;
       try {
         final resp = await http
