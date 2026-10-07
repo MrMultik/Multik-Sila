@@ -1574,6 +1574,14 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Экран открыт заново — туннель работал всё это время',
     'en': 'Screen reopened — the tunnel kept running all along',
   },
+  'log.switchToWorking': {
+    'ru': 'Через «{from}» трафик не идёт — переключаюсь на «{to}»: через него запрос прошёл',
+    'en': 'No traffic through "{from}" — switching to "{to}": a request got through it',
+  },
+  'log.noWorkingServer': {
+    'ru': 'Ни через выбранный, ни через лучшие по замеру серверы запрос не прошёл — подключения нет',
+    'en': 'No request got through the selected server or the best ones by latency — no connection',
+  },
   'log.noTraffic': {
     'ru': 'Через «{name}» за {s} с не прошло ни байта — подключения нет',
     'en': 'Nothing got through "{name}" in {s} s — no connection',

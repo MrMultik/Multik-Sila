@@ -2984,6 +2984,34 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
         _connectionOk = false;
       });
     }
+    // «Авто» через sing-box: рабочий сервер ищем сразу среди лучших по
+    // замеру, а не перебором по одному с ожиданием 15 с каждого (см.
+    // _findWorkingServer).
+    if (_autoServerMode &&
+        _settings.healthCheckAutoSwitch &&
+        _runningEngineValue == 'singbox' &&
+        !_busy &&
+        !_stopRequested) {
+      final working = await _findWorkingServer(server, seq);
+      if (!mounted || _runningEngineValue == null || seq != _verifySeq) return;
+      if (!identical(server, _selectedServer)) {
+        unawaited(_verifyConnection());
+        return;
+      }
+      _reattaching = false;
+      if (working != null && !identical(working, server)) {
+        _appendLog(tp('log.switchToWorking', {'from': server?.name ?? '-', 'to': working.name}));
+        await _switchServer(working, verified: true);
+        return;
+      }
+      final ok = working != null;
+      setState(() {
+        _connectionOk = ok;
+        _connectionCheckKey = ok ? 'check.ok' : 'check.failed';
+      });
+      _appendLog(ok ? t('check.ok') : t('log.noWorkingServer'));
+      return;
+    }
     final ok = await _probeActiveServer(timeout: _trafficCheckTimeout);
     if (!mounted || _runningEngineValue == null || seq != _verifySeq) return;
     // Пока шла проверка, сервер сменили — её итог про прежний. Проверяем
@@ -7702,7 +7730,7 @@ del "%~f0"
     await prefs.setBool(_autoServerPrefsKey, _autoServerMode);
   }
 
-  Future<void> _switchServer(ParsedServer newServer) async {
+  Future<void> _switchServer(ParsedServer newServer, {bool verified = false}) async {
     _reattaching = false;
     setState(() => _selectedServer = newServer);
     _rememberSelection();
@@ -7744,7 +7772,14 @@ del "%~f0"
             .timeout(const Duration(seconds: 3));
         if (resp.statusCode == 204 || resp.statusCode == 200) {
           _appendLog(tp('log.active', {'name': newServer.name}));
-          _verifyConnection();
+          if (verified) {
+            // Через него запрос только что прошёл (_findWorkingServer) —
+            // повторная проверка дала бы лишние секунды и новый перебор.
+            _showCheckResult(true);
+            _appendLog(t('check.ok'));
+          } else {
+            _verifyConnection();
+          }
           return;
         }
         _appendLog(tp('log.clashApiStatus', {'code': resp.statusCode}));
@@ -8136,6 +8171,11 @@ del "%~f0"
     }
 
     final timeout = Duration(milliseconds: _settings.latencyTimeoutMs);
+    // Длинный список — по два рукопожатия: разброс одного соединения
+    // сглаживает и второе, а пять на сотнях серверов — лишние секунды
+    // перед каждым подключением. Рабочий сервер всё равно выбирает
+    // проверка трафика (_findWorkingServer).
+    final samples = servers.length > 60 ? 2 : _connectSamples;
     await _runLimited(servers, (s) async {
       final tag = s.outbound['tag'] as String;
       final endpoint = _serverEndpoint(s);
@@ -8150,7 +8190,7 @@ del "%~f0"
         return;
       }
       int? best;
-      for (var i = 0; i < _connectSamples && !_cancelLatency; i++) {
+      for (var i = 0; i < samples && !_cancelLatency; i++) {
         if (i > 0) await Future.delayed(const Duration(milliseconds: 100));
         try {
           final sw = Stopwatch()..start();
@@ -9012,6 +9052,98 @@ del "%~f0"
       return false;
     } finally {
       client.close(force: true);
+    }
+  }
+
+  /// Рабочий сервер — настоящим запросом через ядро, сразу по нескольким.
+  ///
+  /// Раньше «Авто» проверял выбранный сервер, а при провале переходил к
+  /// следующему по замеру и снова ждал до 15 с. В бесплатных списках
+  /// быстрые по рукопожатию серверы часто мертвы как прокси, и это шло
+  /// цепочкой: на эмуляторе со списком igareck из 141 сервера — шесть
+  /// провалов подряд и 32 с до «трафик проходит», на телефоне с мобильной
+  /// сетью — дольше (пользователь, 07.10.2026: «очень долго ищет и
+  /// подключает к free серверам»).
+  ///
+  /// Теперь текущий сервер и следующие по замеру проверяются ОДНОВРЕМЕННО
+  /// (Clash API `/proxies/<тег>/delay`), пачками по [_raceBatch], не больше
+  /// [_raceLimit] серверов. Текущий в приоритете: работает — остаёмся, даже
+  /// если другой ответил раньше (у него [_raceGrace] форы). Не работает —
+  /// берём первый, через который запрос прошёл. Никто не прошёл — null.
+  Future<ParsedServer?> _findWorkingServer(ParsedServer? current, int seq) async {
+    final others = _servers
+        .where((s) => !identical(s, current) && !_unhealthy.contains(s.name))
+        .toList()
+      ..sort((a, b) {
+        final la = _latencyMs[a.outbound['tag']];
+        final lb = _latencyMs[b.outbound['tag']];
+        if (la == null && lb == null) return 0;
+        if (la == null) return 1;
+        if (lb == null) return -1;
+        return la.compareTo(lb);
+      });
+    var offset = 0;
+    var includeCurrent = current != null;
+    while (offset < others.length || includeCurrent) {
+      if (offset >= _raceLimit && !includeCurrent) break;
+      final take = includeCurrent ? _raceBatch - 1 : _raceBatch;
+      final chunk = others.skip(offset).take(take).toList();
+      offset += chunk.length;
+      final currentOk = Completer<bool>();
+      final firstOther = Completer<ParsedServer>();
+      final allDone = Completer<void>();
+      var pending = chunk.length + (includeCurrent ? 1 : 0);
+      void done() {
+        if (--pending == 0 && !allDone.isCompleted) allDone.complete();
+      }
+
+      if (includeCurrent) {
+        _passesTraffic(current!).then((ok) {
+          if (!currentOk.isCompleted) currentOk.complete(ok);
+        }).whenComplete(done);
+      } else {
+        currentOk.complete(false);
+      }
+      for (final s in chunk) {
+        _passesTraffic(s).then((ok) {
+          if (ok && !firstOther.isCompleted) firstOther.complete(s);
+        }).whenComplete(done);
+      }
+      if (pending == 0) allDone.complete();
+      includeCurrent = false;
+
+      await Future.any([currentOk.future.then((ok) => ok ? null : allDone.future), firstOther.future, allDone.future]);
+      if (seq != _verifySeq || _runningEngineValue == null) return null;
+      if (currentOk.isCompleted && await currentOk.future) return current;
+      if (firstOther.isCompleted) {
+        final ok = await currentOk.future.timeout(_raceGrace, onTimeout: () => false);
+        return ok ? current : await firstOther.future;
+      }
+      await Future.any([firstOther.future, allDone.future]);
+      if (firstOther.isCompleted) return await firstOther.future;
+    }
+    return null;
+  }
+
+  static const int _raceBatch = 12;
+  static const int _raceLimit = 36;
+  static const Duration _raceGrace = Duration(seconds: 3);
+
+  /// Один настоящий запрос через сервер [s] (Clash API), до
+  /// [_trafficCheckTimeout].
+  Future<bool> _passesTraffic(ParsedServer s) async {
+    final tag = s.outbound['tag'] as String;
+    final waitMs = _trafficCheckTimeout.inMilliseconds;
+    try {
+      final resp = await http
+          .get(Uri.parse('$_clashApiBase/proxies/$tag/delay'
+              '?url=${Uri.encodeComponent(_settings.healthCheckUrl)}&timeout=$waitMs'))
+          .timeout(Duration(milliseconds: waitMs + 1000));
+      // Успех — только с "delay": отказ ядра «An error occurred in the delay
+      // test» тоже содержит слово delay.
+      return resp.statusCode == 200 && resp.body.contains('"delay":');
+    } catch (_) {
+      return false;
     }
   }
 
