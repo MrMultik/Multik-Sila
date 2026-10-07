@@ -5,6 +5,8 @@ import android.app.StatusBarManager
 import android.content.ComponentName
 import android.content.Intent
 import android.graphics.drawable.Icon
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.VpnService
 import android.os.Build
@@ -97,16 +99,20 @@ class MainActivity : FlutterActivity() {
                     // по одному на сервер. Собирает их тот же дартовый код,
                     // что пишет xray_bridge_*.json на Windows.
                     val bridges = call.argument<List<String>>("bridges")?.toTypedArray()
-                    val intent = Intent(this, SilaVpnService::class.java)
-                        .setAction(SilaVpnService.ACTION_START)
-                        .putExtra(SilaVpnService.EXTRA_CONFIG, config)
-                        .putExtra(SilaVpnService.EXTRA_XRAY_BRIDGES, bridges)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        startForegroundService(intent)
-                    } else {
-                        startService(intent)
+                    // Файлом, а не в Intent: см. NEXT_TUNNEL_FILE в службе.
+                    try {
+                        SilaVpnService.writeNextConfig(this, config, bridges)
+                        val intent = Intent(this, SilaVpnService::class.java)
+                            .setAction(SilaVpnService.ACTION_START)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(intent)
+                        } else {
+                            startService(intent)
+                        }
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("start_failed", e.message ?: e.toString(), null)
                     }
-                    result.success(true)
                 }
 
                 "stop" -> {
@@ -117,6 +123,23 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "isRunning" -> result.success(SilaVpnService.tunnelRunning)
+
+                // Работает ли на телефоне ЧУЖОЙ VPN. Android держит один VPN
+                // на всех: пока работает другой (особенно с «Постоянным VPN»
+                // в настройках), наш не поднимется, а замер задержки — наше
+                // приложение из своего VPN исключено — идёт через чужой
+                // туннель и даёт сказочные 4 мс (телефон знакомого
+                // пользователя, 07.10.2026). Чьё это приложение, Android
+                // не говорит.
+                "otherVpnActive" -> {
+                    val cm = getSystemService(ConnectivityManager::class.java)
+                    @Suppress("DEPRECATION")
+                    val anyVpn = cm.allNetworks.any { network ->
+                        cm.getNetworkCapabilities(network)
+                            ?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+                    }
+                    result.success(anyVpn && !SilaVpnService.tunnelRunning)
+                }
 
                 // Предложить плитку в шторку быстрых настроек системным окном.
                 // Есть только с Android 13; ниже плитку добавляют карандашом в

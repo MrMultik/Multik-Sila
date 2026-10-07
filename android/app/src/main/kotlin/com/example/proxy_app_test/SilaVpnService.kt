@@ -69,9 +69,37 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
         const val ACTION_START_LAST = "com.example.proxy_app_test.START_LAST"
         private const val LAST_TUNNEL_FILE = "last_tunnel.json"
 
+        /**
+         * Конфиг, с которым приложение просит поднять туннель. Передаётся
+         * файлом, а не в Intent: у Intent предел около 1 МБ на всё сообщение,
+         * а строки в нём идут по два байта на символ. На бесплатных списках в
+         * сотни серверов (igareck: 405 в одном файле) конфиг sing-box и мосты
+         * Xray вместе подбираются к этому пределу, и запуск падал раньше,
+         * чем ядро успевало что-то сказать (телефон знакомого пользователя,
+         * 07.10.2026: «нажимает на щит — не подключается»).
+         */
+        private const val NEXT_TUNNEL_FILE = "next_tunnel.json"
+
         /** Есть ли с чем включиться без приложения (см. SilaTileService). */
         fun hasLastConfig(context: Context): Boolean =
             File(context.filesDir, LAST_TUNNEL_FILE).length() > 0
+
+        /** Положить конфиг для запуска (см. NEXT_TUNNEL_FILE). */
+        fun writeNextConfig(context: Context, config: String, bridges: Array<String>?) =
+            writeTunnelFile(File(context.filesDir, NEXT_TUNNEL_FILE), config, bridges)
+
+        private fun writeTunnelFile(file: File, config: String, bridges: Array<String>?) {
+            val json = JSONObject()
+                .put("config", config)
+                .put("bridges", JSONArray().apply { bridges?.forEach { put(it) } })
+            file.writeText(json.toString())
+        }
+
+        private fun readTunnelFile(file: File): Pair<String, Array<String>>? = runCatching {
+            val json = JSONObject(file.readText())
+            val list = json.optJSONArray("bridges") ?: JSONArray()
+            json.getString("config") to Array(list.length()) { list.getString(it) }
+        }.getOrNull()
         const val EXTRA_CONFIG = "config"
         const val EXTRA_XRAY_BRIDGES = "xray_bridges"
 
@@ -182,11 +210,14 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
 
         var config = intent?.getStringExtra(EXTRA_CONFIG)
         var bridges = intent?.getStringArrayExtra(EXTRA_XRAY_BRIDGES)
-        if (intent?.action == ACTION_START_LAST) {
-            loadLastConfig()?.let { (savedConfig, savedBridges) ->
-                config = savedConfig
-                bridges = savedBridges
-            }
+        val file = when {
+            intent?.action == ACTION_START_LAST -> File(filesDir, LAST_TUNNEL_FILE)
+            intent?.action == ACTION_START && config == null -> File(filesDir, NEXT_TUNNEL_FILE)
+            else -> null
+        }
+        file?.let { readTunnelFile(it) }?.let { (savedConfig, savedBridges) ->
+            config = savedConfig
+            bridges = savedBridges
         }
         if (config.isNullOrBlank()) {
             // Запуск без конфига — это перезапуск системой после того, как нас
@@ -319,19 +350,8 @@ class SilaVpnService : VpnService(), PlatformInterface, CommandServerHandler {
      * В личной папке приложения, рядом с config.json, который пишет Dart.
      */
     private fun saveLastConfig(config: String, bridges: Array<String>?) {
-        runCatching {
-            val json = JSONObject()
-                .put("config", config)
-                .put("bridges", JSONArray().apply { bridges?.forEach { put(it) } })
-            File(filesDir, LAST_TUNNEL_FILE).writeText(json.toString())
-        }
+        runCatching { writeTunnelFile(File(filesDir, LAST_TUNNEL_FILE), config, bridges) }
     }
-
-    private fun loadLastConfig(): Pair<String, Array<String>>? = runCatching {
-        val json = JSONObject(File(filesDir, LAST_TUNNEL_FILE).readText())
-        val list = json.optJSONArray("bridges") ?: JSONArray()
-        json.getString("config") to Array(list.length()) { list.getString(it) }
-    }.getOrNull()
 
     private fun closeBridges() {
         xrayBridges.values.forEach { bridge ->

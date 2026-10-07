@@ -1636,6 +1636,28 @@ const Map<String, Map<String, String>> _strings = {
         'connections, and without a running tunnel there is nothing to measure '
         'them with — connect and run the test again.',
   },
+  'start.otherVpn': {
+    'ru': 'На телефоне работает другой VPN, а Android держит только один. Отключите его. '
+        'Если у него включён «Постоянный VPN» (Настройки → Сеть → VPN → шестерёнка рядом '
+        'с ним), выключите и это, затем нажмите на щит снова.',
+    'en': 'Another VPN is running on this phone, and Android allows only one. Turn it off. '
+        'If it has "Always-on VPN" enabled (Settings → Network → VPN → the gear next to '
+        'it), turn that off too, then press the shield again.',
+  },
+  'start.failed': {
+    'ru': 'VPN не запустился: {e}',
+    'en': 'The VPN did not start: {e}',
+  },
+  'start.noTunnel': {
+    'ru': 'VPN не запустился. Подробности — в журнале (значок со строчками вверху).',
+    'en': 'The VPN did not start. Details are in the log (the lines icon at the top).',
+  },
+  'log.otherVpnActive': {
+    'ru': 'На телефоне работает другой VPN: задержки, измеренные сейчас, идут через него и '
+        'неверны, а наш туннель может не запуститься, пока тот не отключён.',
+    'en': 'Another VPN is running on this phone: latencies measured now go through it and '
+        'are wrong, and our tunnel may not start until it is turned off.',
+  },
   'log.androidVpnDenied': {
     'ru': 'Система не дала разрешение на VPN. Без него туннель не поднять — '
         'нажмите щит ещё раз и подтвердите запрос.',

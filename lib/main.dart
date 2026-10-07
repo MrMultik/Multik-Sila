@@ -3262,6 +3262,15 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       setState(() => _runningEngine = status.running ? 'singbox' : null);
       final error = status.error;
       if (error != null && error.isNotEmpty) _appendLog(error);
+      if (status.running) {
+        if (_startError != null) setState(() => _startError = null);
+      } else if (error != null && error.isNotEmpty && !_stopRequested) {
+        // Чужой VPN — частая причина, и человеку её ничем больше не узнать.
+        unawaited(AndroidVpn.otherVpnActive().then((other) {
+          if (!mounted || _runningEngine != null) return;
+          _showStartError(other ? () => t('start.otherVpn') : () => tp('start.failed', {'e': error}));
+        }));
+      }
       _rescheduleHealthCheck();
       // Здесь раньше сразу после подъёма туннеля «Авто» перемерял серверы
       // через само ядро — против мёртвых серверов, отвечающих на рукопожатие.
@@ -5484,6 +5493,22 @@ del "%~f0"
     if (id != null) unawaited(_savePrefsString(_runningProfilePrefsKey, id));
   }
 
+  /// Почему не поднялся туннель — под щитом, а не только в журнале. Раньше
+  /// на Android неудачный запуск выглядел как «нажал — ничего»: у знакомого
+  /// пользователя (07.10.2026) щит оставался «Not protected» без единого
+  /// слова, а причину видно было лишь в журнале. Функция, а не текст, — ради
+  /// перевода при отрисовке.
+  String Function()? _startError;
+
+  /// Номер попытки запуска туннеля — чтобы сторож старой попытки не
+  /// писал поверх новой.
+  int _startAttempt = 0;
+
+  void _showStartError(String Function() message) {
+    if (!mounted) return;
+    setState(() => _startError = message);
+  }
+
   /// Сервер, который ядро должно взять, когда туннель поднимется (Android).
   String? _pendingCoreSelection;
 
@@ -7261,6 +7286,7 @@ del "%~f0"
     // Снимаем флаг предыдущей остановки — иначе после первого «Остановить»
     // системный прокси больше никогда бы не включился.
     _stopRequested = false;
+    if (_startError != null) setState(() => _startError = null);
     // Подписка, пришедшая с новым списком при работающем ядре, — теперь.
     await _applyPendingSubscription();
 
@@ -7352,11 +7378,14 @@ del "%~f0"
   /// строку дочернего процесса, а в службу через канал, потому что ядро здесь
   /// вкомпилировано в приложение.
   Future<void> _startAndroidTunnel() async {
+    final otherVpn = await AndroidVpn.otherVpnActive();
+    if (otherVpn) _appendLog(t('log.otherVpnActive'));
     // Разрешение спрашиваем перед КАЖДЫМ запуском, а не один раз при первом:
     // Android отзывает его, стоит человеку включить другой клиент VPN —
     // активным может быть только один.
     if (!await AndroidVpn.prepare()) {
       _appendLog(t('log.androidVpnDenied'));
+      _showStartError(otherVpn ? () => t('start.otherVpn') : () => t('log.androidVpnDenied'));
       return;
     }
 
@@ -7390,7 +7419,24 @@ del "%~f0"
     // выбирало Atlanta, а ядро вставало на srv_0, когда-то выбранный руками
     // (эмулятор, 03.10.2026); на Windows ядро — отдельный процесс без кэша.
     _pendingCoreSelection = _selectedServer?.outbound['tag'] as String?;
-    await AndroidVpn.start(config: config, bridges: bridges);
+    try {
+      await AndroidVpn.start(config: config, bridges: bridges);
+    } catch (e) {
+      // Раньше исключение уходило мимо экрана: щит «не подключается», и всё.
+      final message = e is PlatformException ? (e.message ?? e.code) : e.toString();
+      _appendLog(tp('start.failed', {'e': message}));
+      _showStartError(() => tp('start.failed', {'e': message}));
+      return;
+    }
+    // Служба отвечает событием; если его нет и через 20 с, а запуск не
+    // отменяли — на экран причину, а не молчание.
+    final attempt = ++_startAttempt;
+    Future.delayed(const Duration(seconds: 20), () async {
+      if (!mounted || attempt != _startAttempt || _runningEngine != null || _stopRequested) return;
+      if (_startError != null) return;
+      final other = await AndroidVpn.otherVpnActive();
+      _showStartError(other ? () => t('start.otherVpn') : () => t('start.noTunnel'));
+    });
     // Состояние щита придёт от службы через поток — здесь его не трогаем,
     // иначе на экране будет «подключено» раньше, чем ядро действительно
     // поднялось.
@@ -9170,6 +9216,17 @@ del "%~f0"
         //
         // Именно здесь человек читает, в каком он состоянии, и именно здесь
         // раньше стояло обещание, которого никто не проверял.
+        if (!running && !_busy && _startError != null) ...[
+          SizedBox(height: tight ? 2 : 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Text(
+              _startError!(),
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, height: 1.3, color: scheme.error),
+            ),
+          ),
+        ],
         if (running && _connectionCheckKey.isNotEmpty) ...[
           SizedBox(height: tight ? 2 : 4),
           Padding(

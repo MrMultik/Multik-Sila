@@ -54,6 +54,17 @@ class AndroidVpn {
   static Future<bool> isRunning() async =>
       await _commands.invokeMethod<bool>('isRunning') ?? false;
 
+  /// На телефоне работает чужой VPN (наш при этом не поднят). Android держит
+  /// один VPN на всех: наш тогда не запустится, если у того включён
+  /// «Постоянный VPN», а замер задержки идёт через чужой туннель.
+  static Future<bool> otherVpnActive() async {
+    try {
+      return await _commands.invokeMethod<bool>('otherVpnActive') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Версии обоих ядер — спрашиваются у самих ядер, а не хранятся числом
   /// в коде. На Windows на этом уже обжигались: установленная сборка Xray
   /// оказалась новее «последнего релиза», и версия по памяти врала.
