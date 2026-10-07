@@ -1561,14 +1561,14 @@ const Map<String, Map<String, String>> _strings = {
         'way — whether a server really works is checked by traffic after connecting.',
   },
   'hint.latencyProxyAndroid': {
-    'ru': 'При подключённом VPN — настоящий запрос через каждый сервер: цифры больше '
-        '(от 100 мс) и зависят от нагрузки текущего соединения, зато нерабочий '
-        'сервер сразу виден как «недоступен». Без подключения меряется так же, как '
-        '«до сервера».',
-    'en': 'With the VPN connected, a real request through each server: bigger numbers '
-        '(100 ms and up) that depend on the load of the current connection, but a dead '
-        'server shows up as unavailable right away. Without a connection it measures '
-        'the same way as "to the server".',
+    'ru': 'Настоящий запрос через каждый сервер — и без подключения, и с ним: цифры '
+        'больше (от 100 мс), зато нерабочий сервер сразу виден как «недоступен». '
+        'При подключённом VPN замер идёт через работающее ядро и зависит от нагрузки '
+        'текущего соединения.',
+    'en': 'A real request through each server, with or without a connection: bigger '
+        'numbers (100 ms and up), but a dead server shows up as unavailable right away. '
+        'With the VPN connected it goes through the running core and depends on the '
+        'load of the current connection.',
   },
   'log.reattached': {
     'ru': 'Экран открыт заново — туннель работал всё это время',
@@ -1967,6 +1967,10 @@ const Map<String, Map<String, String>> _strings = {
   'log.probeFailed': {
     'ru': 'Тест задержки: пробное ядро не запустилось: {e}',
     'en': 'Latency test: the probe core did not start: {e}',
+  },
+  'log.probeFallbackConnect': {
+    'ru': 'Меряю время подключения к серверам — как в режиме «до сервера»',
+    'en': 'Measuring the time to connect to the servers instead, as in "to the server" mode',
   },
   'log.probeSingboxPortBusy': {
     'ru': 'Тест задержки: пробное ядро sing-box не заняло порт {port}',

@@ -8019,10 +8019,15 @@ del "%~f0"
   /// до подключения, и зависят от нагрузки соединения: у пользователя
   /// 01.10.2026 было 300 мс до, 650–1160 мс после — «пингует с подключённого
   /// VPN». Поэтому это не умолчание, и старые установки один раз переведены
-  /// на «до сервера» (_readPreferences). Без туннеля ядра нет, и «через
-  /// сервер» меряет так же, как «до сервера». «По готовому соединению»
-  /// (`warm`) держится на пробных ядрах — здесь оно идёт как «через сервер».
+  /// на «до сервера» (_readPreferences). Без туннеля «через сервер» меряет
+  /// пробное ядро внутри приложения (_testLatenciesViaProbe); не поднялось —
+  /// рукопожатием, как «до сервера». «По готовому соединению» (`warm`)
+  /// держится на пробных процессах Windows — здесь оно идёт как «через сервер».
   Future<void> _testLatenciesWithoutProbes() async {
+    if (_runningEngine == null && _settings.latencyMode != 'connect') {
+      if (await _testLatenciesViaProbe()) return;
+      _appendLog(t('log.probeFallbackConnect'));
+    }
     if (_runningEngine != null && _settings.latencyMode != 'connect') {
       final timeoutMs = _settings.latencyTimeoutMs;
       final url = _settings.latencyUrl;
@@ -8056,6 +8061,150 @@ del "%~f0"
     final silent = udpOnly.isEmpty ? const <ParsedServer>[] : await _testQuicLatencies(udpOnly);
     if (silent.isNotEmpty) {
       _appendLog(tp('log.latencyUdpSkipped', {'n': silent.length}));
+    }
+  }
+
+  /// «Через сервер» на Android без подключения — пробным ядром внутри
+  /// приложения (`mobile/silaprobe`), как пробными процессами на Windows.
+  ///
+  /// Раньше без туннеля этот режим тихо мерил рукопожатием, а с туннелем —
+  /// через работающее ядро, и цифры «менялись от подключения» (пользователь,
+  /// 07.10.2026: «сделать обыкновенный замер без подключения»). Теперь это
+  /// настоящий запрос через каждый сервер и до подключения.
+  ///
+  /// Пробный sing-box держит все sing-box-серверы и по socks-выходу на
+  /// каждый Xray-сервер; Xray-серверы — в пробном Xray, у каждого свой вход
+  /// (тот же приём, что у мостов, только на портах замера). Меряет Clash API
+  /// пробника (`/proxies/<тег>/delay`), как `_testSingboxLatencies`. Туннеля
+  /// у пробника нет, `auto_detect_interface` тоже (без платформенного слоя
+  /// его нечем исполнить), — соединения идут обычной сетью телефона.
+  ///
+  /// false — пробник не поднялся; тогда меряем рукопожатием, как раньше.
+  Future<bool> _testLatenciesViaProbe() async {
+    const probeApiPort = 17391;
+    final singbox = _servers.where((s) => s.engine == 'singbox').toList();
+    final xray = _servers.where((s) => s.engine == 'xray').toList();
+    final names = {for (final s in _servers) s.outbound['tag'] as String: s.name};
+
+    // Адреса Xray-серверов — заранее отрезолвленными, как у мостов.
+    await Future.wait(xray.map((s) => _bakeXrayServerIp(s.outbound)));
+    final xrayAccepted = xray
+        .where((s) =>
+            !xrayRejectsOutbound(s.outbound) && !_xrayRejected.contains(s.outbound['tag']))
+        .toList();
+    final xrayPorts = <String, int>{
+      for (var i = 0; i < xrayAccepted.length; i++)
+        xrayAccepted[i].outbound['tag'] as String: _xrayProbeBasePort + i,
+    };
+    final xrayConfig = <String, dynamic>{
+      "log": {"loglevel": "warning"},
+      "inbounds": [
+        for (final s in xrayAccepted)
+          {
+            "tag": "probe_in_${s.outbound['tag']}",
+            "listen": "127.0.0.1",
+            "port": xrayPorts[s.outbound['tag']],
+            "protocol": "socks",
+            "settings": {"auth": "noauth", "udp": true},
+          }
+      ],
+      "outbounds": [for (final s in xrayAccepted) s.outbound],
+      "routing": {
+        "rules": [
+          for (final s in xrayAccepted)
+            {
+              "type": "field",
+              "inboundTag": ["probe_in_${s.outbound['tag']}"],
+              "outboundTag": s.outbound['tag'],
+            }
+        ]
+      },
+    };
+    // Те Xray-серверы, что остались в конфиге Xray (отвергнутые ядром
+    // выкидываются по одному ниже).
+    List<String> xrayTags() => [
+          for (final o in xrayConfig['outbounds'] as List) (o as Map)['tag'] as String,
+        ];
+    String singboxConfig() => jsonEncode({
+          "log": {"level": "warn"},
+          "experimental": {
+            "clash_api": {"external_controller": "127.0.0.1:$probeApiPort"}
+          },
+          "outbounds": [
+            ...singbox.map((s) => s.outbound),
+            for (final tag in xrayTags())
+              {"type": "socks", "tag": tag, "server": "127.0.0.1", "server_port": xrayPorts[tag]},
+            // direct нужен резолверу: без него `dns-direct` не к чему привязать.
+            {"type": "direct", "tag": "direct"},
+          ],
+          "dns": {
+            "servers": [
+              {"type": "udp", "tag": "dns-direct", "server": _settings.dnsDirect},
+            ],
+            "final": "dns-direct",
+            "strategy": _settings.dnsStrategy,
+          },
+          "route": {"final": "direct", "default_domain_resolver": "dns-direct"},
+        });
+
+    var started = false;
+    try {
+      for (var attempt = 0; attempt < 64 && !started; attempt++) {
+        final hasXray = xrayTags().isNotEmpty;
+        try {
+          await AndroidVpn.probeStart(
+              config: singboxConfig(), xray: hasXray ? jsonEncode(xrayConfig) : '');
+          started = true;
+        } on PlatformException catch (e) {
+          final message = e.message ?? e.code;
+          // Один сервер, который Xray не принимает, роняет весь конфиг —
+          // выкидываем его и пробуем снова, как служба с мостами.
+          final rejection = hasXray ? xrayConfigRejection(message) : null;
+          if (rejection == null) {
+            _appendLog(tp('log.probeFailed', {'e': message}));
+            return false;
+          }
+          if (_xrayRejected.add(rejection.tag)) {
+            _appendLog(tp('log.xrayRejected',
+                {'name': names[rejection.tag] ?? rejection.tag, 'reason': rejection.reason}));
+          }
+          dropFromXrayConfig(xrayConfig, rejection.tag);
+        }
+      }
+      if (!started) return false;
+      if (!await _waitForPort(probeApiPort)) {
+        _appendLog(tp('log.probeSingboxPortBusy', {'port': probeApiPort}));
+        return false;
+      }
+
+      final measured = [...singbox, ...xray.where((s) => xrayTags().contains(s.outbound['tag']))];
+      final testUrl = _settings.latencyUrl;
+      final timeoutMs = _settings.latencyTimeoutMs;
+      final httpTimeout = Duration(milliseconds: timeoutMs + 1000);
+      Uri delayUri(String tag) => Uri.parse('http://127.0.0.1:$probeApiPort/proxies/$tag/delay'
+          '?url=${Uri.encodeComponent(testUrl)}&timeout=$timeoutMs');
+      await _runLimited(measured, (s) async {
+        final tag = s.outbound['tag'] as String;
+        try {
+          if (_settings.latencyWarmup) await http.get(delayUri(tag)).timeout(httpTimeout);
+          final resp = await http.get(delayUri(tag)).timeout(httpTimeout);
+          if (resp.statusCode == 200 && resp.body.contains('"delay":')) {
+            final data = jsonDecode(resp.body) as Map<String, dynamic>;
+            if (mounted) setState(() => _latencyMs[tag] = data['delay'] as int);
+          } else {
+            _noteLatencyFailure(s.name, 'HTTP ${resp.statusCode} ${resp.body.trim()}');
+          }
+        } catch (e) {
+          _noteLatencyFailure(s.name, e);
+        }
+      });
+      return true;
+    } finally {
+      if (started) {
+        try {
+          await AndroidVpn.probeStop();
+        } catch (_) {}
+      }
     }
   }
 

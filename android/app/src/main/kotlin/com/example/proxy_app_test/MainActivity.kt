@@ -15,6 +15,9 @@ import androidx.core.content.FileProvider
 import java.io.File
 import com.multiksila.libbox.Libbox
 import com.multiksila.silaxray.Silaxray
+import com.multiksila.silaprobe.Probe
+import com.multiksila.silaprobe.Silaprobe
+import com.multiksila.silaxray.Instance as XrayInstance
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -42,6 +45,21 @@ class MainActivity : FlutterActivity() {
 
     private var events: EventChannel.EventSink? = null
     private val main = Handler(Looper.getMainLooper())
+
+    // Пробное ядро для замера «сквозной путь» без подключения (silaprobe) и
+    // его мосты Xray. Живёт только на время замера.
+    @Volatile private var probe: Probe? = null
+    @Volatile private var probeXray: XrayInstance? = null
+
+    // Запуск и остановка пробника идут в разных потоках — по очереди, иначе
+    // остановка посреди запуска оставила бы ядро, которое уже никто не закроет.
+    @Synchronized
+    private fun stopProbe() {
+        runCatching { probe?.close() }
+        probe = null
+        runCatching { probeXray?.close() }
+        probeXray = null
+    }
 
     /**
      * Ожидающий вызов `prepare`. Android спрашивает разрешение на VPN
@@ -123,6 +141,32 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "isRunning" -> result.success(SilaVpnService.tunnelRunning)
+
+                // Пробное ядро: sing-box без туннеля + мосты Xray на служебных
+                // портах. Поднимается в отдельном потоке — старт ядра с сотней
+                // серверов на главном потоке подвесил бы экран.
+                "probeStart" -> {
+                    val config = call.argument<String>("config") ?: ""
+                    val xray = call.argument<String>("xray")
+                    Thread {
+                        val error = synchronized(this@MainActivity) {
+                            runCatching {
+                                stopProbe()
+                                if (!xray.isNullOrBlank()) probeXray = Silaxray.start(xray)
+                                probe = Silaprobe.start(config)
+                            }.exceptionOrNull().also { if (it != null) stopProbe() }
+                        }
+                        main.post {
+                            if (error == null) result.success(true)
+                            else result.error("probe_failed", error.message ?: error.toString(), null)
+                        }
+                    }.start()
+                }
+
+                "probeStop" -> Thread {
+                    stopProbe()
+                    main.post { result.success(true) }
+                }.start()
 
                 // Работает ли на телефоне ЧУЖОЙ VPN. Android держит один VPN
                 // на всех: пока работает другой (особенно с «Постоянным VPN»

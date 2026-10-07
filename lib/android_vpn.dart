@@ -44,6 +44,14 @@ class AndroidVpn {
 
   static Future<void> stop() => _commands.invokeMethod<void>('stop');
 
+  /// Пробное ядро для замера «сквозной путь» без подключения: sing-box без
+  /// туннеля ([config]) и, если есть Xray-серверы, их мосты ([xray]).
+  /// Бросает PlatformException, если ядро не поднялось.
+  static Future<void> probeStart({required String config, String xray = ''}) =>
+      _commands.invokeMethod<bool>('probeStart', {'config': config, 'xray': xray});
+
+  static Future<void> probeStop() => _commands.invokeMethod<void>('probeStop');
+
   /// Предложить плитку «Multik Sila» в шторку быстрых настроек (системное
   /// окно, Android 13+). Возвращает код StatusBarManager: 2 — добавлена,
   /// 1 — уже была, 0 — человек отказался, меньше нуля — ошибка; -100 —

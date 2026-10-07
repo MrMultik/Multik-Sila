@@ -78,7 +78,9 @@ $gmArgs = @(
   # Два пакета ОДНОЙ командой: ядро sing-box и обёртка над Xray для транспорта
   # xhttp, которого sing-box не понимает вовсе.
   'github.com/sagernet/sing-box/experimental/libbox',
-  './silaxray'
+  './silaxray',
+  # Пробный sing-box без туннеля — замер «сквозной путь» без подключения.
+  './silaprobe'
 )
 
 Write-Host "building silacore.aar for $Target"
