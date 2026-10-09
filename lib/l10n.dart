@@ -1579,8 +1579,12 @@ const Map<String, Map<String, String>> _strings = {
     'en': 'No traffic through "{from}" — switching to "{to}": a request got through it',
   },
   'log.noWorkingServer': {
-    'ru': 'Ни через выбранный, ни через лучшие по замеру серверы запрос не прошёл — подключения нет',
-    'en': 'No request got through the selected server or the best ones by latency — no connection',
+    'ru': 'Ни через один сервер списка запрос не прошёл — подключения нет',
+    'en': 'No request got through any server in the list — no connection',
+  },
+  'log.raceProgress': {
+    'ru': 'Проверено серверов: {n} из {total} — трафик пока не идёт ни через один, ищу дальше',
+    'en': 'Servers checked: {n} of {total} — none passes traffic yet, searching further',
   },
   'log.noTraffic': {
     'ru': 'Через «{name}» за {s} с не прошло ни байта — подключения нет',

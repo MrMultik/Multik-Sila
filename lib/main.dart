@@ -815,6 +815,22 @@ void fixForSingbox(ParsedServer s) {
   }
 }
 
+/// [body] для каждого из [items], не больше [concurrency] одновременно.
+Future<void> forEachLimited<T>(
+    Iterable<T> items, int concurrency, Future<void> Function(T) body) async {
+  final queue = items.toList();
+  var next = 0;
+  Future<void> worker() async {
+    while (next < queue.length) {
+      await body(queue[next++]);
+    }
+  }
+
+  await Future.wait([
+    for (var i = 0; i < concurrency && i < queue.length; i++) worker(),
+  ]);
+}
+
 /// Какой outbound sing-box отверг при запуске — по тексту ошибки ядра:
 /// `start or reload service: initialize outbound[74]: <причина>` (Android) или
 /// `FATAL[0000] start service: initialize outbound[74]: <причина>` (Windows).
@@ -3062,8 +3078,17 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
         _runningEngineValue == 'singbox' &&
         !_busy &&
         !_stopRequested) {
-      final working = await _findWorkingServer(server, seq);
+      // Нет сети — виноваты не серверы: перебирать и браковать их незачем.
+      final working =
+          await _hasPhysicalNetwork() ? await _findWorkingServer(server, seq) : null;
       if (!mounted || _runningEngineValue == null || seq != _verifySeq) return;
+      if (working == null &&
+          _servers.every((s) => _unhealthy.contains(s.name) || _singboxRejected.contains(s))) {
+        // Не прошёл никто — причина общая (сеть, блокировка), а не серверы.
+        // Пометки снимаем, как в _switchAwayFromUnhealthy: иначе следующей
+        // проверке и автовыбору не из чего было бы выбирать.
+        _unhealthy.clear();
+      }
       if (!identical(server, _selectedServer)) {
         unawaited(_verifyConnection());
         return;
@@ -6685,10 +6710,11 @@ del "%~f0"
   // Нужно для bypass-правила по IP (см. _writeConfig).
   Future<List<String>> _resolveToCidrs(Iterable<String> hosts) async {
     final cidrs = <String>{};
-    for (final host in hosts) {
+    // Разом, а не по одному (см. _bakeServerIps).
+    await forEachLimited<String>(hosts.toSet(), 32, (host) async {
       if (RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(host)) {
         cidrs.add('$host/32');
-        continue;
+        return;
       }
       try {
         final addresses = await InternetAddress.lookup(host).timeout(const Duration(seconds: 3));
@@ -6698,8 +6724,8 @@ del "%~f0"
       } catch (_) {
         _appendLog(tp('log.resolveBypassFailed', {'host': host}));
       }
-    }
-    return cidrs.toList();
+    });
+    return cidrs.toList()..sort();
   }
 
   // Кэш «хост -> IPv4», чтобы не резолвить один и тот же адрес по разу на
@@ -6789,6 +6815,21 @@ del "%~f0"
   /// Не удалось отрезолвить — оставляем имя как было: пусть ядро попробует
   /// само, это не хуже, чем не подключиться совсем.
   Future<void> _bakeServerIps(List<ParsedServer> servers) async {
+    // Имена — разом, а не по одному: в бесплатном списке на 1968 серверов
+    // их ~200, и по очереди это была минута перед каждым подключением.
+    await forEachLimited<String>({
+      for (final s in servers)
+        if (s.outbound['server'] is String) s.outbound['server'] as String,
+    }.where((h) => h.isNotEmpty && InternetAddress.tryParse(h) == null && !_hostIpCache.containsKey(h)),
+        32, (host) async {
+      try {
+        final addrs = await InternetAddress.lookup(host, type: InternetAddressType.IPv4)
+            .timeout(const Duration(seconds: 5));
+        _hostIpCache[host] = addrs.isEmpty ? null : addrs.first.address;
+      } catch (_) {
+        _hostIpCache[host] = null;
+      }
+    });
     for (final s in servers) {
       final host = s.outbound['server'];
       if (host is! String || host.isEmpty) continue;
@@ -6987,8 +7028,13 @@ del "%~f0"
       proxyHostNames: proxyHostNames,
       proxyPorts: proxyPorts,
       readyRuleSets: {for (final r in readySets) r.tag: _ruleSetPath(r)},
-      // Страховка по адресам серверов нужна только под TUN — резолвим лишь там.
-      bypassCidrs: _tunMode ? await _resolveToCidrs(proxyHostNames) : const [],
+      // Страховка по адресам серверов нужна только под TUN на Windows —
+      // резолвим лишь там. На Android петли нет: приложение вместе с ядрами
+      // исключено из своего VPN (addDisallowedApplication), а резолв сотен
+      // имён стоял прямо перед подъёмом туннеля (1209 серверов — 56 с).
+      bypassCidrs: _tunMode && Env.coreRunsAsProcess
+          ? await _resolveToCidrs(proxyHostNames)
+          : const [],
       needsIndependentCache: _settings.dnsFakeIp && await _singboxNeedsIndependentCache(),
       gvisorSupported: _tunMode && (stack == 'gvisor' || stack == 'mixed')
           ? await _coreSupportsGvisor()
@@ -8039,6 +8085,12 @@ del "%~f0"
   /// участвует, толкаться нечему.
   static const int _connectConcurrency = 48;
 
+  /// Для списков длиннее 300 серверов (бесплатные — до двух тысяч): мёртвые
+  /// держат место до таймаута. Замер 09.10.2026 через физический Wi-Fi, 784
+  /// адреса списка igareck на 1968 ссылок: по 48 — 28 с, по 128 — 12 с,
+  /// ответили одни и те же (563 и 565).
+  static const int _connectConcurrencyLarge = 128;
+
   /// Сколько серверов ещё пишем в журнал по строке на каждый сбой. Дальше —
   /// сводкой: полторы сотни строк «сервер недоступен» журнал не объясняют, а
   /// хоронят.
@@ -8046,6 +8098,23 @@ del "%~f0"
 
   // Сбои текущего прогона по видам (см. latencyFailureKind) — для сводки.
   final Map<String, int> _latencyFailures = {};
+
+  /// Итог замера сервера: в карту — сразу, на экран — не чаще раза в 250 мс.
+  ///
+  /// Раньше перерисовка шла на КАЖДЫЙ ответ — на бесплатных списках это
+  /// тысяча перестроений экрана за один замер. Время замера это почти не
+  /// меняет (на эмуляторе 1209 серверов — 45 с против 53–64, там упирается
+  /// его собственная сеть), но и работа эта ничья.
+  void _setLatency(String tag, int? ms) {
+    _latencyMs[tag] = ms;
+    if (!mounted || _latencyRepaint != null) return;
+    _latencyRepaint = Timer(const Duration(milliseconds: 250), () {
+      _latencyRepaint = null;
+      if (mounted) setState(() {});
+    });
+  }
+
+  Timer? _latencyRepaint;
 
   /// Сервер не ответил на замер. На коротком списке — строка в журнал с
   /// причиной, как было; на длинном — только счётчик.
@@ -8200,7 +8269,7 @@ del "%~f0"
               .timeout(Duration(milliseconds: timeoutMs + 1000));
           if (resp.statusCode == 200) {
             final data = jsonDecode(resp.body) as Map<String, dynamic>;
-            if (mounted) setState(() => _latencyMs[tag] = data['delay'] as int);
+            _setLatency(tag, data['delay'] as int);
           } else {
             // Ядро прямо в ответе объясняет, что не так, — в журнал.
             _noteLatencyFailure(s.name, 'HTTP ${resp.statusCode} ${resp.body.trim()}');
@@ -8350,7 +8419,7 @@ del "%~f0"
           final resp = await http.get(delayUri(tag)).timeout(httpTimeout);
           if (resp.statusCode == 200 && resp.body.contains('"delay":')) {
             final data = jsonDecode(resp.body) as Map<String, dynamic>;
-            if (mounted) setState(() => _latencyMs[tag] = data['delay'] as int);
+            _setLatency(tag, data['delay'] as int);
           } else {
             _noteLatencyFailure(s.name, 'HTTP ${resp.statusCode} ${resp.body.trim()}');
           }
@@ -8420,7 +8489,7 @@ del "%~f0"
         silent.add(s);
         return;
       }
-      if (mounted) setState(() => _latencyMs[tag] = best);
+      _setLatency(tag, best);
     }, concurrency: _connectConcurrency);
     return silent;
   }
@@ -8519,8 +8588,8 @@ del "%~f0"
           }
         }
       }
-      if (best != null && mounted) setState(() => _latencyMs[tag] = best);
-    }, concurrency: _connectConcurrency);
+      if (best != null) _setLatency(tag, best);
+    }, concurrency: servers.length > 300 ? _connectConcurrencyLarge : _connectConcurrency);
   }
 
   /// Рукопожатий на сервер в замере «до сервера»; в цифру идёт лучшее.
@@ -8670,7 +8739,7 @@ del "%~f0"
             final req = await client.getUrl(Uri.parse(_settings.latencyUrl)).timeout(timeout);
             await (await req.close().timeout(timeout)).drain();
             sw.stop();
-            if (mounted) setState(() => _latencyMs[tag] = sw.elapsedMilliseconds);
+            _setLatency(tag, sw.elapsedMilliseconds);
           } finally {
             client.close(force: true);
           }
@@ -8746,7 +8815,7 @@ del "%~f0"
           final resp = await http.get(delayUri(tag)).timeout(httpTimeout);
           if (resp.statusCode == 200) {
             final data = jsonDecode(resp.body) as Map<String, dynamic>;
-            if (mounted) setState(() => _latencyMs[tag] = data['delay'] as int);
+            _setLatency(tag, data['delay'] as int);
           } else {
             // Неуспех Clash API раньше не писал в лог НИЧЕГО: исключения
             // ловились, а честный отказ ядра проходил молча. Три сервера из
@@ -8953,7 +9022,7 @@ del "%~f0"
         final tag = s.outbound['tag'] as String;
         final elapsed = await _measureViaHttpProxy(ports[tag]!, s.name);
         if (elapsed != null && mounted) {
-          setState(() => _latencyMs[tag] = elapsed);
+          _setLatency(tag, elapsed);
         }
       });
     } catch (e) {
@@ -8999,7 +9068,7 @@ del "%~f0"
         }
         final elapsed = await _measureViaHttpProxy(probePort, server.name);
         if (elapsed != null && mounted) {
-          setState(() => _latencyMs[tag] = elapsed);
+          _setLatency(tag, elapsed);
         }
       } catch (e) {
         _noteLatencyFailure(server.name, e);
@@ -9377,10 +9446,18 @@ del "%~f0"
   /// подключает к free серверам»).
   ///
   /// Теперь текущий сервер и следующие по замеру проверяются ОДНОВРЕМЕННО
-  /// (Clash API `/proxies/<тег>/delay`), пачками по [_raceBatch], не больше
-  /// [_raceLimit] серверов. Текущий в приоритете: работает — остаёмся, даже
-  /// если другой ответил раньше (у него [_raceGrace] форы). Не работает —
-  /// берём первый, через который запрос прошёл. Никто не прошёл — null.
+  /// (Clash API `/proxies/<тег>/delay`): первая пачка — [_raceBatch] вместе с
+  /// текущим, дальше по [_raceBatchLater]. Текущий в приоритете: работает —
+  /// остаёмся, даже если другой ответил раньше (у него [_raceGrace] форы). Не
+  /// работает — берём первый, через который запрос прошёл. Никто не прошёл —
+  /// null.
+  ///
+  /// Ищем по ВСЕМУ списку, а не по первым 36, и каждый, через кого запрос не
+  /// прошёл, помечается плохим (_unhealthy). В 1.0.25 поиск обрывался на 36
+  /// серверах и ничего не помечал: в бесплатном списке верх по рукопожатию
+  /// часто мёртв целиком (серверы за Cloudflare отвечают на TCP, но не
+  /// проводят трафик), и каждая следующая проверка гоняла те же 36 —
+  /// «проверку не проходит, не переключает, висит» (пользователь, 09.10.2026).
   Future<ParsedServer?> _findWorkingServer(ParsedServer? current, int seq) async {
     final others = _servers
         .where((s) =>
@@ -9396,11 +9473,18 @@ del "%~f0"
         if (lb == null) return -1;
         return la.compareTo(lb);
       });
+    bool stale() => seq != _verifySeq || _runningEngineValue == null;
+    // Плохим — только по итогу ЭТОЙ проверки: после остановки ядра запросы
+    // падают все разом, и пометки легли бы на живые серверы.
+    void markDead(ParsedServer s) {
+      if (!stale()) _unhealthy.add(s.name);
+    }
+
     var offset = 0;
+    var batches = 0;
     var includeCurrent = current != null;
     while (offset < others.length || includeCurrent) {
-      if (offset >= _raceLimit && !includeCurrent) break;
-      final take = includeCurrent ? _raceBatch - 1 : _raceBatch;
+      final take = includeCurrent ? _raceBatch - 1 : _raceBatchLater;
       final chunk = others.skip(offset).take(take).toList();
       offset += chunk.length;
       final currentOk = Completer<bool>();
@@ -9413,6 +9497,7 @@ del "%~f0"
 
       if (includeCurrent) {
         _passesTraffic(current!).then((ok) {
+          if (!ok) markDead(current);
           if (!currentOk.isCompleted) currentOk.complete(ok);
         }).whenComplete(done);
       } else {
@@ -9420,6 +9505,7 @@ del "%~f0"
       }
       for (final s in chunk) {
         _passesTraffic(s).then((ok) {
+          if (!ok) markDead(s);
           if (ok && !firstOther.isCompleted) firstOther.complete(s);
         }).whenComplete(done);
       }
@@ -9427,7 +9513,7 @@ del "%~f0"
       includeCurrent = false;
 
       await Future.any([currentOk.future.then((ok) => ok ? null : allDone.future), firstOther.future, allDone.future]);
-      if (seq != _verifySeq || _runningEngineValue == null) return null;
+      if (stale()) return null;
       if (currentOk.isCompleted && await currentOk.future) return current;
       if (firstOther.isCompleted) {
         final ok = await currentOk.future.timeout(_raceGrace, onTimeout: () => false);
@@ -9435,12 +9521,17 @@ del "%~f0"
       }
       await Future.any([firstOther.future, allDone.future]);
       if (firstOther.isCompleted) return await firstOther.future;
+      if (stale()) return null;
+      // Длинный поиск — видно, что он идёт, а не завис.
+      if (++batches % 3 == 0 && offset < others.length) {
+        _appendLog(tp('log.raceProgress', {'n': offset + 1, 'total': others.length + 1}));
+      }
     }
     return null;
   }
 
   static const int _raceBatch = 12;
-  static const int _raceLimit = 36;
+  static const int _raceBatchLater = 24;
   static const Duration _raceGrace = Duration(seconds: 3);
 
   /// Один настоящий запрос через сервер [s] (Clash API), до
