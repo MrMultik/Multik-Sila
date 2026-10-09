@@ -1463,6 +1463,18 @@ tcp и grpc) в outbound Xray с `engine: 'xray'`. `pqv` (ML-DSA-65) и `spx` б
 
 ## Известные баги, уже исправленные (не переоткрывать)
 
+- **Один сервер с полем, которого sing-box не знает, ронял ВЕСЬ туннель**
+  (телефон пользователя, 08.10.2026: `initialize outbound[74]: unknown uTLS
+  fingerprint: unsafe`). Ссылки пишут под Xray: `fp=unsafe` (обычный TLS без
+  маскировки), `hellochrome_131`, `chromefp`, `flow=xtls-rprx-vision-udp443`.
+  При разборе их переводит `fixForSingbox`; что всё же отвергнуто — по
+  `initialize outbound[N]` из ошибки ядра (`_rejectSingboxOutbound`: событие
+  службы на Android, stderr процесса на Windows) сервер выкидывается, и запуск
+  повторяется без него. Все пять списков igareck проходят `sing-box check`
+  через настоящий разбор; без правки три из пяти не запускались. На эмуляторе:
+  список с `fp=unsafe` + сервер с `flow=bogus-flow` — отказ, «пропущен», VPN
+  поднят за 0,02 с после отказа.
+
 - `Uri.userInfo` не декодирует percent-encoding — UUID/пароли с `%3D` и т.п. нужно
   прогонять через `Uri.decodeComponent`.
 - VMess `security=auto` + TLS → sing-box сам тихо переключается на `zero` (без

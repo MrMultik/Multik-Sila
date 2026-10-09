@@ -1867,6 +1867,14 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'VLESS без шифрования на публичный адрес',
     'en': 'VLESS without encryption to a public address',
   },
+  'log.singboxRejected': {
+    'ru': 'Сервер «{name}» пропущен — sing-box его не принимает: {reason}. Подключаюсь без него',
+    'en': 'Server "{name}" skipped — sing-box does not accept it: {reason}. Connecting without it',
+  },
+  'log.singboxRejectedPick': {
+    'ru': 'Сервер «{name}» не работает: sing-box его не принимает (причина — выше в журнале)',
+    'en': 'Server "{name}" cannot work: sing-box does not accept it (the reason is above in the log)',
+  },
   'log.xrayRejectedPick': {
     'ru': 'Сервер «{name}» не работает: Xray его не принимает (причина — выше в журнале)',
     'en': 'Server "{name}" cannot work: Xray does not accept it (the reason is above in the log)',

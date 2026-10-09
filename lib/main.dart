@@ -525,7 +525,10 @@ ParsedServer realityViaXray(ParsedServer s) {
   if (transportType != null && transportType != 'grpc') return s;
 
   final utls = tls['utls'];
-  final fp = utls is Map && utls['fingerprint'] is String ? utls['fingerprint'] as String : 'chrome';
+  var fp = utls is Map && utls['fingerprint'] is String ? utls['fingerprint'] as String : 'chrome';
+  // Без маскировки REALITY в Xray не бывает: `unsafe` и `hellogolang` он у
+  // REALITY отвергает (transport_security.go), и сервер выпал бы из мостов.
+  if (const {'', 'unsafe', 'hellogolang'}.contains(fp.trim().toLowerCase())) fp = 'chrome';
   final flow = o['flow'];
   var linkParams = const <String, String>{};
   if (s.link.startsWith('vless://')) {
@@ -757,6 +760,69 @@ void dropFromXrayConfig(Map<String, dynamic> config, String tag) {
       (i) => i is Map && (i['tag'] == 'in_$tag' || i['tag'] == 'probe_in_$tag'));
   final rules = (config['routing'] as Map?)?['rules'];
   if (rules is List) rules.removeWhere((r) => r is Map && r['outboundTag'] == tag);
+}
+
+/// Отпечатки uTLS, которые знает sing-box 1.14 (common/tls/utls_client.go).
+const Set<String> kSingboxUtlsFingerprints = {
+  'chrome', 'firefox', 'edge', 'safari', '360', 'qq', 'ios', 'android',
+  'random', 'randomized',
+  'chrome_psk', 'chrome_psk_shuffle', 'chrome_padding_psk_shuffle', 'chrome_pq', 'chrome_pq_psk',
+};
+
+/// Отпечаток из ссылки — в тот, что знает sing-box; null — без uTLS вовсе.
+///
+/// Ссылки пишут под Xray, а он знает больше: `unsafe` (обычный TLS Go, без
+/// маскировки — transport_security.go), `randomizednoalpn` и десятки имён
+/// вида `hellochrome_131`. sing-box на незнакомое имя отказывается запускаться
+/// ЦЕЛИКОМ: `initialize outbound[74]: unknown uTLS fingerprint: unsafe` —
+/// один такой сервер в бесплатном списке, и VPN не поднимался совсем
+/// (телефон пользователя, 08.10.2026).
+String? singboxUtlsFingerprint(String? fp) {
+  final name = (fp ?? '').trim().toLowerCase();
+  if (name.isEmpty) return 'chrome';
+  if (kSingboxUtlsFingerprints.contains(name)) return name;
+  if (name == 'unsafe' || name == 'hellogolang') return null;
+  if (name == 'randomizednoalpn' || name.startsWith('hellorandomized')) return 'randomized';
+  for (final family in ['chrome', 'firefox', 'edge', 'safari', '360', 'qq', 'ios', 'android']) {
+    if (name.startsWith('hello$family')) return family;
+  }
+  return 'chrome';
+}
+
+/// Приводит sing-box-сервер к тому, что ядро примет: отпечаток uTLS (см.
+/// [singboxUtlsFingerprint]) и `flow` VLESS. Xray-серверы не трогает: Xray
+/// понимает и то и другое.
+///
+/// `xtls-rprx-vision-udp443` — Vision из Xray, которому разрешён UDP на 443;
+/// sing-box знает только `xtls-rprx-vision` и на варианте отказывается
+/// запускаться целиком (`unsupported flow`). Замечено в бесплатном списке
+/// igareck (Vless-Reality-White-Lists-Rus-Mobile, 09.10.2026).
+void fixForSingbox(ParsedServer s) {
+  if (s.engine != 'singbox') return;
+  final flow = s.outbound['flow'];
+  if (s.outbound['type'] == 'vless' && flow is String && flow.startsWith('xtls-rprx-vision')) {
+    s.outbound['flow'] = 'xtls-rprx-vision';
+  }
+  final tls = s.outbound['tls'];
+  if (tls is! Map) return;
+  final utls = tls['utls'];
+  if (utls is! Map) return;
+  final fp = singboxUtlsFingerprint(utls['fingerprint'] as String?);
+  if (fp == null) {
+    tls.remove('utls');
+  } else {
+    utls['fingerprint'] = fp;
+  }
+}
+
+/// Какой outbound sing-box отверг при запуске — по тексту ошибки ядра:
+/// `start or reload service: initialize outbound[74]: <причина>` (Android) или
+/// `FATAL[0000] start service: initialize outbound[74]: <причина>` (Windows).
+/// Номер — позиция в `outbounds` конфига.
+({int index, String reason})? singboxOutboundRejection(String output) {
+  final m = RegExp(r'initialize outbound\[(\d+)\]:\s*([^\r\n]*)').firstMatch(output);
+  if (m == null) return null;
+  return (index: int.parse(m.group(1)!), reason: m.group(2)!.trim());
 }
 
 // Режим маршрутизации. global — всё в туннель (как было всегда).
@@ -2911,6 +2977,10 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   // Серверы, которые Xray отказался принимать (см. xrayConfigRejection):
   // в общем мосте их нет, и выбрать их нельзя.
   final Set<String> _xrayRejected = {};
+  // Серверы, на которых sing-box отказался запускаться (см.
+  // _rejectSingboxOutbound): в конфиг они больше не попадают. По объекту, а
+  // не по тегу — теги раздаются заново при каждом разборе подписки.
+  final Set<ParsedServer> _singboxRejected = Set.identity();
   static const int _xrayBridgeBasePort = 1338;
   // 'singbox' | 'xray' | null — какое ядро сейчас реально держит порт 1337.
   //
@@ -3293,11 +3363,17 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
       if (status.running) {
         if (_startError != null) setState(() => _startError = null);
       } else if (error != null && error.isNotEmpty && !_stopRequested) {
-        // Чужой VPN — частая причина, и человеку её ничем больше не узнать.
-        unawaited(AndroidVpn.otherVpnActive().then((other) {
+        unawaited(() async {
+          // Ядро отвергло один сервер — запускаемся без него.
+          if (await _rejectSingboxOutbound(error)) {
+            await _restartWithoutRejected();
+            return;
+          }
+          // Чужой VPN — частая причина, и человеку её ничем больше не узнать.
+          final other = await AndroidVpn.otherVpnActive();
           if (!mounted || _runningEngine != null) return;
           _showStartError(other ? () => t('start.otherVpn') : () => tp('start.failed', {'e': error}));
-        }));
+        }());
       }
       _rescheduleHealthCheck();
       // Здесь раньше сразу после подъёма туннеля «Авто» перемерял серверы
@@ -5382,6 +5458,8 @@ del "%~f0"
     // outbound, а не в выброшенный.
     for (var i = 0; i < parsed.length; i++) {
       parsed[i] = realityViaXray(parsed[i]);
+      // Отпечаток или flow, которых sing-box не знает, роняют ВЕСЬ туннель.
+      fixForSingbox(parsed[i]);
     }
     // Тёзки — различимыми (см. dedupeServerNames): избранное и пометки
     // «плохой сервер» ведутся по имени.
@@ -6855,7 +6933,9 @@ del "%~f0"
   /// Собирает то, что требует диска, сети и процессов, и отдаёт сборку
   /// конфига [buildSingboxConfig] — её проверяют тесты.
   Future<void> _writeConfig() async {
-    final singboxServers = _servers.where((s) => s.engine == 'singbox').toList();
+    final singboxServers = _servers
+        .where((s) => s.engine == 'singbox' && !_singboxRejected.contains(s))
+        .toList();
     final xrayServers = _servers.where((s) => s.engine == 'xray').toList();
 
     // Имена хостов прокси-серверов ЗАПОМИНАЕМ ДО подмены на IP: ниже они
@@ -7165,13 +7245,22 @@ del "%~f0"
   // Присматриваем за ядром: если процесс умер сам (не по кнопке «Отключить»),
   // поднимаем его заново. Без этого «включил и забыл» не работает — падение
   // ядра пользователь замечает только когда перестают открываться сайты.
-  void _watchCore(Process process) {
+  void _watchCore(Process process, Future<void> stderrDone) {
     process.exitCode.then((code) async {
       // Плановая остановка — ничего не делаем.
       if (_stopRequested || _runningEngine == null) return;
       // Убедимся, что умер именно тот процесс, за которым следим: за время
       // ожидания могли успеть перезапустить ядро вручную.
       if (!identical(process, _coreProcess)) return;
+      // Не запустилось из-за одного сервера — без него, сразу и без счёта
+      // перезапусков: это не падение, а отказ конфига (_rejectSingboxOutbound).
+      await stderrDone.timeout(const Duration(seconds: 1), onTimeout: () {});
+      final failure = _coreStartFailure;
+      _coreStartFailure = null;
+      if (failure != null && await _rejectSingboxOutbound(failure)) {
+        await _restartWithoutRejected();
+        return;
+      }
       if (!_settings.autoRestartCore) {
         _appendLog(tp('log.coreExitedNoRestart', {'code': code}));
         return;
@@ -7189,6 +7278,66 @@ del "%~f0"
       if (_stopRequested) return;
       await _startCore(isAutoRestart: true);
     });
+  }
+
+  // Строка ядра с отказом от сервера при запуске (Windows, см. _watchCore).
+  String? _coreStartFailure;
+
+  /// sing-box не запустился из-за одного сервера: `initialize outbound[N]:
+  /// <причина>`. Такой сервер больше не попадает в конфиг ([_singboxRejected]),
+  /// и запуск можно повторить без него — true.
+  ///
+  /// Один сервер из бесплатного списка с отпечатком, которого ядро не знает,
+  /// не давал подняться VPN вовсе (телефон пользователя, 08.10.2026). Сам
+  /// отпечаток теперь переводится при разборе (fixForSingbox), а это —
+  /// страховка от следующего такого поля: так же, как с Xray
+  /// (_dropRejectedByXray), только по факту отказа, без проверки перед каждым
+  /// запуском (на Windows `sing-box check` стоит 0,15–1,2 с).
+  Future<bool> _rejectSingboxOutbound(String output) async {
+    final rejection = singboxOutboundRejection(output);
+    if (rejection == null) return false;
+    String? tag;
+    try {
+      final config = jsonDecode(await File(_configPath).readAsString()) as Map<String, dynamic>;
+      final outbounds = config['outbounds'] as List;
+      if (rejection.index < outbounds.length) {
+        tag = (outbounds[rejection.index] as Map)['tag'] as String?;
+      }
+    } catch (_) {}
+    if (tag == null) return false;
+    ParsedServer? server;
+    for (final s in _servers) {
+      if (s.engine == 'singbox' && s.outbound['tag'] == tag) server = s;
+    }
+    if (server == null || !_singboxRejected.add(server)) return false;
+    _appendLog(tp('log.singboxRejected', {'name': server.name, 'reason': rejection.reason}));
+    if (mounted) setState(() => _latencyMs[tag!] = null);
+    if (identical(server, _selectedServer)) {
+      // Выбранный сервер ядру не отдать — берём лучший из оставшихся.
+      ParsedServer? best;
+      for (final s in _servers) {
+        if (_singboxRejected.contains(s)) continue;
+        final ms = _latencyMs[s.outbound['tag']];
+        final bestMs = best == null ? null : _latencyMs[best.outbound['tag']];
+        if (best == null || (ms != null && (bestMs == null || ms < bestMs))) best = s;
+      }
+      if (best != null && mounted) {
+        setState(() => _selectedServer = best);
+        _rememberSelection();
+      }
+    }
+    return true;
+  }
+
+  /// Повторный запуск после [_rejectSingboxOutbound] — когда прежний
+  /// запуск отпустит щит.
+  Future<void> _restartWithoutRejected() async {
+    for (var i = 0; i < 100 && _busy; i++) {
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    if (!mounted || _stopRequested || _busy) return;
+    if (!_servers.any((s) => !_singboxRejected.contains(s))) return;
+    await _startCore();
   }
 
   /// Прервать идущее подключение.
@@ -7518,13 +7667,15 @@ del "%~f0"
 
     _appendLog(t('log.startingSingbox'));
 
+    _coreStartFailure = null;
     final process = await Process.start(_singBoxPath, ['run', '-c', _configPath]);
     _coreProcess = process;
     _runningEngine = 'singbox';
     _rescheduleHealthCheck();
     _refreshTrayMenu();
     _enableSystemProxy();
-    _watchCore(process);
+    final stderrDone = Completer<void>();
+    _watchCore(process, stderrDone.future);
 
     // sing-box пишет INFO/DEBUG-строки в stderr наравне с реальными ошибками —
     // метка [stderr] тут про поток, а не про факт ошибки
@@ -7532,7 +7683,12 @@ del "%~f0"
       _appendLog(data);
     });
     process.stderr.transform(SystemEncoding().decoder).listen((data) {
+      if (identical(process, _coreProcess) && data.contains('initialize outbound[')) {
+        _coreStartFailure = data;
+      }
       _appendLog('[stderr] $data');
+    }, onDone: () {
+      if (!stderrDone.isCompleted) stderrDone.complete();
     });
     // Таймер статистики здесь НЕ заводится: его завёл сеттер `_runningEngine`
     // выше. Второе место завода — это ровно то, чего мы избавились: одно из
@@ -7731,6 +7887,10 @@ del "%~f0"
   }
 
   Future<void> _switchServer(ParsedServer newServer, {bool verified = false}) async {
+    if (_singboxRejected.contains(newServer)) {
+      _appendLog(tp('log.singboxRejectedPick', {'name': newServer.name}));
+      return;
+    }
     _reattaching = false;
     setState(() => _selectedServer = newServer);
     _rememberSelection();
@@ -8859,9 +9019,11 @@ del "%~f0"
   // значит участвуют все.
   List<ParsedServer> _autoSelectCandidates() {
     final filter = _settings.autoSelectFilter.trim().toLowerCase();
-    var list = filter.isEmpty
-        ? List<ParsedServer>.from(_servers)
-        : _servers.where((s) => s.name.toLowerCase().contains(filter)).toList();
+    var list = _servers
+        .where((s) =>
+            !_singboxRejected.contains(s) &&
+            (filter.isEmpty || s.name.toLowerCase().contains(filter)))
+        .toList();
     // Избранные первыми — важно ДО применения лимита: иначе лимит мог бы
     // отрезать как раз те серверы, которые пользователь пометил звёздочкой.
     if (_settings.autoSelectFavFirst && _favorites.isNotEmpty) {
@@ -9221,7 +9383,10 @@ del "%~f0"
   /// берём первый, через который запрос прошёл. Никто не прошёл — null.
   Future<ParsedServer?> _findWorkingServer(ParsedServer? current, int seq) async {
     final others = _servers
-        .where((s) => !identical(s, current) && !_unhealthy.contains(s.name))
+        .where((s) =>
+            !identical(s, current) &&
+            !_unhealthy.contains(s.name) &&
+            !_singboxRejected.contains(s))
         .toList()
       ..sort((a, b) {
         final la = _latencyMs[a.outbound['tag']];
