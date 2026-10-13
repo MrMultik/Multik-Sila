@@ -19,7 +19,7 @@ param(
   # arm64 покрывает практически все современные телефоны; полный список нужен
   # для раздачи и для эмулятора (x86_64).
   [string]$Target = "android/arm64,android/arm,android/amd64",
-  # Xray 26.9.30 требует Go 1.27 (go.mod: go 1.27). Системный Go на машине -
+  # Xray 26.10.10 требует Go 1.27 (go.mod: go 1.27). Системный Go на машине -
   # 1.26.5, поэтому 1.27.1 лежит отдельно (go.dev, 02.10.2026) и берётся
   # только здесь. gomobile/gobind надо пересобрать им же (go install ниже).
   [string]$Go = "C:\dev\go1.27.1\go\bin"
@@ -53,7 +53,7 @@ if (-not (Test-Path "$((go env GOPATH))\bin\gomobile.exe")) {
 #   link: invalid reference to os.checkPidfdOnce
 # Версия ядра проставляется здесь же: без неё оно отвечает "unknown", а экран
 # "О программе" её показывает.
-$ld = "-X github.com/sagernet/sing-box/constant.Version=1.14.2 " +
+$ld = "-X github.com/sagernet/sing-box/constant.Version=1.14.3 " +
       "-X internal/godebug.defaultGODEBUG=multipathtcp=0 -s -w -buildid= -checklinkname=0"
 
 # with_gvisor - сетевой стек для TUN, with_quic - Hysteria2/TUIC и QUIC-транспорты,
