@@ -1879,6 +1879,10 @@ const Map<String, Map<String, String>> _strings = {
     'ru': 'Сервер «{name}» не работает: sing-box его не принимает (причина — выше в журнале)',
     'en': 'Server "{name}" cannot work: sing-box does not accept it (the reason is above in the log)',
   },
+  'log.singboxRejectedProbe': {
+    'ru': 'Сервер «{name}» пропущен в замере — sing-box его не принимает: {reason}',
+    'en': 'Server "{name}" skipped in the latency test — sing-box does not accept it: {reason}',
+  },
   'log.xrayRejectedPick': {
     'ru': 'Сервер «{name}» не работает: Xray его не принимает (причина — выше в журнале)',
     'en': 'Server "{name}" cannot work: Xray does not accept it (the reason is above in the log)',

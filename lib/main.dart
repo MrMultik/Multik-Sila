@@ -3036,8 +3036,11 @@ class _CoreControlPageState extends State<CoreControlPage> with WindowListener, 
   /// то есть проверяет не «порт открыт», а «наружу выходит».
   ///
   /// Трафику даётся [_trafficCheckTimeout]. Не прошёл — в режиме «Авто»
-  /// сразу уходим на следующий сервер (по задержке), и так по цепочке, пока
-  /// не найдётся рабочий или не кончатся серверы. Раньше здесь только писали
+  /// сразу уходим на рабочий сервер: его ищет [_findWorkingServer], проверяя
+  /// текущий и следующие по замеру одновременно. Цепочка «следующий по
+  /// задержке, пока не найдётся рабочий» (_switchAwayFromUnhealthy) осталась
+  /// только запасным путём — когда проверка началась посреди старта или
+  /// остановки (`_busy`/`_stopRequested`). Раньше здесь только писали
   /// «наружу не выходит», а уводила с мёртвого сервера периодическая проверка
   /// — после двух провалов, то есть через минуту с лишним; пользователь
   /// попросил (01.10.2026): «подключился, пошла проверка, трафик за 5 секунд
@@ -6715,7 +6718,10 @@ del "%~f0"
 
   // Резолвим адреса прокси-серверов заранее, на этапе генерации конфига:
   // когда TUN уже поднят, спрашивать DNS поздно — запрос сам поедет в туннель.
-  // Нужно для bypass-правила по IP (см. _writeConfig).
+  // Нужно для bypass-правила по IP (см. _writeConfig). Только Windows под TUN:
+  // на Android приложение исключено из своего VPN, и страховочные адреса там
+  // не собираются вовсе (с 09.10.2026 — на 1209 серверах это стоило десятков
+  // секунд сборки конфига).
   Future<List<String>> _resolveToCidrs(Iterable<String> hosts) async {
     final cidrs = <String>{};
     // Разом, а не по одному (см. _bakeServerIps).
@@ -8319,7 +8325,11 @@ del "%~f0"
   /// false — пробник не поднялся; тогда меряем рукопожатием, как раньше.
   Future<bool> _testLatenciesViaProbe() async {
     const probeApiPort = 17391;
-    final singbox = _servers.where((s) => s.engine == 'singbox').toList();
+    // Отвергнутых sing-box в пробник не берём: один такой сервер роняет весь
+    // пробник, и замер молча уходил бы в рукопожатие.
+    final singbox = _servers
+        .where((s) => s.engine == 'singbox' && !_singboxRejected.contains(s))
+        .toList();
     final xray = _servers.where((s) => s.engine == 'xray').toList();
     final names = {for (final s in _servers) s.outbound['tag'] as String: s.name};
 
@@ -8398,6 +8408,17 @@ del "%~f0"
           // выкидываем его и пробуем снова, как служба с мостами.
           final rejection = hasXray ? xrayConfigRejection(message) : null;
           if (rejection == null) {
+            // То же с sing-box: `initialize outbound[N]` — позиция в
+            // outbounds пробника, где sing-box-серверы идут первыми.
+            final singboxRejection = singboxOutboundRejection(message);
+            if (singboxRejection != null && singboxRejection.index < singbox.length) {
+              final server = singbox.removeAt(singboxRejection.index);
+              if (_singboxRejected.add(server)) {
+                _appendLog(tp('log.singboxRejectedProbe',
+                    {'name': server.name, 'reason': singboxRejection.reason}));
+              }
+              continue;
+            }
             _appendLog(tp('log.probeFailed', {'e': message}));
             return false;
           }
@@ -8691,7 +8712,11 @@ del "%~f0"
   Future<void> _testLatenciesWarm(List<ParsedServer> servers) async {
     const probePort = 17390;
     const probeApiPort = 17391;
-    final singbox = servers.where((s) => s.engine == 'singbox').toList();
+    // Отвергнутый sing-box сервер уронил бы пробник целиком (см.
+    // _testSingboxLatencies).
+    final singbox = servers
+        .where((s) => s.engine == 'singbox' && !_singboxRejected.contains(s))
+        .toList();
     final xray = servers.where((s) => s.engine == 'xray').toList();
 
     // Xray-серверы и так меряются по прогретому соединению — переиспользуем.
@@ -8767,6 +8792,11 @@ del "%~f0"
   Future<void> _testSingboxLatencies(List<ParsedServer> servers) async {
     const probePort = 17390;
     const probeApiPort = 17391;
+    // Сервер, который sing-box уже отверг (_rejectSingboxOutbound), в пробник
+    // не берём: один такой outbound роняет весь процесс, и без замера
+    // остались бы все sing-box-серверы.
+    servers = servers.where((s) => !_singboxRejected.contains(s)).toList();
+    if (servers.isEmpty) return;
     final probeConfigPath = '$_workDir${Platform.pathSeparator}singbox_probe.json';
     final tags = servers.map((s) => s.outbound['tag'] as String).toList();
     // Для журнала — имя, а не тег: «srv_17» человеку ничего не говорит.
@@ -9532,7 +9562,9 @@ del "%~f0"
       if (stale()) return null;
       // Длинный поиск — видно, что он идёт, а не завис.
       if (++batches % 3 == 0 && offset < others.length) {
-        _appendLog(tp('log.raceProgress', {'n': offset + 1, 'total': others.length + 1}));
+        final withCurrent = current != null ? 1 : 0;
+        _appendLog(tp('log.raceProgress',
+            {'n': offset + withCurrent, 'total': others.length + withCurrent}));
       }
     }
     return null;
@@ -9566,9 +9598,12 @@ del "%~f0"
 
     // Кандидаты — всё, что ещё не завалило проверку, лучший по измеренной
     // задержке первым. Неизмеренные уходят в конец: про них ничего не
-    // известно, но они всё же лучше заведомо плохого.
-    final candidates =
-        _servers.where((s) => !_unhealthy.contains(s.name)).toList()
+    // известно, но они всё же лучше заведомо плохого. Отвергнутых sing-box
+    // нет и здесь: _switchServer их не примет, и проверка выбирала бы один
+    // и тот же такой сервер снова и снова, оставаясь на мёртвом.
+    final candidates = _servers
+        .where((s) => !_unhealthy.contains(s.name) && !_singboxRejected.contains(s))
+        .toList()
           ..sort((a, b) {
             final la = _latencyMs[a.outbound['tag']];
             final lb = _latencyMs[b.outbound['tag']];
@@ -13800,8 +13835,9 @@ List<RuleSetSpec> ruleSetsWanted(AppSettings st, RoutingMode mode, {required boo
     // пустым и объявлен устаревшим, а в 1.16 его уберут — и конфиг с ним
     // перестанет приниматься. Автообновление ядра проверяет конфиг перед
     // подменой, так что 1.16 просто не встал бы, и приложение застряло бы
-    // на старом ядре. Обе версии живут одновременно: Windows на 1.14.2,
-    // ядро Android собрано из 1.13.16 (mobile/go.mod).
+    // на старом ядре. Сейчас и Windows, и Android на 1.14.3 (mobile/go.mod),
+    // но ядро Windows обновляется само, поэтому версию спрашиваем у ядра
+    // (_singboxNeedsIndependentCache), а не помним в коде.
     if (st.dnsFakeIp && input.needsIndependentCache)
       "independent_cache": true,
     if (st.dnsClientSubnet.trim().isNotEmpty)
