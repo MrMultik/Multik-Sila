@@ -148,12 +148,38 @@ void main() {
       final process = _indexOf(rules, (r) => r.containsKey('process_path'));
       final servers = _indexOf(rules, (r) => r.containsKey('ip_cidr') && r.containsKey('port'));
       final quic = _indexOf(rules, (r) => r['protocol'] == 'quic');
-      expect(sniff, 0);
+      expect(sniff, 1);
       expect(process, greaterThan(sniff));
       expect(servers, greaterThan(process));
       expect(quic, greaterThan(servers));
       expect(rules[servers]['port'], [443, 13674, 25025, 25783]);
       expect(rules[process]['outbound'], 'direct');
+    });
+
+    // TUN decides a reject before the connection exists only up to the first
+    // sniff rule (pre-match in sing-box route.go). After it the TCP handshake
+    // is already done, the reject arrives as a reset and the browser shows
+    // ERR_CONNECTION_RESET instead of falling back to IPv4 (Chrome resolves
+    // over its own DoH and gets AAAA past our IPv4-only DNS).
+    test('with IPv4 only, IPv6 TCP is refused before sniff, DNS and the LAN excepted', () {
+      final first = rules.first;
+      expect(first['type'], 'logical');
+      expect(first['mode'], 'and');
+      expect(first['action'], 'reject');
+      expect(first['rules'], [
+        {'ip_version': 6, 'network': 'tcp'},
+        {'ip_is_private': true, 'invert': true},
+        {'port': 53, 'invert': true},
+      ]);
+      expect(rules[1]['action'], 'sniff');
+      // The general IPv6 reject (UDP, regular mode) stays where it was.
+      expect(rules.where((r) => r['ip_version'] == 6 && r['action'] == 'reject'), hasLength(1));
+
+      final dual = _rules(buildSingboxConfig(
+              _input(settings: AppSettings()..dnsStrategy = 'prefer_ipv4'))
+          .config);
+      expect(dual.first['action'], 'sniff');
+      expect(dual.any((r) => r['type'] == 'logical'), isFalse);
     });
 
     test('ads are rejected before Russian sites go direct', () {
@@ -257,6 +283,11 @@ void main() {
 
     test('no process rule (it would make the router look up every connection)', () {
       expect(_rules(c).any((r) => r.containsKey('process_path')), isFalse);
+    });
+
+    test('IPv6 TCP is refused before sniff here too', () {
+      expect(_rules(c).first['type'], 'logical');
+      expect(_rules(c)[1]['action'], 'sniff');
     });
 
     test('Russian domains resolve directly, with no DoH server added', () {

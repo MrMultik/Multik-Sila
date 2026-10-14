@@ -13632,7 +13632,36 @@ List<RuleSetSpec> ruleSetsWanted(AppSettings st, RoutingMode mode, {required boo
   // `reject` отвечает отказом сразу, и Happy Eyeballs честно переключается на
   // IPv4. Правило действует ТОЛЬКО в режиме «Только IPv4»: человек уже сказал,
   // что IPv6 ему не нужен, — а в остальных режимах трогать его нельзя.
+  //
+  // «Сразу» для TCP под TUN — только правилом ДО sniff (tunIpv6TcpReject
+  // ниже); это, в splitRules, ловит остальное и обычный режим.
   final rejectIpv6 = st.dnsStrategy == 'ipv4_only';
+
+  // TCP по IPv6 под TUN — отказ на первом же SYN, а не после рукопожатия.
+  //
+  // Решения «отказать» TUN принимает ещё до соединения (pre-match в
+  // route.go sing-box): ответит RST на SYN, и браузер за миллисекунды уйдёт
+  // на IPv4. Но pre-match для TCP останавливается на первом `sniff` — sniff
+  // невозможен без соединения, — а sniff у нас первое правило. Отказ из
+  // splitRules срабатывал уже на установленном соединении: браузер видел
+  // ERR_CONNECTION_RESET и на IPv4 не переходил (пользователь, 14.10.2026:
+  // «даже поиск в google не работает»). Chrome узнаёт адреса сам, через
+  // DoH к dns.google, и получает AAAA мимо нашего DNS «только IPv4»; в
+  // журнале ядра у пользователя — тысячи соединений Chrome на IPv6 Google и
+  // Cloudflare, ни одно не дошло дальше поиска процесса.
+  //
+  // Порт 53 и частные адреса не трогаем — как и раньше, их решают правила
+  // ниже (hijack-dns и «локальная сеть напрямую»).
+  final tunIpv6TcpReject = <String, dynamic>{
+    "type": "logical",
+    "mode": "and",
+    "rules": [
+      {"ip_version": 6, "network": "tcp"},
+      {"ip_is_private": true, "invert": true},
+      {"port": 53, "invert": true},
+    ],
+    "action": "reject",
+  };
 
   List<Map<String, dynamic>> splitRules() => [
         {"ip_is_private": true, "outbound": "direct"},
@@ -14050,6 +14079,9 @@ List<RuleSetSpec> ruleSetsWanted(AppSettings st, RoutingMode mode, {required boo
     config["route"] = {
       if (ruleSetDecls.isNotEmpty) "rule_set": ruleSetDecls,
       "rules": [
+        // Выше sniff — иначе отказ приходит после рукопожатия (см.
+        // tunIpv6TcpReject).
+        if (rejectIpv6) tunIpv6TcpReject,
         // TUN отдаёт роутеру голый IP — без sniff доменные правила (geosite,
         // реклама) применять просто не к чему, домен берётся из TLS SNI.
         {"action": "sniff"},
