@@ -7369,9 +7369,22 @@ del "%~f0"
     for (final s in _servers) {
       if (s.engine == 'singbox' && s.outbound['tag'] == tag) server = s;
     }
-    if (server == null || !_singboxRejected.add(server)) return false;
-    _appendLog(tp('log.singboxRejected', {'name': server.name, 'reason': rejection.reason}));
-    if (mounted) setState(() => _latencyMs[tag!] = null);
+    if (server == null) return false;
+    return _markSingboxRejected(server, 'log.singboxRejected', rejection.reason);
+  }
+
+  /// Заносит [server] в отвергнутые sing-box ([_singboxRejected]): в конфиг
+  /// и пробники он больше не попадает, его цифра задержки стирается, а если
+  /// он выбран — выбор уходит на лучший из оставшихся. Общее для отказа
+  /// основного ядра и пробников: ядро у них одно и то же (на Windows пробник
+  /// — копия того же файла, на Android — та же библиотека), и отвергнутый
+  /// пробником сервер не взяло бы и основное.
+  /// false — сервер уже был среди отвергнутых.
+  bool _markSingboxRejected(ParsedServer server, String logKey, String reason) {
+    if (!_singboxRejected.add(server)) return false;
+    _appendLog(tp(logKey, {'name': server.name, 'reason': reason}));
+    final tag = server.outbound['tag'] as String;
+    if (mounted) setState(() => _latencyMs[tag] = null);
     if (identical(server, _selectedServer)) {
       // Выбранный сервер ядру не отдать — берём лучший из оставшихся.
       ParsedServer? best;
@@ -7423,8 +7436,12 @@ del "%~f0"
   /// Пробное ядро — единственный, кто знает настоящую причину неудачи. Дартовой
   /// стороне достаётся общее «не удалось соединиться», и по нему нельзя
   /// отличить «сервер выключен» от «ключ REALITY больше не тот».
-  void _watchProbeErrors(Process probe, String label) {
+  ///
+  /// [output] получает весь вывод целиком — по нему _startSingboxProbe ищет
+  /// отвергнутый сервер. Итог завершается, когда процесс закрыл оба потока.
+  Future<void> _watchProbeErrors(Process probe, String label, {StringBuffer? output}) {
     void handle(String data) {
+      output?.write(data);
       for (final line in data.split('\n')) {
         final text = line.trim();
         if (text.isEmpty) continue;
@@ -7435,8 +7452,10 @@ del "%~f0"
       }
     }
 
-    probe.stdout.transform(const SystemEncoding().decoder).listen(handle);
-    probe.stderr.transform(const SystemEncoding().decoder).listen(handle);
+    return Future.wait([
+      probe.stdout.transform(const SystemEncoding().decoder).listen(handle).asFuture<void>(),
+      probe.stderr.transform(const SystemEncoding().decoder).listen(handle).asFuture<void>(),
+    ]).then<void>((_) {}, onError: (_) {});
   }
 
   /// DNS и маршрутизация для ПРОБНОГО ядра.
@@ -8412,11 +8431,8 @@ del "%~f0"
             // outbounds пробника, где sing-box-серверы идут первыми.
             final singboxRejection = singboxOutboundRejection(message);
             if (singboxRejection != null && singboxRejection.index < singbox.length) {
-              final server = singbox.removeAt(singboxRejection.index);
-              if (_singboxRejected.add(server)) {
-                _appendLog(tp('log.singboxRejectedProbe',
-                    {'name': server.name, 'reason': singboxRejection.reason}));
-              }
+              _markSingboxRejected(singbox.removeAt(singboxRejection.index),
+                  'log.singboxRejectedProbe', singboxRejection.reason);
               continue;
             }
             _appendLog(tp('log.probeFailed', {'e': message}));
@@ -8710,10 +8726,8 @@ del "%~f0"
   // Реализовано через один пробный sing-box со всеми серверами в селекторе:
   // переключаем селектор через Clash API и меряем по уже открытому каналу.
   Future<void> _testLatenciesWarm(List<ParsedServer> servers) async {
-    const probePort = 17390;
-    const probeApiPort = 17391;
-    // Отвергнутый sing-box сервер уронил бы пробник целиком (см.
-    // _testSingboxLatencies).
+    // Уже отвергнутых sing-box не берём: каждый стоил бы перезапуска
+    // пробника (_startSingboxProbe).
     final singbox = servers
         .where((s) => s.engine == 'singbox' && !_singboxRejected.contains(s))
         .toList();
@@ -8723,46 +8737,22 @@ del "%~f0"
     if (xray.isNotEmpty) await _testXrayLatencies(xray);
     if (singbox.isEmpty) return;
 
-    final probeConfigPath = '$_workDir${Platform.pathSeparator}singbox_probe.json';
-    final tags = singbox.map((s) => s.outbound['tag'] as String).toList();
-    final config = {
-      "log": {"level": "warn"},
-      "experimental": {
-        "clash_api": {"external_controller": "127.0.0.1:$probeApiPort"}
-      },
-      "inbounds": [
-        {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": probePort}
-      ],
-      "outbounds": [
-        ...singbox.map((s) => s.outbound),
-        {"type": "selector", "tag": "probe", "outbounds": tags, "default": tags.first},
-        // direct нужен резолверу: без него `dns-direct` не к чему привязать.
-        {"type": "direct", "tag": "direct"},
-      ],
-      ..._probeDnsAndRoute(),
-    };
-    await File(probeConfigPath).writeAsString(const JsonEncoder.withIndent('  ').convert(config));
-
     Process? probe;
     try {
-      probe = await Process.start(
-          await _ensureProbeCore(), ['run', '-c', probeConfigPath]);
-      _probeProcesses.add(probe);
-      _watchProbeErrors(probe, 'sing-box');
-      if (!await _waitForPort(probeApiPort)) {
-        _appendLog(tp('log.probePortBusy', {'port': probeApiPort}));
-        return;
-      }
+      // Отвергнутые при запуске убираются из singbox — меряем оставшихся.
+      probe = await _startSingboxProbe(singbox, 'log.probePortBusy');
+      if (probe == null) return;
       final timeout = Duration(milliseconds: _settings.latencyTimeoutMs + 1000);
       for (final server in singbox) {
         final tag = server.outbound['tag'] as String;
         try {
           await http
-              .put(Uri.parse('http://127.0.0.1:$probeApiPort/proxies/probe'),
+              .put(Uri.parse('http://127.0.0.1:$_singboxProbeApiPort/proxies/probe'),
                   body: jsonEncode({'name': tag}))
               .timeout(const Duration(seconds: 4));
 
-          final client = HttpClient()..findProxy = (_) => 'PROXY 127.0.0.1:$probePort';
+          final client = HttpClient()
+            ..findProxy = (_) => 'PROXY 127.0.0.1:$_singboxProbePort';
           try {
             // Первый запрос поднимает канал и в замер НЕ входит.
             final warm = await client.getUrl(Uri.parse(_settings.latencyUrl)).timeout(timeout);
@@ -8789,59 +8779,95 @@ del "%~f0"
     }
   }
 
+  /// Пробный sing-box для замера на Windows: все [servers] в селекторе
+  /// `probe`, вход `mixed` на [_singboxProbePort], Clash API на
+  /// [_singboxProbeApiPort]. Возвращает процесс, когда Clash API уже
+  /// принимает соединения; null — не поднялся (причина в журнале) или мерить
+  /// некого.
+  ///
+  /// Сервер, на котором ядро не стартует (`initialize outbound[N]`),
+  /// убирается из [servers] ([_markSingboxRejected]), и пробник поднимается
+  /// заново без него — как основное ядро (_rejectSingboxOutbound) и пробник
+  /// на Android. Раньше один такой сервер ронял процесс, и без замера
+  /// оставались все sing-box-серверы.
+  Future<Process?> _startSingboxProbe(List<ParsedServer> servers, String portBusyKey) async {
+    final probeConfigPath = '$_workDir${Platform.pathSeparator}singbox_probe.json';
+    for (var attempt = 0; attempt < 64 && servers.isNotEmpty && !_cancelLatency; attempt++) {
+      final tags = servers.map((s) => s.outbound['tag'] as String).toList();
+      final config = {
+        "log": {"level": "warn"},
+        "experimental": {
+          "clash_api": {"external_controller": "127.0.0.1:$_singboxProbeApiPort"}
+        },
+        "inbounds": [
+          {
+            "type": "mixed",
+            "tag": "mixed-in",
+            "listen": "127.0.0.1",
+            "listen_port": _singboxProbePort,
+          }
+        ],
+        "outbounds": [
+          ...servers.map((s) => s.outbound),
+          {"type": "selector", "tag": "probe", "outbounds": tags, "default": tags.first},
+          // direct нужен резолверу: без него `dns-direct` не к чему привязать.
+          {"type": "direct", "tag": "direct"},
+        ],
+        ..._probeDnsAndRoute(),
+      };
+      await File(probeConfigPath)
+          .writeAsString(const JsonEncoder.withIndent('  ').convert(config));
+
+      final probe = await Process.start(await _ensureProbeCore(), ['run', '-c', probeConfigPath]);
+      _probeProcesses.add(probe);
+      final output = StringBuffer();
+      final outputDone = _watchProbeErrors(probe, 'sing-box', output: output);
+      // Отказ виден по выходу процесса — ждать порт все 5 с незачем.
+      final ready = await Future.any([
+        _waitForPort(_singboxProbeApiPort),
+        probe.exitCode.then((_) => false),
+      ]);
+      if (ready) return probe;
+      probe.kill();
+      _probeProcesses.remove(probe);
+      if (_cancelLatency) return null;
+      // Вывод дочитываем: процесс уже вышел, а поток мог отдать не всё.
+      await outputDone.timeout(const Duration(seconds: 2), onTimeout: () {});
+      final rejection = singboxOutboundRejection(output.toString());
+      // Номер — позиция в outbounds пробника, серверы там идут первыми.
+      if (rejection == null || rejection.index >= servers.length) {
+        _appendLog(tp(portBusyKey, {'port': _singboxProbeApiPort}));
+        return null;
+      }
+      _markSingboxRejected(
+          servers.removeAt(rejection.index), 'log.singboxRejectedProbe', rejection.reason);
+    }
+    return null;
+  }
+
+  static const int _singboxProbePort = 17390;
+  static const int _singboxProbeApiPort = 17391;
+
   Future<void> _testSingboxLatencies(List<ParsedServer> servers) async {
-    const probePort = 17390;
-    const probeApiPort = 17391;
-    // Сервер, который sing-box уже отверг (_rejectSingboxOutbound), в пробник
-    // не берём: один такой outbound роняет весь процесс, и без замера
-    // остались бы все sing-box-серверы.
+    // Уже отвергнутых sing-box не берём: каждый стоил бы перезапуска
+    // пробника (_startSingboxProbe).
     servers = servers.where((s) => !_singboxRejected.contains(s)).toList();
     if (servers.isEmpty) return;
-    final probeConfigPath = '$_workDir${Platform.pathSeparator}singbox_probe.json';
-    final tags = servers.map((s) => s.outbound['tag'] as String).toList();
-    // Для журнала — имя, а не тег: «srv_17» человеку ничего не говорит.
-    final nameOf = {for (final s in servers) s.outbound['tag'] as String: s.name};
-
-    final selector = {
-      "type": "selector",
-      "tag": "probe",
-      "outbounds": tags,
-      "default": tags.first,
-    };
-    final config = {
-      "log": {"level": "warn"},
-      "experimental": {
-        "clash_api": {"external_controller": "127.0.0.1:$probeApiPort"}
-      },
-      "inbounds": [
-        {"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": probePort}
-      ],
-      "outbounds": [
-        ...servers.map((s) => s.outbound),
-        selector,
-        // direct нужен резолверу: без него `dns-direct` не к чему привязать.
-        {"type": "direct", "tag": "direct"},
-      ],
-      ..._probeDnsAndRoute(),
-    };
-    await File(probeConfigPath).writeAsString(const JsonEncoder.withIndent('  ').convert(config));
 
     Process? probe;
     try {
-      probe = await Process.start(
-          await _ensureProbeCore(), ['run', '-c', probeConfigPath]);
-      _probeProcesses.add(probe);
-      _watchProbeErrors(probe, 'sing-box');
-      if (!await _waitForPort(probeApiPort)) {
-        _appendLog(tp('log.probeSingboxPortBusy', {'port': probeApiPort}));
-        return;
-      }
+      // Отвергнутые при запуске убираются из servers — меряем оставшихся.
+      probe = await _startSingboxProbe(servers, 'log.probeSingboxPortBusy');
+      if (probe == null) return;
+      final tags = servers.map((s) => s.outbound['tag'] as String).toList();
+      // Для журнала — имя, а не тег: «srv_17» человеку ничего не говорит.
+      final nameOf = {for (final s in servers) s.outbound['tag'] as String: s.name};
 
       final testUrl = _settings.latencyUrl;
       final timeoutMs = _settings.latencyTimeoutMs;
       final httpTimeout = Duration(milliseconds: timeoutMs + 1000);
-      Uri delayUri(String tag) => Uri.parse(
-          'http://127.0.0.1:$probeApiPort/proxies/$tag/delay?url=${Uri.encodeComponent(testUrl)}&timeout=$timeoutMs');
+      Uri delayUri(String tag) => Uri.parse('http://127.0.0.1:$_singboxProbeApiPort/proxies/$tag/delay'
+          '?url=${Uri.encodeComponent(testUrl)}&timeout=$timeoutMs');
       await _runLimited(tags, (tag) async {
         try {
           // Clash-эндпоинт /delay на каждый вызов открывает новое соединение,
